@@ -38,6 +38,7 @@ BR_POLICY_LOSS_PAUSE_SECONDS = 2 * 60 * 60
 SPREAD_WATCH_RATIO = 0.25
 SPREAD_HEAVY_RATIO = 0.40
 SPREAD_DOMINATES_RATIO = 1.00
+DEFAULT_MAX_FULL_STOP_RUB = 4_000.0
 
 
 @dataclass
@@ -100,6 +101,18 @@ class Portfolio:
         return self.initial_capital + self.closed_net
 
 
+@dataclass
+class SizingDecision:
+    qty: int
+    margin_qty: int
+    risk_qty: int | None
+    gross_stop_per_contract_rub: float
+    round_turn_fee_per_contract_rub: float
+    full_stop_per_contract_rub: float
+    full_stop_rub: float
+    reason: str
+
+
 def position_margin(spec: Spec, direction: Direction | str, qty: int) -> float:
     per_contract = spec.margin_buy if direction == "long" else spec.margin_sell
     if per_contract <= 0:
@@ -142,17 +155,58 @@ def has_roll_family_conflict(states: list[State], spec: Spec, family: str, roll_
     return None
 
 
-def paper_qty(portfolio: Portfolio, states: list[State], spec: Spec, direction: Direction | str) -> int:
+def paper_sizing(
+    portfolio: Portfolio,
+    states: list[State],
+    spec: Spec,
+    profile: Profile,
+    direction: Direction | str,
+    side_fee: float,
+    max_full_stop_rub: float,
+) -> SizingDecision:
     per_contract = spec.margin_buy if direction == "long" else spec.margin_sell
     if per_contract <= 0:
         per_contract = max(spec.margin_buy, spec.margin_sell, 0.0)
     if per_contract <= 0:
-        return 1
-    max_total_margin = portfolio.equity * portfolio.max_total_margin_pct
-    free_margin = max(0.0, max_total_margin - used_margin(states))
-    per_position_limit = portfolio.equity * portfolio.max_position_margin_pct
-    budget = min(free_margin, per_position_limit)
-    return max(0, int(budget // per_contract))
+        margin_qty = 1
+    else:
+        max_total_margin = portfolio.equity * portfolio.max_total_margin_pct
+        free_margin = max(0.0, max_total_margin - used_margin(states))
+        per_position_limit = portfolio.equity * portfolio.max_position_margin_pct
+        budget = min(free_margin, per_position_limit)
+        margin_qty = max(0, int(budget // per_contract))
+
+    gross_stop_per_contract = max(0.0, profile.stop_ticks * spec.step_price)
+    round_turn_fee_per_contract = max(0.0, 2 * side_fee)
+    full_stop_per_contract = gross_stop_per_contract + round_turn_fee_per_contract
+    risk_qty = None
+    if max_full_stop_rub > 0 and full_stop_per_contract > 0:
+        risk_qty = int(max_full_stop_rub // full_stop_per_contract)
+
+    qty = margin_qty
+    if risk_qty is not None:
+        qty = min(qty, risk_qty)
+    qty = max(0, qty)
+    full_stop_rub = qty * full_stop_per_contract
+    reason = (
+        f"sizing margin_qty={margin_qty} risk_qty={risk_qty if risk_qty is not None else '-'} "
+        f"full_stop_1lot={full_stop_per_contract:.2f} full_stop={full_stop_rub:.2f} "
+        f"max_full_stop={max_full_stop_rub:.0f}"
+    )
+    return SizingDecision(
+        qty=qty,
+        margin_qty=margin_qty,
+        risk_qty=risk_qty,
+        gross_stop_per_contract_rub=gross_stop_per_contract,
+        round_turn_fee_per_contract_rub=round_turn_fee_per_contract,
+        full_stop_per_contract_rub=full_stop_per_contract,
+        full_stop_rub=full_stop_rub,
+        reason=reason,
+    )
+
+
+def full_stop_risk_rub(profile: Profile, spec: Spec, side_fee: float, qty: int) -> float:
+    return max(0.0, (profile.stop_ticks * spec.step_price + 2 * side_fee) * qty)
 
 
 def fee_ticks(side_fee: float, spec: Spec) -> float:
@@ -1193,6 +1247,8 @@ def write_open_positions(path: Path, states: list[State]) -> None:
                 "mark_price": mark_price,
                 "mark_source": mark_source,
                 "stop_price": st.position.stop_price,
+                "full_stop_risk_rub": round(full_stop_risk_rub(st.profile, st.spec, st.side_fee, st.position.qty), 2),
+                "full_stop_gross_rub": round(st.profile.stop_ticks * st.spec.step_price * st.position.qty, 2),
                 "margin_rub": round(position_margin(st.spec, st.position.direction, st.position.qty), 2),
                 "opened_at": st.position.opened_at,
             }
@@ -1351,6 +1407,7 @@ def main() -> None:
     parser.add_argument("--paper-capital", type=float, default=200_000.0)
     parser.add_argument("--max-total-margin-pct", type=float, default=0.80)
     parser.add_argument("--max-position-margin-pct", type=float, default=0.20)
+    parser.add_argument("--max-full-stop-rub", type=float, default=DEFAULT_MAX_FULL_STOP_RUB)
     parser.add_argument("--stop-limit-emergency-ticks", type=float, default=2.0)
     parser.add_argument("--actual-exit-model", choices=["stream_stoplimit", "candle_like"], default="stream_stoplimit")
     parser.add_argument("--stream-stale-sec", type=float, default=15.0)
@@ -1520,7 +1577,8 @@ def main() -> None:
             f"{now_str()} multi_paper start instruments={len(specs)} contours=2 "
             f"runtime_sec={args.runtime_sec} paper_capital={portfolio.initial_capital:.0f} "
             f"max_total_margin_pct={portfolio.max_total_margin_pct:.2f} "
-            f"max_position_margin_pct={portfolio.max_position_margin_pct:.2f}"
+            f"max_position_margin_pct={portfolio.max_position_margin_pct:.2f} "
+            f"max_full_stop_rub={float(args.max_full_stop_rub):.0f}"
         )
         started = time.monotonic()
         next_report = started + args.report_sec
@@ -1634,9 +1692,21 @@ def main() -> None:
                             if entry_price is None:
                                 st.last_reason = "book_filter no_executable_entry"
                                 continue
-                            qty = paper_qty(portfolio, states, spec, direction)
+                            sizing = paper_sizing(
+                                portfolio,
+                                states,
+                                spec,
+                                st.profile,
+                                direction,
+                                st.side_fee,
+                                float(args.max_full_stop_rub),
+                            )
+                            qty = sizing.qty
                             if qty < 1:
-                                st.last_reason = "capital_filter no_free_margin"
+                                if sizing.margin_qty < 1:
+                                    st.last_reason = f"capital_filter no_free_margin {sizing.reason}"
+                                else:
+                                    st.last_reason = f"risk_filter full_stop_gt_limit {sizing.reason}"
                                 continue
                             st.attempts += 1
                             st.position = open_position(direction, entry_price, qty, st.profile.stop_ticks, st.profile.trail_ticks, spec)
@@ -1649,7 +1719,8 @@ def main() -> None:
                             print(
                                 f"{now_str()} OPEN {contour} {spec.secid} {direction} qty={qty} "
                                 f"entry={entry_price:g} source={entry_source} stop={st.position.stop_price:g} "
-                                f"margin={position_margin(spec, direction, qty):.2f} {reason}",
+                                f"margin={position_margin(spec, direction, qty):.2f} "
+                                f"full_stop_risk={sizing.full_stop_rub:.2f} {sizing.reason} {reason}",
                                 flush=True,
                             )
                             write_open_positions(Path(args.open_positions_log), states)

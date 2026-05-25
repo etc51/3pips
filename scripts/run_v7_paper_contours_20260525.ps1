@@ -53,6 +53,7 @@ function Start-Portfolio {
         "--paper-capital", "800000",
         "--max-total-margin-pct", "0.80",
         "--max-position-margin-pct", "0.20",
+        "--max-full-stop-rub", "4000",
         "--stop-limit-emergency-ticks", "2",
         "--actual-exit-model", "candle_like",
         "--stream-stale-sec", "15",

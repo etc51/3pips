@@ -147,6 +147,8 @@ def human_reason(reason: object) -> str:
         return "комиссия к стопу в норме"
     if text.startswith("range_filter"):
         return "фильтр: мало движения"
+    if text.startswith("risk_filter"):
+        return "фильтр: полный стоп больше лимита ₽"
     if text.startswith("brq6_spread_filter"):
         return "BR: спред слишком большой к стопу"
     if text.startswith("brq6_loss_pause"):
@@ -167,7 +169,7 @@ def human_reason(reason: object) -> str:
         return "условия наблюдаются, входа нет"
     if text == "duplicate_filter ticker_already_open" or text == "duplicate_filter_ticker_already_open":
         return "позиция по тикеру уже открыта"
-    if text == "capital_filter no_free_margin":
+    if text.startswith("capital_filter no_free_margin"):
         return "не хватает свободного ГО"
     if text == "book_filter no_executable_entry":
         return "нет цены для входа в стакане"
@@ -838,7 +840,7 @@ HTML = r"""<!doctype html>
       else {
         posEl.innerHTML = '<div class="table-wrap"><table id="positionsTable"></table></div>';
         table(document.getElementById('positionsTable'), [
-          ["Контур","portfolio"], ["Режим","contour"], ["Тикер","ticker"], ["Напр.","direction"], ["Qty","qty"], ["ГО ₽","margin_rub",false,2], ["Entry","entry_price"], ["Last","last_price"], ["Mark","mark_price"], ["Stop","stop_price"], ["Тики","unrealized_ticks",true,2], ["Грязными ₽","gross_pnl_rub",true,2], ["Комиссия ₽","fees_rub",false,2], ["Сейчас ₽","unrealized_net_rub",true,2], ["Открыта","opened_at"]
+          ["Контур","portfolio"], ["Режим","contour"], ["Тикер","ticker"], ["Напр.","direction"], ["Qty","qty"], ["ГО ₽","margin_rub",false,2], ["Стоп ₽","full_stop_risk_rub",false,2], ["Entry","entry_price"], ["Last","last_price"], ["Mark","mark_price"], ["Stop","stop_price"], ["Тики","unrealized_ticks",true,2], ["Грязными ₽","gross_pnl_rub",true,2], ["Комиссия ₽","fees_rub",false,2], ["Сейчас ₽","unrealized_net_rub",true,2], ["Открыта","opened_at"]
         ], positions);
       }
       window.scrollTo(sx, sy);
