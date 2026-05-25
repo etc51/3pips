@@ -291,10 +291,10 @@ def signal(state: State, aggressive: bool) -> tuple[Direction | None, str]:
     )
     reason = f"p={state.last_price:g} vwap={vwap:g} mom={mom:.1f} trend={trend:.1f} vol={last_vol:.0f}/{avgv:.0f} book={bid_qty}/{ask_qty}"
     if long_ok:
-        return "long", reason
+        return "long", f"entry_signal long {reason}"
     if short_ok:
-        return "short", reason
-    return None, reason
+        return "short", f"entry_signal short {reason}"
+    return None, f"watch_conditions {reason}"
 
 
 def print_report(states: list[State], started: float) -> None:
@@ -910,104 +910,124 @@ def main() -> None:
             daemon=True,
         )
         poll_thread.start()
+
+        def handle_stream_response(response) -> None:
+            nonlocal next_report, next_snapshot
+            now = time.monotonic()
+            wall_now = time.time()
+            trading_enabled = (no_trade_before is None or wall_now >= no_trade_before) and (no_new_after is None or wall_now < no_new_after)
+            uid = ""
+            price = None
+            candle = None
+            orderbook = None
+            if response.last_price is not None:
+                uid = response.last_price.instrument_uid
+                price = quotation_to_float(response.last_price.price)
+            elif response.trade is not None:
+                uid = response.trade.instrument_uid
+                price = quotation_to_float(response.trade.price)
+            elif response.orderbook is not None:
+                uid = response.orderbook.instrument_uid
+                orderbook = response.orderbook
+            elif response.candle is not None:
+                uid = response.candle.instrument_uid
+                candle = response.candle
+            if uid not in by_uid:
+                return
+            last_stream_event[0] = time.monotonic()
+            spec = by_uid[uid]
+            with lock:
+                for contour in ["strict", "aggressive"]:
+                    st = state_by_uid[(uid, contour)]
+                    if price is not None:
+                        st.last_price = round_to_step(price, spec.min_step)
+                    if orderbook is not None:
+                        st.last_order_book = orderbook
+                    if candle is not None:
+                        st.candles.append(
+                            {
+                                "open": quotation_to_float(candle.open),
+                                "high": quotation_to_float(candle.high),
+                                "low": quotation_to_float(candle.low),
+                                "close": quotation_to_float(candle.close),
+                                "volume": int(candle.volume),
+                            }
+                        )
+                    if st.position is None and has_active_shadow(st):
+                        process_open_state_exit(st, args, portfolio, states, candle is not None)
+                        if has_active_shadow(st):
+                            continue
+                    if st.position is None and trading_enabled:
+                        if st.attempts >= st.profile.max_attempts:
+                            st.last_reason = "attempt_filter max_attempts_reached"
+                            continue
+                        if now < st.cooldown_until:
+                            st.last_reason = "cooldown_filter wait_after_close"
+                            continue
+                        if st.last_entry_candle_count == len(st.candles):
+                            st.last_reason = "candle_filter wait_new_candle"
+                            continue
+                        if has_open_ticker(states, spec.secid):
+                            st.last_reason = "duplicate_filter ticker_already_open"
+                            continue
+                        direction, reason = signal(st, contour == "aggressive")
+                        st.last_reason = reason
+                        if direction:
+                            entry_price, entry_source = executable_price(st, direction, "entry")
+                            if entry_price is None:
+                                st.last_reason = "book_filter no_executable_entry"
+                                continue
+                            qty = paper_qty(portfolio, states, spec, direction)
+                            if qty < 1:
+                                st.last_reason = "capital_filter no_free_margin"
+                                continue
+                            st.attempts += 1
+                            st.position = open_position(direction, entry_price, qty, st.profile.stop_ticks, st.profile.trail_ticks, spec)
+                            st.shadow_positions = {
+                                "stream_stoplimit": clone_position(st.position),
+                                "candle_like": clone_position(st.position),
+                            }
+                            st.shadow_closed = {}
+                            st.last_entry_candle_count = len(st.candles)
+                            print(
+                                f"{now_str()} OPEN {contour} {spec.secid} {direction} qty={qty} "
+                                f"entry={entry_price:g} source={entry_source} stop={st.position.stop_price:g} "
+                                f"margin={position_margin(spec, direction, qty):.2f} {reason}",
+                                flush=True,
+                            )
+                            write_open_positions(Path(args.open_positions_log), states)
+                    elif st.position is not None:
+                        trigger_override = round_to_step(float(st.candles[-1]["close"]), spec.min_step) if candle is not None else None
+                        process_open_state_exit(
+                            st,
+                            args,
+                            portfolio,
+                            states,
+                            candle is not None,
+                            actual_trigger_override=trigger_override,
+                            actual_trigger_source_override="closed_1m_candle" if candle is not None else None,
+                        )
+                if now >= next_report:
+                    print_report(states, started)
+                    print_portfolio_report(states, portfolio)
+                    next_report += args.report_sec
+                if now >= next_snapshot:
+                    write_microstructure_snapshot(Path(args.snapshot_log), states, trading_enabled)
+                    write_open_positions(Path(args.open_positions_log), states)
+                    next_snapshot += args.snapshot_sec
+
         try:
-            for response in client.market_data_stream.market_data_stream(make_stream_requests(specs, args.orderbook_depth)):
-                now = time.monotonic()
-                if now >= started + args.runtime_sec:
-                    break
-                wall_now = time.time()
-                trading_enabled = (no_trade_before is None or wall_now >= no_trade_before) and (no_new_after is None or wall_now < no_new_after)
-                uid = ""
-                price = None
-                candle = None
-                orderbook = None
-                if response.last_price is not None:
-                    uid = response.last_price.instrument_uid
-                    price = quotation_to_float(response.last_price.price)
-                elif response.trade is not None:
-                    uid = response.trade.instrument_uid
-                    price = quotation_to_float(response.trade.price)
-                elif response.orderbook is not None:
-                    uid = response.orderbook.instrument_uid
-                    orderbook = response.orderbook
-                elif response.candle is not None:
-                    uid = response.candle.instrument_uid
-                    candle = response.candle
-                if uid not in by_uid:
-                    continue
-                last_stream_event[0] = time.monotonic()
-                spec = by_uid[uid]
-                with lock:
-                    for contour in ["strict", "aggressive"]:
-                        st = state_by_uid[(uid, contour)]
-                        if price is not None:
-                            st.last_price = round_to_step(price, spec.min_step)
-                        if orderbook is not None:
-                            st.last_order_book = orderbook
-                        if candle is not None:
-                            st.candles.append(
-                                {
-                                    "open": quotation_to_float(candle.open),
-                                    "high": quotation_to_float(candle.high),
-                                    "low": quotation_to_float(candle.low),
-                                    "close": quotation_to_float(candle.close),
-                                    "volume": int(candle.volume),
-                                }
-                            )
-                        if st.position is None and has_active_shadow(st):
-                            process_open_state_exit(st, args, portfolio, states, candle is not None)
-                            if has_active_shadow(st):
-                                continue
-                        if st.position is None and trading_enabled and st.attempts < st.profile.max_attempts and now >= st.cooldown_until:
-                            if st.last_entry_candle_count == len(st.candles):
-                                continue
-                            if has_open_ticker(states, spec.secid):
-                                st.last_reason = "duplicate_filter ticker_already_open"
-                                continue
-                            direction, reason = signal(st, contour == "aggressive")
-                            st.last_reason = reason
-                            if direction:
-                                entry_price, entry_source = executable_price(st, direction, "entry")
-                                if entry_price is None:
-                                    st.last_reason = "book_filter no_executable_entry"
-                                    continue
-                                qty = paper_qty(portfolio, states, spec, direction)
-                                if qty < 1:
-                                    st.last_reason = "capital_filter no_free_margin"
-                                    continue
-                                st.attempts += 1
-                                st.position = open_position(direction, entry_price, qty, st.profile.stop_ticks, st.profile.trail_ticks, spec)
-                                st.shadow_positions = {
-                                    "stream_stoplimit": clone_position(st.position),
-                                    "candle_like": clone_position(st.position),
-                                }
-                                st.shadow_closed = {}
-                                st.last_entry_candle_count = len(st.candles)
-                                print(
-                                    f"{now_str()} OPEN {contour} {spec.secid} {direction} qty={qty} "
-                                    f"entry={entry_price:g} source={entry_source} stop={st.position.stop_price:g} "
-                                    f"margin={position_margin(spec, direction, qty):.2f} {reason}"
-                                )
-                                write_open_positions(Path(args.open_positions_log), states)
-                        elif st.position is not None:
-                            trigger_override = round_to_step(float(st.candles[-1]["close"]), spec.min_step) if candle is not None else None
-                            process_open_state_exit(
-                                st,
-                                args,
-                                portfolio,
-                                states,
-                                candle is not None,
-                                actual_trigger_override=trigger_override,
-                                actual_trigger_source_override="closed_1m_candle" if candle is not None else None,
-                            )
-                    if now >= next_report:
-                        print_report(states, started)
-                        print_portfolio_report(states, portfolio)
-                        next_report += args.report_sec
-                    if now >= next_snapshot:
-                        write_microstructure_snapshot(Path(args.snapshot_log), states, trading_enabled)
-                        write_open_positions(Path(args.open_positions_log), states)
-                        next_snapshot += args.snapshot_sec
+            while time.monotonic() < started + args.runtime_sec:
+                try:
+                    for response in client.market_data_stream.market_data_stream(make_stream_requests(specs, args.orderbook_depth)):
+                        if time.monotonic() >= started + args.runtime_sec:
+                            break
+                        handle_stream_response(response)
+                except Exception as exc:
+                    if time.monotonic() >= started + args.runtime_sec:
+                        break
+                    print(f"{now_str()} STREAM reconnect_after_error {type(exc).__name__}: {exc}", flush=True)
+                    time.sleep(3)
         finally:
             stop_event.set()
         print_report(states, started)

@@ -142,10 +142,28 @@ def human_reason(reason: object) -> str:
         return "фильтр: комиссия велика к стопу"
     if text.startswith("range_filter"):
         return "фильтр: мало движения"
-    if text.startswith("p="):
-        return "сигнал есть"
+    if text.startswith("entry_signal long"):
+        return "сигнал на вход: long"
+    if text.startswith("entry_signal short"):
+        return "сигнал на вход: short"
+    if text.startswith("watch_conditions") or text.startswith("p="):
+        return "условия наблюдаются, входа нет"
     if text == "duplicate_filter ticker_already_open" or text == "duplicate_filter_ticker_already_open":
         return "позиция по тикеру уже открыта"
+    if text == "capital_filter no_free_margin":
+        return "не хватает свободного ГО"
+    if text == "book_filter no_executable_entry":
+        return "нет цены для входа в стакане"
+    if text == "book_filter no_executable_exit":
+        return "нет цены для выхода в стакане"
+    if text == "attempt_filter max_attempts_reached":
+        return "лимит попыток по режиму исчерпан"
+    if text == "cooldown_filter wait_after_close":
+        return "пауза после закрытия"
+    if text == "candle_filter wait_new_candle":
+        return "ждём новую свечу"
+    if text == "time_gate":
+        return "торговля вне разрешённого времени"
     replacements = {
         "tbank_stream": "поток Т-Банка",
         "stream": "поток",
@@ -155,6 +173,17 @@ def human_reason(reason: object) -> str:
         "duplicate_filter ticker_already_open": "позиция по тикеру уже открыта",
         "duplicate_filter_ticker_already_open": "позиция по тикеру уже открыта",
         "duplicate_filter": "дубль заблокирован",
+        "capital_filter": "фильтр ГО",
+        "book_filter": "фильтр стакана",
+        "attempt_filter": "фильтр попыток",
+        "cooldown_filter": "пауза",
+        "candle_filter": "свеча",
+        "max_attempts_reached": "лимит попыток исчерпан",
+        "wait_after_close": "ждём после закрытия",
+        "wait_new_candle": "ждём новую свечу",
+        "no_free_margin": "не хватает свободного ГО",
+        "no_executable_entry": "нет цены для входа",
+        "no_executable_exit": "нет цены для выхода",
         "ticker_already_open": "позиция по тикеру уже открыта",
         "already_open": "уже открыта",
         "duplicate_position": "позиция уже открыта",
@@ -457,7 +486,7 @@ def build_state(base_dir: Path) -> dict:
                 score += 2
             if can_open is True or str(can_open).lower() == "true":
                 score += 1
-            if reason and not str(reason).startswith(("fee_filter", "range_filter", "warmup")):
+            if reason and str(reason).startswith("entry_signal"):
                 score += 3
             rec["near_score"] = score
             rec["state_label"] = readiness_label(score, reason)
