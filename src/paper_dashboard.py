@@ -88,6 +88,7 @@ def discover_portfolios(base_dir: Path) -> list[str]:
         "multi_futures_paper_trades.csv",
         "live_orderbook_snapshots.csv",
         "paper_open_positions.json",
+        "startup_status.csv",
     ]
     for suffix in suffixes:
         for path in base_dir.glob(f"*{suffix}"):
@@ -233,6 +234,8 @@ def readiness_label(score: object, reason: object) -> str:
         return "прогрев"
     if text.startswith(("fee_filter", "range_filter")):
         return "фильтр"
+    if text.startswith("startup_fee_filter") or text == "no_profile" or text.startswith("instrument_error"):
+        return "отсеян"
     if value >= 6:
         return "близко"
     if value >= 3:
@@ -376,6 +379,13 @@ def build_state(base_dir: Path) -> dict:
             part["portfolio"] = portfolio
         snapshot_parts.append(part)
     snapshots = pd.concat(snapshot_parts, ignore_index=True, sort=False)
+    startup_parts = []
+    for portfolio in portfolio_names:
+        part = read_csv(portfolio_path(base_dir, portfolio, "startup_status.csv"))
+        if not part.empty:
+            part["portfolio"] = portfolio
+        startup_parts.append(part)
+    startup_status = pd.concat(startup_parts, ignore_index=True, sort=False)
     heartbeat = read_csv(base_dir / "paper_monitor_heartbeat.csv")
     summary = read_csv(base_dir / "paper_execution_summary.csv")
     open_positions = []
@@ -403,6 +413,7 @@ def build_state(base_dir: Path) -> dict:
                 portfolio_path(base_dir, portfolio, "multi_futures_paper_trades.csv"),
                 portfolio_path(base_dir, portfolio, "live_orderbook_snapshots.csv"),
                 portfolio_path(base_dir, portfolio, "paper_open_positions.json"),
+                portfolio_path(base_dir, portfolio, "startup_status.csv"),
             ]
         )
     stats["last_update"] = latest_mtime(watched_paths)
@@ -522,6 +533,10 @@ def build_state(base_dir: Path) -> dict:
 
     ticker_overview = []
     seen_tickers = set()
+    startup_by_key = {}
+    if not startup_status.empty and {"portfolio", "ticker"}.issubset(startup_status.columns):
+        for _, row in startup_status.groupby(["portfolio", "ticker"], dropna=True).tail(1).iterrows():
+            startup_by_key[(str(row.get("portfolio") or ""), str(row.get("ticker") or ""))] = clean_record(row.to_dict())
     for rec in market_now:
         key = (str(rec.get("portfolio") or ""), str(rec.get("target_contract") or ""))
         seen_tickers.add(key)
@@ -547,18 +562,33 @@ def build_state(base_dir: Path) -> dict:
             key = (portfolio, str(ticker))
             if key in seen_tickers:
                 continue
+            startup = startup_by_key.get(key, {})
+            startup_reason = startup.get("reason") or ""
+            startup_state = str(startup.get("status") or "")
+            if startup_state == "skipped":
+                state = readiness_label(0, startup_reason)
+                comment = human_reason(startup_reason)
+                last = startup.get("last_price")
+            elif startup_state == "loaded":
+                state = "нет потока"
+                comment = "подписан, ждём данные потока"
+                last = startup.get("last_price")
+            else:
+                state = "нет потока"
+                comment = "ждём данные потока"
+                last = None
             ticker_overview.append(
                 {
                     "portfolio": portfolio,
                     "ticker": str(ticker),
                     "position": "; ".join(positions_by_ticker.get(key, [])) or "-",
-                    "state": "нет потока",
-                    "last": None,
+                    "state": state,
+                    "last": last,
                     "bid": None,
                     "ask": None,
                     "spread": None,
                     "book": "-",
-                    "comment": "ждём данные потока",
+                    "comment": comment,
                     "time": None,
                     "near_score": 0,
                 }

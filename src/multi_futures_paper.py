@@ -1019,6 +1019,30 @@ def write_instrument_specs(path: Path, specs: list[Spec]) -> None:
         writer.writerows(rows)
 
 
+def write_startup_status(path: Path, rows: list[dict]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "timestamp",
+        "ticker",
+        "status",
+        "reason",
+        "load_reason",
+        "profile_source",
+        "family",
+        "expiration",
+        "days_to_expiration",
+        "tick",
+        "tick_rub",
+        "last_price",
+        "go_buy",
+        "go_sell",
+    ]
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def write_roll_state(path: Path, roll_events: list[dict], specs: list[Spec], args: argparse.Namespace) -> None:
     payload = {
         "updated_at": now_str(),
@@ -1193,6 +1217,7 @@ def main() -> None:
     parser.add_argument("--snapshot-log", default=str(REPORTS / "live_orderbook_snapshots.csv"))
     parser.add_argument("--open-positions-log", default=str(REPORTS / "paper_open_positions.json"))
     parser.add_argument("--instrument-specs-log", default=str(REPORTS / "paper_instrument_specs.csv"))
+    parser.add_argument("--startup-status-log", default=str(REPORTS / "paper_startup_status.csv"))
     parser.add_argument("--shadow-log", default=str(REPORTS / "paper_shadow_exit_models.csv"))
     parser.add_argument("--health-log", default=str(REPORTS / "paper_bot_health.json"))
     parser.add_argument("--snapshot-sec", type=int, default=10)
@@ -1230,6 +1255,7 @@ def main() -> None:
         processed_secids: set[str] = set()
         configured_secids = set(args.secids)
         queued_roll_profiles: dict[str, Profile] = {}
+        startup_status: list[dict] = []
 
         def load_contract(secid: str, profile: Profile, load_reason: str) -> Spec | None:
             if secid in loaded_secids:
@@ -1241,17 +1267,64 @@ def main() -> None:
                     id=future.uid,
                 ).instrument
             except Exception as exc:
+                startup_status.append(
+                    {
+                        "timestamp": now_str(),
+                        "ticker": secid,
+                        "status": "skipped",
+                        "reason": f"instrument_error={exc}",
+                        "load_reason": load_reason,
+                        "profile_source": profile.source_secid or profile.secid,
+                        "family": profile.family or contract_family(secid),
+                    }
+                )
                 print(f"{now_str()} SKIP {secid} instrument_error={exc}", flush=True)
                 return None
             spec = spec_from_tbank(client, secid, future, info)
             side_fee = commission_side_rub(spec, 1, 0.00025, None)
             can_trade, fee_reason = profile_can_trade(profile, side_fee, spec)
             if not can_trade:
+                startup_status.append(
+                    {
+                        "timestamp": now_str(),
+                        "ticker": secid,
+                        "status": "skipped",
+                        "reason": fee_reason,
+                        "load_reason": load_reason,
+                        "profile_source": profile.source_secid or profile.secid,
+                        "family": profile.family or contract_family(secid),
+                        "expiration": spec.expiration_date.isoformat() if spec.expiration_date else "",
+                        "days_to_expiration": round(days_to_expiration(spec), 3) if days_to_expiration(spec) is not None else "",
+                        "tick": spec.min_step,
+                        "tick_rub": spec.step_price,
+                        "last_price": round(spec.last_price, 6),
+                        "go_buy": round(spec.margin_buy, 2),
+                        "go_sell": round(spec.margin_sell, 2),
+                    }
+                )
                 print(f"{now_str()} SKIP {secid} {fee_reason} load_reason={load_reason}", flush=True)
                 return None
             specs.append(spec)
             loaded_secids.add(secid)
             dte = days_to_expiration(spec)
+            startup_status.append(
+                {
+                    "timestamp": now_str(),
+                    "ticker": secid,
+                    "status": "loaded",
+                    "reason": fee_reason,
+                    "load_reason": load_reason,
+                    "profile_source": profile.source_secid or profile.secid,
+                    "family": profile.family or contract_family(secid),
+                    "expiration": spec.expiration_date.isoformat() if spec.expiration_date else "",
+                    "days_to_expiration": round(dte, 3) if dte is not None else "",
+                    "tick": spec.min_step,
+                    "tick_rub": spec.step_price,
+                    "last_price": round(spec.last_price, 6),
+                    "go_buy": round(spec.margin_buy, 2),
+                    "go_sell": round(spec.margin_sell, 2),
+                }
+            )
             dte_text = "" if dte is None else f" dte={dte:.1f}d"
             print(
                 f"{now_str()} LOAD {secid} {fee_reason} load_reason={load_reason} "
@@ -1275,6 +1348,17 @@ def main() -> None:
         for secid in args.secids:
             processed_secids.add(secid)
             if secid not in profiles:
+                startup_status.append(
+                    {
+                        "timestamp": now_str(),
+                        "ticker": secid,
+                        "status": "skipped",
+                        "reason": "no_profile",
+                        "load_reason": "configured",
+                        "profile_source": "",
+                        "family": contract_family(secid),
+                    }
+                )
                 print(f"{now_str()} SKIP {secid} no_profile", flush=True)
                 continue
             profile = profiles[secid]
@@ -1298,6 +1382,7 @@ def main() -> None:
         for secid, profile in queued_roll_profiles.items():
             load_contract(secid, profile, "auto_roll")
 
+        write_startup_status(Path(args.startup_status_log), startup_status)
         if not specs:
             print(f"{now_str()} multi_paper no tradable instruments after startup filters")
             return
