@@ -142,6 +142,7 @@ function New-BotArgs {
         "--snapshot-log", "reports\paper_runs\v7_live_20260525\${Name}_live_orderbook_snapshots.csv",
         "--open-positions-log", "reports\paper_runs\v7_live_20260525\${Name}_paper_open_positions.json",
         "--instrument-specs-log", "reports\paper_runs\v7_live_20260525\${Name}_instrument_specs.csv",
+        "--startup-status-log", "reports\paper_runs\v7_live_20260525\${Name}_startup_status.csv",
         "--shadow-log", "reports\paper_runs\v7_live_20260525\${Name}_shadow_exit_models.csv",
         "--health-log", "reports\paper_runs\v7_live_20260525\${Name}_health.json"
     )
