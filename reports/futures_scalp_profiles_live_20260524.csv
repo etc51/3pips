@@ -1,0 +1,22 @@
+ticker,quality,stop_ticks,trail_ticks,trail_arm_ticks,target_min_ticks,max_attempts,tick_rub,risk_1lot_rub,net_target_1lot_rub,reason
+LKM6,research,58,47,61,145,2,1.0,58.0,119.02,"спред 32т, комиссия круг 25.98т, средний 1m шум 13.33т"
+BMM6,wide,7,6,9,16,3,0.71209,4.98,7.61,"спред 1т, комиссия круг 5.31т, средний 1m шум 2.71т"
+BRM6,wide,8,7,10,18,3,7.1209,56.97,90.44,"спред 2т, комиссия круг 5.3т, средний 1m шум 3.01т"
+S1M6,wide,9,8,11,20,3,0.71209,6.41,11.52,"спред 5т, комиссия круг 3.82т, средний 1m шум 1.6т"
+GDM6,all_futures_watch,89,5,89,94,20,,,,WATCHLIST_SPECULATIVE; test2t=874.85; pf=1.39; micro=LOW
+CHM6,stress_keep,14,17,51,68,20,,,,KEEP_FOR_LIVE_PAPER; test2t=9585.45; pf=2.34; micro=MEDIUM
+RNM6,stress_keep,29,1,13,30,20,,,,KEEP_FOR_LIVE_PAPER; test2t=6174.03; pf=2.35; micro=MEDIUM
+TTM6,stress_keep,55,5,10,60,20,,,,KEEP_FOR_LIVE_PAPER; test2t=1228.77; pf=2.44; micro=MEDIUM
+PDU6,stress_keep,5,17,25,42,20,,,,KEEP_FOR_LIVE_PAPER; test2t=14185.89; pf=7.45; micro=HIGH
+PTU6,stress_keep,55,2,89,91,20,,,,KEEP_FOR_LIVE_PAPER; test2t=5009.55; pf=4.07; micro=HIGH
+GLM6,stress_watch,2,21,8,29,20,,,,WATCHLIST_SPECULATIVE; test2t=10374.85; pf=2.17; micro=LOW
+CEM6,stress_watch,134,5,36,139,20,,,,WATCHLIST_SPECULATIVE; test2t=1069.75; pf=1.34; micro=LOW
+BTM6,stress_watch,21,34,14,55,20,,,,WATCHLIST_SPECULATIVE; test2t=744.32; pf=1.43; micro=LOW
+FSM6,stress_watch,89,4,89,93,20,,,,WATCHLIST_SPECULATIVE; test2t=682.90; pf=3.78; micro=MEDIUM
+SiU6,stress_rejected,13,55,144,199,20,,,,LOW_SAMPLE; test2t=1664.28; pf=inf; micro=MEDIUM
+S1U6,stress_rejected,34,34,89,123,20,,,,LOW_SAMPLE; test2t=24.05; pf=inf; micro=MEDIUM
+GNU6,stress_rejected,8,13,144,157,20,,,,LOW_SAMPLE; test2t=20.98; pf=1.25; micro=HIGH
+AMZNperpA,neo_keep,28,55,44,99,20,,,,NEO_PERP_KEEP_SEPARATE; test2t=9116.28; pf=2.61; micro=MEDIUM
+TSLAperpA,neo_keep,3,34,144,178,20,,,,NEO_PERP_KEEP_SEPARATE; test2t=6304.50; pf=2.45; micro=MEDIUM
+COINperpA,neo_keep,6,1,16,17,20,,,,NEO_PERP_KEEP_SEPARATE; test2t=4171.62; pf=7.15; micro=MEDIUM
+AMDperpA,neo_keep,21,8,8,29,20,,,,NEO_PERP_KEEP_SEPARATE; test2t=3646.82; pf=3.23; micro=LOW

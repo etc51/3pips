@@ -1,0 +1,9 @@
+pandas
+numpy
+requests
+scipy
+matplotlib
+xlrd
+tinkoff-investments
+statsmodels
+pyarrow

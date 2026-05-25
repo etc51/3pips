@@ -1,0 +1,22 @@
+# Rollover switch NGK6/NGM6 -> NGM6/NGN6
+
+- started_at: 2026-05-24T12:39:59.011362
+- old_target: NGK6
+- old_plus1: NGM6
+- new_target: NGM6
+- new_plus1: NGN6
+- old_monitor_pid: 19004
+- old_monitor_stopped: True
+- paper_positions_before: 3
+- overdue_before: 0
+- paper_positions_after_reconcile: 0
+- overdue_after_reconcile: 0
+- real_order_sent_rows: 0
+- active_real_orders: 0
+- real_futures_positions: 0
+- new_monitor_pid: 2944
+- new_target_bid_ask: 3.06 / 3.061
+- new_plus1_bid_ask: 3.137 / 3.139
+- new_orderbook_ok: True
+- pause_removed: True
+- status: SWITCH_OK

@@ -1,0 +1,39 @@
+# Python/cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Secrets/local environment
+.env
+.env.*
+*.key
+*.pem
+*token*.txt
+*secret*.txt
+
+# Large local research artifacts
+data/
+plots/
+results/
+reports/**
+
+# Keep lightweight, reproducible project artifacts
+!reports/
+!reports/*.md
+!reports/futures_scalp*.csv
+!reports/all_futures_instrument_specs.csv
+!reports/scalp_30_secids.txt
+!reports/new_candidates_excluding_running_keep.csv
+!reports/new_candidates_excluding_running_watchlist.csv
+!reports/paper_contract_selection.csv
+
+# Runtime logs and paper runs stay local
+reports/runtime/
+reports/paper_runs/
+*.log
+*.zip
+*.parquet

@@ -1,0 +1,2 @@
+run_date,target_contract,plus1_contract,selection_method,dsvd_access_target,dsvd_access_plus1,dsvd_access_source,relying_on_live_orderbook,last_price_target,last_price_plus1,has_orderbook_target,has_orderbook_plus1,selected_ok,warning,orderbook_source_effective,run_id
+2026-05-24,NGM6,NGN6,manual_override,unavailable,unavailable,unavailable,True,3.077,3.157,True,True,True,,tbank-stream,rollover_NGM6_NGN6_20260524_123807
