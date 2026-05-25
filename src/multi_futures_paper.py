@@ -41,6 +41,7 @@ class Spec:
     min_step: float
     step_price: float
     last_rub: float
+    last_price: float = 0.0
     expiration_date: datetime | None = None
     margin_buy: float = 0.0
     margin_sell: float = 0.0
@@ -54,6 +55,8 @@ class Profile:
     trail_arm_ticks: int
     target_min_ticks: int
     max_attempts: int
+    family: str = ""
+    source_secid: str = ""
 
 
 @dataclass
@@ -151,22 +154,53 @@ def expiry_new_entry_block_reason(spec: Spec, threshold_days: float) -> str | No
     return f"expiry_filter no_new_entries dte={dte:.1f}d threshold={threshold_days:.1f}d exp={exp}"
 
 
-def load_profiles(path: Path, secids: list[str]) -> dict[str, Profile]:
+def profile_from_row(row: dict, secid: str | None = None, source_secid: str | None = None) -> Profile:
+    ticker = secid or row["ticker"]
+    return Profile(
+        secid=ticker,
+        stop_ticks=int(row["stop_ticks"]),
+        trail_ticks=int(row["trail_ticks"]),
+        trail_arm_ticks=int(row["trail_arm_ticks"]),
+        target_min_ticks=int(row["target_min_ticks"]),
+        max_attempts=int(row["max_attempts"]),
+        family=str(row.get("v7_family") or contract_family(ticker)),
+        source_secid=source_secid or row["ticker"],
+    )
+
+
+def contract_family(secid: str) -> str:
+    if secid.endswith("perpA"):
+        return secid
+    head = secid.rstrip("0123456789")
+    month_codes = set("FGHJKMNQUVXZ")
+    if len(head) > 1 and head[-1].upper() in month_codes:
+        head = head[:-1]
+    return head or secid
+
+
+def clone_profile_for_contract(profile: Profile, secid: str) -> Profile:
+    return Profile(
+        secid=secid,
+        stop_ticks=profile.stop_ticks,
+        trail_ticks=profile.trail_ticks,
+        trail_arm_ticks=profile.trail_arm_ticks,
+        target_min_ticks=profile.target_min_ticks,
+        max_attempts=profile.max_attempts,
+        family=profile.family or contract_family(secid),
+        source_secid=profile.source_secid or profile.secid,
+    )
+
+
+def load_profiles(path: Path, secids: list[str] | None = None) -> dict[str, Profile]:
     rows = list(csv.DictReader(path.open(encoding="utf-8")))
+    wanted = set(secids or [])
     out: dict[str, Profile] = {}
     for row in rows:
-        if row["ticker"] not in secids:
+        if wanted and row["ticker"] not in wanted:
             continue
         if row["quality"] == "skip":
             continue
-        out[row["ticker"]] = Profile(
-            secid=row["ticker"],
-            stop_ticks=int(row["stop_ticks"]),
-            trail_ticks=int(row["trail_ticks"]),
-            trail_arm_ticks=int(row["trail_arm_ticks"]),
-            target_min_ticks=int(row["target_min_ticks"]),
-            max_attempts=int(row["max_attempts"]),
-        )
+        out[row["ticker"]] = profile_from_row(row)
     return out
 
 
@@ -193,6 +227,144 @@ def seed_candles(client: object, figi: str, minutes: int) -> deque[dict]:
             }
         )
     return rows
+
+
+def spec_from_tbank(client: object, secid: str, future: object, info: object) -> Spec:
+    try:
+        lp = client.market_data.get_last_prices(figi=[future.figi]).last_prices
+        last = quotation_to_float(lp[0].price) if lp else 0.0
+    except Exception:
+        last = 0.0
+    spec = Spec(
+        secid=secid,
+        figi=future.figi,
+        uid=future.uid,
+        min_step=quotation_to_float(info.min_price_increment),
+        step_price=quotation_to_float(info.min_price_increment_amount),
+        last_rub=0.0,
+        last_price=last,
+        expiration_date=getattr(info, "expiration_date", None),
+        margin_buy=quotation_to_float(getattr(info, "initial_margin_on_buy", None)),
+        margin_sell=quotation_to_float(getattr(info, "initial_margin_on_sell", None)),
+    )
+    spec.last_rub = last / spec.min_step * spec.step_price if last and spec.min_step else 0.0
+    return spec
+
+
+def future_candidates_by_family(client: object, family: str) -> list[object]:
+    from t_tech.invest import InstrumentStatus
+
+    now = datetime.now(timezone.utc)
+    family_upper = family.upper()
+    instruments = client.instruments.futures(instrument_status=InstrumentStatus.INSTRUMENT_STATUS_BASE).instruments
+    candidates = []
+    for item in instruments:
+        ticker = str(getattr(item, "ticker", ""))
+        exp = getattr(item, "expiration_date", None)
+        if not ticker.upper().startswith(family_upper):
+            continue
+        if exp is None or exp.astimezone(timezone.utc) <= now:
+            continue
+        candidates.append(item)
+    return sorted(candidates, key=lambda item: getattr(item, "expiration_date", datetime.max.replace(tzinfo=timezone.utc)))
+
+
+def select_roll_contract(
+    client: object,
+    current_spec: Spec,
+    current_profile: Profile,
+    all_profiles: dict[str, Profile],
+    args: argparse.Namespace,
+) -> tuple[str | None, Profile | None, dict]:
+    from t_tech.invest import InstrumentIdType
+
+    family = current_profile.family or contract_family(current_spec.secid)
+    current_dte = days_to_expiration(current_spec)
+    event = {
+        "ticker": current_spec.secid,
+        "family": family,
+        "expiration": current_spec.expiration_date.isoformat() if current_spec.expiration_date else "",
+        "days_to_expiration": round(current_dte, 3) if current_dte is not None else None,
+        "status": "not_near_roll",
+        "selected": "",
+        "selected_profile_source": "",
+        "reason": "",
+        "candidates": [],
+    }
+    if current_spec.expiration_date is None or current_dte is None:
+        event["status"] = "no_expiration"
+        return None, None, event
+    if current_spec.expiration_date.year >= 2099 or family.endswith("perpA"):
+        event["status"] = "perpetual_or_far_expiration"
+        return None, None, event
+    if current_dte > float(args.roll_observe_days):
+        event["reason"] = f"dte_above_observe_window {current_dte:.1f}>{float(args.roll_observe_days):.1f}"
+        return None, None, event
+
+    event["status"] = "searching_next"
+    for item in future_candidates_by_family(client, family):
+        ticker = str(getattr(item, "ticker", ""))
+        exp = getattr(item, "expiration_date", None)
+        if ticker == current_spec.secid or exp is None:
+            continue
+        if exp.astimezone(timezone.utc) <= current_spec.expiration_date.astimezone(timezone.utc):
+            continue
+        dte = (exp.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds() / 86400
+        candidate_event = {
+            "ticker": ticker,
+            "expiration": exp.isoformat(),
+            "days_to_expiration": round(dte, 3),
+            "status": "checking",
+            "profile_source": "",
+            "reason": "",
+        }
+        event["candidates"].append(candidate_event)
+        if dte <= float(args.no_new_expiry_days):
+            candidate_event["status"] = "blocked"
+            candidate_event["reason"] = "candidate_too_close_to_expiry"
+            continue
+        try:
+            info = client.instruments.future_by(
+                id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_UID,
+                id=getattr(item, "uid"),
+            ).instrument
+            candidate_spec = spec_from_tbank(client, ticker, item, info)
+        except Exception as exc:
+            candidate_event["status"] = "blocked"
+            candidate_event["reason"] = f"instrument_error {type(exc).__name__}: {exc}"
+            continue
+
+        profile = all_profiles.get(ticker)
+        if profile is not None:
+            candidate_event["profile_source"] = ticker
+        else:
+            profile = clone_profile_for_contract(current_profile, ticker)
+            candidate_event["profile_source"] = current_profile.secid
+        can_trade, fee_reason = profile_can_trade(profile, commission_side_rub(candidate_spec, 1, 0.00025, None), candidate_spec)
+        candidate_event["reason"] = fee_reason
+        if not can_trade:
+            candidate_event["status"] = "blocked"
+            continue
+        try:
+            book = client.market_data.get_order_book(figi=candidate_spec.figi, depth=int(args.orderbook_depth))
+            if not getattr(book, "bids", None) or not getattr(book, "asks", None):
+                candidate_event["status"] = "blocked"
+                candidate_event["reason"] = "no_live_book"
+                continue
+        except Exception as exc:
+            candidate_event["status"] = "blocked"
+            candidate_event["reason"] = f"book_error {type(exc).__name__}: {exc}"
+            continue
+        candidate_event["status"] = "selected"
+        event["status"] = "roll_ready"
+        event["selected"] = ticker
+        event["selected_profile_source"] = candidate_event["profile_source"]
+        event["reason"] = f"current_dte={current_dte:.1f}d candidate_ok {fee_reason}"
+        return ticker, profile, event
+
+    event["status"] = "blocked_no_candidate"
+    event["reason"] = "no viable next contract found"
+    return None, None, event
 
 
 def make_stream_requests(specs: list[Spec], depth: int):
@@ -809,6 +981,7 @@ def write_instrument_specs(path: Path, specs: list[Spec]) -> None:
                 "days_to_expiration": round(dte, 3) if dte is not None else "",
                 "tick": spec.min_step,
                 "tick_rub": spec.step_price,
+                "last_price": round(spec.last_price, 6),
                 "last_rub": round(spec.last_rub, 6),
                 "go_buy": round(spec.margin_buy, 2),
                 "go_sell": round(spec.margin_sell, 2),
@@ -821,6 +994,28 @@ def write_instrument_specs(path: Path, specs: list[Spec]) -> None:
         writer = csv.DictWriter(f, fieldnames=list(rows[0]) if rows else ["ticker"])
         writer.writeheader()
         writer.writerows(rows)
+
+
+def write_roll_state(path: Path, roll_events: list[dict], specs: list[Spec], args: argparse.Namespace) -> None:
+    payload = {
+        "updated_at": now_str(),
+        "auto_roll_enabled": not bool(getattr(args, "disable_auto_roll", False)),
+        "roll_observe_days": float(getattr(args, "roll_observe_days", 0.0)),
+        "no_new_expiry_days": float(getattr(args, "no_new_expiry_days", 0.0)),
+        "expiry_force_close_days": float(getattr(args, "expiry_force_close_days", 0.0)),
+        "loaded_contracts": [
+            {
+                "ticker": spec.secid,
+                "family": contract_family(spec.secid),
+                "expiration": spec.expiration_date.isoformat() if spec.expiration_date else "",
+                "days_to_expiration": round(days_to_expiration(spec), 3) if days_to_expiration(spec) is not None else None,
+            }
+            for spec in specs
+        ],
+        "roll_events": roll_events,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def write_open_positions(path: Path, states: list[State]) -> None:
@@ -989,11 +1184,15 @@ def main() -> None:
     parser.add_argument("--fallback-poll-sec", type=float, default=2.0)
     parser.add_argument("--no-new-expiry-days", type=float, default=5.0)
     parser.add_argument("--expiry-force-close-days", type=float, default=3.0)
+    parser.add_argument("--roll-observe-days", type=float, default=10.0)
+    parser.add_argument("--roll-state-log", default=str(REPORTS / "paper_roll_state.json"))
+    parser.add_argument("--disable-auto-roll", action="store_true")
     args = parser.parse_args()
 
     from t_tech.invest import Client, InstrumentIdType
 
-    profiles = load_profiles(Path(args.profiles), args.secids)
+    all_profiles = load_profiles(Path(args.profiles))
+    profiles = {secid: all_profiles[secid] for secid in args.secids if secid in all_profiles}
     portfolio = Portfolio(
         initial_capital=float(args.paper_capital),
         max_total_margin_pct=float(args.max_total_margin_pct),
@@ -1003,9 +1202,13 @@ def main() -> None:
     states: list[State] = []
     specs: list[Spec] = []
     with Client(token) as client:
-        for secid in args.secids:
-            if secid not in profiles:
-                continue
+        roll_events: list[dict] = []
+        loaded_secids: set[str] = set()
+        queued_roll_profiles: dict[str, Profile] = {}
+
+        def load_contract(secid: str, profile: Profile, load_reason: str) -> Spec | None:
+            if secid in loaded_secids:
+                return None
             try:
                 future = tbank_find_future(client, secid)
                 info = client.instruments.future_by(
@@ -1013,33 +1216,23 @@ def main() -> None:
                     id=future.uid,
                 ).instrument
             except Exception as exc:
-                print(f"{now_str()} SKIP {secid} instrument_error={exc}")
-                continue
-            spec = Spec(
-                secid=secid,
-                figi=future.figi,
-                uid=future.uid,
-                min_step=quotation_to_float(info.min_price_increment),
-                step_price=quotation_to_float(info.min_price_increment_amount),
-                last_rub=0.0,
-                expiration_date=getattr(info, "expiration_date", None),
-                margin_buy=quotation_to_float(getattr(info, "initial_margin_on_buy", None)),
-                margin_sell=quotation_to_float(getattr(info, "initial_margin_on_sell", None)),
-            )
-            try:
-                lp = client.market_data.get_last_prices(figi=[future.figi]).last_prices
-                last = quotation_to_float(lp[0].price) if lp else 0.0
-            except Exception:
-                last = 0.0
-            spec.last_rub = last / spec.min_step * spec.step_price if last and spec.min_step else 0.0
-            profile = profiles[secid]
+                print(f"{now_str()} SKIP {secid} instrument_error={exc}", flush=True)
+                return None
+            spec = spec_from_tbank(client, secid, future, info)
             side_fee = commission_side_rub(spec, 1, 0.00025, None)
             can_trade, fee_reason = profile_can_trade(profile, side_fee, spec)
             if not can_trade:
-                print(f"{now_str()} SKIP {secid} {fee_reason}")
-                continue
+                print(f"{now_str()} SKIP {secid} {fee_reason} load_reason={load_reason}", flush=True)
+                return None
             specs.append(spec)
-            print(f"{now_str()} LOAD {secid} {fee_reason}")
+            loaded_secids.add(secid)
+            dte = days_to_expiration(spec)
+            dte_text = "" if dte is None else f" dte={dte:.1f}d"
+            print(
+                f"{now_str()} LOAD {secid} {fee_reason} load_reason={load_reason} "
+                f"profile_source={profile.source_secid or profile.secid}{dte_text}",
+                flush=True,
+            )
             seeded = seed_candles(client, spec.figi, args.seed_minutes)
             for contour in ["strict", "aggressive"]:
                 states.append(
@@ -1049,13 +1242,41 @@ def main() -> None:
                         contour=contour,
                         side_fee=side_fee,
                         candles=deque(seeded, maxlen=180),
-                        last_price=last,
+                        last_price=spec.last_price,
                     )
                 )
+            return spec
+
+        for secid in args.secids:
+            if secid not in profiles:
+                print(f"{now_str()} SKIP {secid} no_profile", flush=True)
+                continue
+            profile = profiles[secid]
+            spec = load_contract(secid, profile, "configured")
+            if spec is None or args.disable_auto_roll:
+                continue
+            roll_secid, roll_profile, roll_event = select_roll_contract(client, spec, profile, all_profiles, args)
+            if roll_secid and roll_profile:
+                if roll_secid in loaded_secids:
+                    roll_event["status"] = "selected_already_loaded"
+                    roll_event["reason"] = f"{roll_event.get('reason', '')}; selected already loaded"
+                elif roll_secid in args.secids:
+                    roll_event["status"] = "selected_already_configured"
+                    roll_event["reason"] = f"{roll_event.get('reason', '')}; selected is configured"
+                else:
+                    queued_roll_profiles[roll_secid] = roll_profile
+                    roll_event["status"] = "queued_roll_contract"
+                    roll_event["reason"] = f"{roll_event.get('reason', '')}; queued for auto load"
+            roll_events.append(roll_event)
+
+        for secid, profile in queued_roll_profiles.items():
+            load_contract(secid, profile, "auto_roll")
+
         if not specs:
             print(f"{now_str()} multi_paper no tradable instruments after startup filters")
             return
         write_instrument_specs(Path(args.instrument_specs_log), specs)
+        write_roll_state(Path(args.roll_state_log), roll_events, specs, args)
         by_figi = {s.figi: s for s in specs}
         by_uid = {s.uid: s for s in specs}
         state_by_uid = {(s.spec.uid, s.contour): s for s in states}
