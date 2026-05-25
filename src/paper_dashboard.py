@@ -527,6 +527,37 @@ def build_state(base_dir: Path) -> dict:
             market_now.append(rec)
         market_now.sort(key=lambda x: (x.get("near_score") or 0, str(x.get("snapshot_time") or "")), reverse=True)
 
+    wide_spread_watchlist = []
+    for rec in market_now:
+        spread_class = str(rec.get("spread_class") or "")
+        try:
+            ratio = float(rec.get("spread_to_stop_ratio"))
+        except Exception:
+            ratio = None
+        review = str(rec.get("spread_review_flag") or "").lower() == "true"
+        if review or spread_class in {"SPREAD_WATCH", "SPREAD_HEAVY", "SPREAD_DOMINATES"}:
+            class_label = {
+                "SPREAD_WATCH": "наблюдать",
+                "SPREAD_HEAVY": "широкий",
+                "SPREAD_DOMINATES": "доминирует",
+                "NO_BOOK": "нет стакана",
+            }.get(spread_class, spread_class or "-")
+            wide_spread_watchlist.append(
+                {
+                    "portfolio": rec.get("portfolio"),
+                    "ticker": rec.get("target_contract"),
+                    "last": rec.get("last_price_target"),
+                    "spread": rec.get("spread_ticks_target"),
+                    "stop_ticks": rec.get("stop_ticks"),
+                    "spread_to_stop_pct": number(ratio * 100, 1) if ratio is not None else None,
+                    "spread_class": class_label,
+                    "book": rec.get("book_display"),
+                    "comment": rec.get("display_reason"),
+                    "time": rec.get("snapshot_time"),
+                }
+            )
+    wide_spread_watchlist.sort(key=lambda x: float(x.get("spread_to_stop_pct") or -1), reverse=True)
+
     positions_by_ticker: dict[tuple[str, str], list[str]] = {}
     for item in open_positions:
         if not isinstance(item, dict):
@@ -546,6 +577,10 @@ def build_state(base_dir: Path) -> dict:
     for rec in market_now:
         key = (str(rec.get("portfolio") or ""), str(rec.get("target_contract") or ""))
         seen_tickers.add(key)
+        try:
+            spread_to_stop_pct = number(float(rec.get("spread_to_stop_ratio")) * 100, 1)
+        except Exception:
+            spread_to_stop_pct = None
         overview = {
             "portfolio": key[0],
             "ticker": key[1],
@@ -555,6 +590,8 @@ def build_state(base_dir: Path) -> dict:
             "bid": rec.get("bid_target"),
             "ask": rec.get("ask_target"),
             "spread": rec.get("spread_ticks_target"),
+            "stop_ticks": rec.get("stop_ticks"),
+            "spread_to_stop_pct": spread_to_stop_pct,
             "book": rec.get("book_display"),
             "comment": rec.get("display_reason"),
             "time": rec.get("snapshot_time"),
@@ -614,6 +651,7 @@ def build_state(base_dir: Path) -> dict:
         "by_ticker": by_ticker,
         "portfolio_overview": portfolio_overview,
         "ticker_overview": ticker_overview,
+        "wide_spread_watchlist": wide_spread_watchlist,
         "open_positions": open_positions,
         "recent_trades": recent_trades,
         "micro": micro,
@@ -736,6 +774,10 @@ HTML = r"""<!doctype html>
       <div class="table-wrap"><table id="tickers"></table></div>
     </section>
     <section>
+      <h2>Широкий спред</h2>
+      <div class="table-wrap"><table id="wideSpread"></table></div>
+    </section>
+    <section>
       <h2>Последние сделки</h2>
       <div class="table-wrap"><table id="trades"></table></div>
     </section>
@@ -782,8 +824,11 @@ HTML = r"""<!doctype html>
         ["Контур","portfolio"], ["Старт ₽","capital",false,2], ["Реальный доход ₽","closed_net",true,2], ["Доход %","return_pct",true,3], ["ГО занято ₽","used_margin",false,2], ["Свободно ₽","free_capital",false,2], ["Позиций","open_positions"], ["Сделок","closed_trades"]
       ], data.portfolio_overview || []);
       table(document.getElementById('tickers'), [
-        ["Контур","portfolio"], ["Тикер","ticker"], ["Позиция","position"], ["Готовность","state",false,null,"state"], ["Last","last"], ["Bid","bid"], ["Ask","ask"], ["Спред","spread"], ["Стакан","book"], ["Комментарий","comment",false,null,"comment"]
+        ["Контур","portfolio"], ["Тикер","ticker"], ["Позиция","position"], ["Готовность","state",false,null,"state"], ["Last","last"], ["Bid","bid"], ["Ask","ask"], ["Спред","spread"], ["Стоп","stop_ticks"], ["Спред/стоп %","spread_to_stop_pct"], ["Стакан","book"], ["Комментарий","comment",false,null,"comment"]
       ], data.ticker_overview || []);
+      table(document.getElementById('wideSpread'), [
+        ["Контур","portfolio"], ["Тикер","ticker"], ["Last","last"], ["Спред","spread"], ["Стоп","stop_ticks"], ["Спред/стоп %","spread_to_stop_pct"], ["Класс","spread_class"], ["Стакан","book"], ["Комментарий","comment",false,null,"comment"]
+      ], data.wide_spread_watchlist || []);
       table(document.getElementById('trades'), [
         ["Время","time"], ["Портфель","portfolio"], ["Контур","contour"], ["Тикер","ticker"], ["Напр.","direction"], ["Qty","qty"], ["Entry","entry_price"], ["Exit","exit_price"], ["Ticks","ticks",true,2], ["Fee","fees_rub",false,2], ["Net","net_pnl_rub",true,2], ["Статус","fill_status"], ["Причина","skip_reason"]
       ], data.recent_trades || []);

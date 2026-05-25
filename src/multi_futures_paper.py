@@ -35,6 +35,9 @@ BR_POLICY_MIN_STOP_TICKS = 15
 BR_POLICY_MAX_SPREAD_TO_STOP = 0.40
 BR_POLICY_LOSS_PAUSE_COUNT = 3
 BR_POLICY_LOSS_PAUSE_SECONDS = 2 * 60 * 60
+SPREAD_WATCH_RATIO = 0.25
+SPREAD_HEAVY_RATIO = 0.40
+SPREAD_DOMINATES_RATIO = 1.00
 
 
 @dataclass
@@ -154,6 +157,19 @@ def paper_qty(portfolio: Portfolio, states: list[State], spec: Spec, direction: 
 
 def fee_ticks(side_fee: float, spec: Spec) -> float:
     return (2 * side_fee / spec.step_price) if spec.step_price else 999.0
+
+
+def spread_to_stop_metrics(spread_ticks: float | None, stop_ticks: int) -> tuple[float | None, str, bool]:
+    if spread_ticks is None or stop_ticks <= 0:
+        return None, "NO_BOOK", False
+    ratio = float(spread_ticks) / float(stop_ticks)
+    if ratio > SPREAD_DOMINATES_RATIO:
+        return ratio, "SPREAD_DOMINATES", True
+    if ratio > SPREAD_HEAVY_RATIO:
+        return ratio, "SPREAD_HEAVY", True
+    if ratio > SPREAD_WATCH_RATIO:
+        return ratio, "SPREAD_WATCH", True
+    return ratio, "SPREAD_OK", False
 
 
 def profile_can_trade(profile: Profile, side_fee: float, spec: Spec, max_fee_to_stop: float = 0.55) -> tuple[bool, str]:
@@ -1019,11 +1035,17 @@ def poll_market_fallback(
 
 def write_microstructure_snapshot(path: Path, states: list[State], trading_enabled: bool) -> None:
     rows = []
+    spread_review_rows = []
     snapshot_time = now_str()
     for st in states:
         if st.contour != "aggressive":
             continue
         levels = best_levels(st.last_order_book, st.spec)
+        spread_ratio, spread_class, spread_review = spread_to_stop_metrics(
+            levels["spread_ticks"],
+            st.profile.stop_ticks,
+        )
+        fee_to_stop = fee_ticks(st.side_fee, st.spec) / st.profile.stop_ticks if st.profile.stop_ticks > 0 else None
         rows.append(
             {
                 "snapshot_time": snapshot_time,
@@ -1034,6 +1056,13 @@ def write_microstructure_snapshot(path: Path, states: list[State], trading_enabl
                 "bid_size_target": levels["bid_size"],
                 "ask_size_target": levels["ask_size"],
                 "spread_ticks_target": levels["spread_ticks"],
+                "stop_ticks": st.profile.stop_ticks,
+                "trail_ticks": st.profile.trail_ticks,
+                "trail_arm_ticks": st.profile.trail_arm_ticks,
+                "spread_to_stop_ratio": round(spread_ratio, 4) if spread_ratio is not None else None,
+                "spread_class": spread_class,
+                "spread_review_flag": spread_review,
+                "fee_to_stop_ratio": round(fee_to_stop, 4) if fee_to_stop is not None else None,
                 "signal_status": "listening" if trading_enabled else "warmup_or_no_new_entries",
                 "skip_reason": "" if trading_enabled else "time_gate",
                 "orderbook_source": "tbank_stream",
@@ -1043,8 +1072,33 @@ def write_microstructure_snapshot(path: Path, states: list[State], trading_enabl
                 "last_reason": st.last_reason,
             }
         )
+        if spread_review:
+            spread_review_rows.append(
+                {
+                    "snapshot_time": snapshot_time,
+                    "ticker": st.spec.secid,
+                    "family": state_family(st),
+                    "last_price": st.last_price,
+                    "bid": levels["bid"],
+                    "ask": levels["ask"],
+                    "bid_size": levels["bid_size"],
+                    "ask_size": levels["ask_size"],
+                    "spread_ticks": levels["spread_ticks"],
+                    "stop_ticks": st.profile.stop_ticks,
+                    "spread_to_stop_ratio": round(spread_ratio, 4) if spread_ratio is not None else None,
+                    "spread_class": spread_class,
+                    "last_reason": st.last_reason,
+                }
+            )
     for row in rows:
-        append_trade(path, row)
+        append_schema_stable_csv(path, row)
+    if spread_review_rows:
+        review_name = path.name.replace("live_orderbook_snapshots", "wide_spread_review")
+        if review_name == path.name:
+            review_name = f"{path.stem}_wide_spread_review{path.suffix}"
+        review_path = path.with_name(review_name)
+        for row in spread_review_rows:
+            append_schema_stable_csv(review_path, row)
 
 
 def write_instrument_specs(path: Path, specs: list[Spec]) -> None:
@@ -1259,6 +1313,21 @@ def write_bot_health(
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def append_schema_stable_csv(path: Path, row: dict) -> None:
+    expected = list(row)
+    if path.exists() and path.stat().st_size > 0:
+        try:
+            with path.open(newline="", encoding="utf-8") as f:
+                header = next(csv.reader(f), [])
+        except Exception:
+            header = []
+        if header != expected:
+            backup = path.with_name(f"{path.stem}_schema_backup_{datetime.now():%Y%m%d_%H%M%S}{path.suffix}")
+            path.replace(backup)
+            print(f"{now_str()} SNAPSHOT schema_changed backup={backup}", flush=True)
+    append_trade(path, row)
 
 
 def main() -> None:
