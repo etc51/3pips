@@ -110,6 +110,29 @@ def has_open_ticker(states: list[State], secid: str) -> bool:
     return any(st.spec.secid == secid and st.position is not None for st in states)
 
 
+def state_family(st: State) -> str:
+    return st.profile.family or contract_family(st.spec.secid)
+
+
+def has_roll_family_conflict(states: list[State], spec: Spec, family: str, roll_window_days: float) -> str | None:
+    if roll_window_days <= 0:
+        return None
+    current_dte = days_to_expiration(spec)
+    current_in_roll = current_dte is not None and current_dte <= roll_window_days
+    for st in states:
+        if st.position is None:
+            continue
+        if st.spec.secid == spec.secid:
+            continue
+        if state_family(st) != family:
+            continue
+        other_dte = days_to_expiration(st.spec)
+        other_in_roll = other_dte is not None and other_dte <= roll_window_days
+        if current_in_roll or other_in_roll:
+            return st.spec.secid
+    return None
+
+
 def paper_qty(portfolio: Portfolio, states: list[State], spec: Spec, direction: Direction | str) -> int:
     per_contract = spec.margin_buy if direction == "long" else spec.margin_sell
     if per_contract <= 0:
@@ -1204,6 +1227,8 @@ def main() -> None:
     with Client(token) as client:
         roll_events: list[dict] = []
         loaded_secids: set[str] = set()
+        processed_secids: set[str] = set()
+        configured_secids = set(args.secids)
         queued_roll_profiles: dict[str, Profile] = {}
 
         def load_contract(secid: str, profile: Profile, load_reason: str) -> Spec | None:
@@ -1248,6 +1273,7 @@ def main() -> None:
             return spec
 
         for secid in args.secids:
+            processed_secids.add(secid)
             if secid not in profiles:
                 print(f"{now_str()} SKIP {secid} no_profile", flush=True)
                 continue
@@ -1260,9 +1286,9 @@ def main() -> None:
                 if roll_secid in loaded_secids:
                     roll_event["status"] = "selected_already_loaded"
                     roll_event["reason"] = f"{roll_event.get('reason', '')}; selected already loaded"
-                elif roll_secid in args.secids:
-                    roll_event["status"] = "selected_already_configured"
-                    roll_event["reason"] = f"{roll_event.get('reason', '')}; selected is configured"
+                elif roll_secid in configured_secids and roll_secid not in processed_secids:
+                    roll_event["status"] = "selected_will_load_later"
+                    roll_event["reason"] = f"{roll_event.get('reason', '')}; selected is configured later in this run"
                 else:
                     queued_roll_profiles[roll_secid] = roll_profile
                     roll_event["status"] = "queued_roll_contract"
@@ -1373,6 +1399,15 @@ def main() -> None:
                             continue
                         if has_open_ticker(states, spec.secid):
                             st.last_reason = "duplicate_filter ticker_already_open"
+                            continue
+                        family_conflict = has_roll_family_conflict(
+                            states,
+                            spec,
+                            state_family(st),
+                            float(args.roll_observe_days),
+                        )
+                        if family_conflict:
+                            st.last_reason = f"roll_family_filter open_family_position {family_conflict}"
                             continue
                         expiry_reason = expiry_new_entry_block_reason(spec, float(args.no_new_expiry_days))
                         if expiry_reason:

@@ -150,6 +150,8 @@ def human_reason(reason: object) -> str:
         return "позиция восстановлена после рестарта"
     if text.startswith("expiry_filter"):
         return "фильтр: близко экспирация, новые входы запрещены"
+    if text.startswith("roll_family_filter"):
+        return "фильтр: уже есть позиция в этом семействе на переносе"
     if text.startswith("entry_signal long"):
         return "сигнал на вход: long"
     if text.startswith("entry_signal short"):
