@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import threading
 import time
 from collections import deque
@@ -676,48 +677,66 @@ def poll_market_fallback(
     args: argparse.Namespace,
     portfolio: Portfolio,
     last_stream_event: list[float],
+    started: float,
+    runtime_state: dict[str, object],
     stop_event: threading.Event,
     lock: threading.RLock,
 ) -> None:
     from t_tech.invest import Client
 
-    with Client(token) as poll_client:
-        while not stop_event.is_set():
-            time.sleep(max(0.5, float(args.fallback_poll_sec)))
-            if time.monotonic() - last_stream_event[0] < float(args.stream_stale_sec):
-                continue
-            try:
-                prices = poll_client.market_data.get_last_prices(figi=[s.figi for s in specs]).last_prices
-                price_by_uid = {p.instrument_uid: quotation_to_float(p.price) for p in prices}
-            except Exception as exc:
-                print(f"{now_str()} POLL last_price_error={exc}")
-                price_by_uid = {}
-            with lock:
-                for spec in specs:
+    while not stop_event.is_set():
+        try:
+            with Client(token) as poll_client:
+                while not stop_event.is_set():
+                    time.sleep(max(0.5, float(args.fallback_poll_sec)))
+                    if time.monotonic() - last_stream_event[0] < float(args.stream_stale_sec):
+                        continue
                     try:
-                        orderbook = poll_client.market_data.get_order_book(figi=spec.figi, depth=int(args.orderbook_depth))
+                        prices = poll_client.market_data.get_last_prices(figi=[s.figi for s in specs]).last_prices
+                        price_by_uid = {p.instrument_uid: quotation_to_float(p.price) for p in prices}
                     except Exception as exc:
-                        orderbook = None
-                        print(f"{now_str()} POLL orderbook_error {spec.secid} {exc}")
-                    for contour in ["strict", "aggressive"]:
-                        st = state_by_uid.get((spec.uid, contour))
-                        if st is None:
-                            continue
-                        if spec.uid in price_by_uid:
-                            st.last_price = round_to_step(price_by_uid[spec.uid], spec.min_step)
-                        if orderbook is not None:
-                            st.last_order_book = orderbook
-                        process_open_state_exit(
-                            st,
-                            args,
-                            portfolio,
+                        print(f"{now_str()} POLL last_price_error={exc}", flush=True)
+                        price_by_uid = {}
+                    with lock:
+                        for spec in specs:
+                            try:
+                                orderbook = poll_client.market_data.get_order_book(figi=spec.figi, depth=int(args.orderbook_depth))
+                            except Exception as exc:
+                                orderbook = None
+                                print(f"{now_str()} POLL orderbook_error {spec.secid} {exc}", flush=True)
+                            for contour in ["strict", "aggressive"]:
+                                st = state_by_uid.get((spec.uid, contour))
+                                if st is None:
+                                    continue
+                                if spec.uid in price_by_uid:
+                                    st.last_price = round_to_step(price_by_uid[spec.uid], spec.min_step)
+                                if orderbook is not None:
+                                    st.last_order_book = orderbook
+                                process_open_state_exit(
+                                    st,
+                                    args,
+                                    portfolio,
+                                    states,
+                                    candle_closed=False,
+                                    actual_trigger_source_override="polling_fallback",
+                                )
+                        write_open_positions(Path(args.open_positions_log), states)
+                        write_microstructure_snapshot(Path(args.snapshot_log), states, trading_enabled=True)
+                        write_bot_health(
+                            Path(args.health_log),
                             states,
-                            candle_closed=False,
-                            actual_trigger_source_override="polling_fallback",
+                            portfolio,
+                            started,
+                            last_stream_event,
+                            int(runtime_state.get("reconnect_count", 0)),
+                            str(runtime_state.get("last_stream_error", "")),
+                            "polling_fallback",
                         )
-                write_open_positions(Path(args.open_positions_log), states)
-                write_microstructure_snapshot(Path(args.snapshot_log), states, trading_enabled=True)
-            print(f"{now_str()} POLL fallback active stale_sec={time.monotonic() - last_stream_event[0]:.1f}")
+                    print(f"{now_str()} POLL fallback active stale_sec={time.monotonic() - last_stream_event[0]:.1f}", flush=True)
+        except Exception as exc:
+            if not stop_event.is_set():
+                print(f"{now_str()} POLL reconnect_after_error {type(exc).__name__}: {exc}", flush=True)
+                time.sleep(3)
 
 
 def write_microstructure_snapshot(path: Path, states: list[State], trading_enabled: bool) -> None:
@@ -787,6 +806,7 @@ def write_open_positions(path: Path, states: list[State]) -> None:
                 "direction": st.position.direction,
                 "qty": st.position.qty,
                 "entry_price": st.position.entry_price,
+                "best_price": st.position.best_price,
                 "last_price": st.last_price,
                 "mark_price": mark_price,
                 "mark_source": mark_source,
@@ -796,6 +816,89 @@ def write_open_positions(path: Path, states: list[State]) -> None:
             }
         )
     path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def restore_open_positions(path: Path, states: list[State]) -> int:
+    if not path.exists() or path.stat().st_size == 0:
+        return 0
+    try:
+        rows = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        print(f"{now_str()} RESTORE open_positions_read_error={exc}", flush=True)
+        return 0
+    if not isinstance(rows, list):
+        return 0
+    by_key = {(st.contour, st.spec.secid): st for st in states}
+    restored = 0
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        key = (str(row.get("contour") or ""), str(row.get("ticker") or ""))
+        st = by_key.get(key)
+        if st is None or st.position is not None:
+            continue
+        try:
+            direction = str(row["direction"])
+            entry = float(row["entry_price"])
+            qty = int(float(row["qty"]))
+            stop = float(row["stop_price"])
+            best_raw = row.get("best_price")
+            best = float(best_raw) if best_raw not in (None, "") else entry
+            opened_at = str(row.get("opened_at") or now_str())
+        except Exception as exc:
+            print(f"{now_str()} RESTORE skip_bad_position {key} error={exc}", flush=True)
+            continue
+        st.position = Position(
+            direction=direction,
+            entry_price=entry,
+            qty=qty,
+            best_price=best,
+            stop_price=stop,
+            opened_at=opened_at,
+        )
+        st.attempts = max(st.attempts, 1)
+        st.last_reason = "restored_open_position"
+        restored += 1
+    if restored:
+        print(f"{now_str()} RESTORE open_positions count={restored} source={path}", flush=True)
+    return restored
+
+
+def write_bot_health(
+    path: Path,
+    states: list[State],
+    portfolio: Portfolio,
+    started: float,
+    last_stream_event: list[float],
+    reconnect_count: int,
+    last_stream_error: str,
+    status: str,
+) -> None:
+    now = time.monotonic()
+    payload = {
+        "timestamp": now_str(),
+        "pid": os.getpid(),
+        "status": status,
+        "uptime_sec": round(now - started, 1),
+        "last_stream_age_sec": round(now - last_stream_event[0], 1),
+        "reconnect_count": reconnect_count,
+        "last_stream_error": last_stream_error,
+        "open_positions": sum(1 for st in states if st.position is not None),
+        "closed_trades": sum(st.closed for st in states),
+        "closed_net": round(portfolio.closed_net, 2),
+        "used_margin": round(used_margin(states), 2),
+        "contours": {
+            contour: {
+                "open_positions": sum(1 for st in states if st.contour == contour and st.position is not None),
+                "attempts": sum(st.attempts for st in states if st.contour == contour),
+                "closed": sum(st.closed for st in states if st.contour == contour),
+                "closed_net": round(sum(st.closed_net for st in states if st.contour == contour), 2),
+            }
+            for contour in ["strict", "aggressive"]
+        },
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def main() -> None:
@@ -811,6 +914,7 @@ def main() -> None:
     parser.add_argument("--open-positions-log", default=str(REPORTS / "paper_open_positions.json"))
     parser.add_argument("--instrument-specs-log", default=str(REPORTS / "paper_instrument_specs.csv"))
     parser.add_argument("--shadow-log", default=str(REPORTS / "paper_shadow_exit_models.csv"))
+    parser.add_argument("--health-log", default=str(REPORTS / "paper_bot_health.json"))
     parser.add_argument("--snapshot-sec", type=int, default=10)
     parser.add_argument("--no-trade-before", default="")
     parser.add_argument("--no-new-after", default="")
@@ -902,11 +1006,24 @@ def main() -> None:
         no_trade_before = parse_today_time(args.no_trade_before)
         no_new_after = parse_today_time(args.no_new_after)
         last_stream_event = [time.monotonic()]
+        runtime_state: dict[str, object] = {"reconnect_count": 0, "last_stream_error": ""}
         stop_event = threading.Event()
         lock = threading.RLock()
+        restore_open_positions(Path(args.open_positions_log), states)
+        write_open_positions(Path(args.open_positions_log), states)
+        write_bot_health(
+            Path(args.health_log),
+            states,
+            portfolio,
+            started,
+            last_stream_event,
+            int(runtime_state["reconnect_count"]),
+            str(runtime_state["last_stream_error"]),
+            "starting",
+        )
         poll_thread = threading.Thread(
             target=poll_market_fallback,
-            args=(token, specs, state_by_uid, states, args, portfolio, last_stream_event, stop_event, lock),
+            args=(token, specs, state_by_uid, states, args, portfolio, last_stream_event, started, runtime_state, stop_event, lock),
             daemon=True,
         )
         poll_thread.start()
@@ -1014,6 +1131,16 @@ def main() -> None:
                 if now >= next_snapshot:
                     write_microstructure_snapshot(Path(args.snapshot_log), states, trading_enabled)
                     write_open_positions(Path(args.open_positions_log), states)
+                    write_bot_health(
+                        Path(args.health_log),
+                        states,
+                        portfolio,
+                        started,
+                        last_stream_event,
+                        int(runtime_state["reconnect_count"]),
+                        str(runtime_state["last_stream_error"]),
+                        "running",
+                    )
                     next_snapshot += args.snapshot_sec
 
         try:
@@ -1026,9 +1153,33 @@ def main() -> None:
                 except Exception as exc:
                     if time.monotonic() >= started + args.runtime_sec:
                         break
-                    print(f"{now_str()} STREAM reconnect_after_error {type(exc).__name__}: {exc}", flush=True)
+                    runtime_state["reconnect_count"] = int(runtime_state["reconnect_count"]) + 1
+                    runtime_state["last_stream_error"] = f"{type(exc).__name__}: {exc}"
+                    print(f"{now_str()} STREAM reconnect_after_error {runtime_state['last_stream_error']}", flush=True)
+                    with lock:
+                        write_bot_health(
+                            Path(args.health_log),
+                            states,
+                            portfolio,
+                            started,
+                            last_stream_event,
+                            int(runtime_state["reconnect_count"]),
+                            str(runtime_state["last_stream_error"]),
+                            "stream_reconnecting",
+                        )
                     time.sleep(3)
         finally:
+            with lock:
+                write_bot_health(
+                    Path(args.health_log),
+                    states,
+                    portfolio,
+                    started,
+                    last_stream_event,
+                    int(runtime_state["reconnect_count"]),
+                    str(runtime_state["last_stream_error"]),
+                    "stopping",
+                )
             stop_event.set()
         print_report(states, started)
         print_portfolio_report(states, portfolio)

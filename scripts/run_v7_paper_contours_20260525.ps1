@@ -62,7 +62,8 @@ function Start-Portfolio {
         "--snapshot-log", "reports\paper_runs\v7_live_20260525\${Name}_live_orderbook_snapshots.csv",
         "--open-positions-log", "reports\paper_runs\v7_live_20260525\${Name}_paper_open_positions.json",
         "--instrument-specs-log", "reports\paper_runs\v7_live_20260525\${Name}_instrument_specs.csv",
-        "--shadow-log", "reports\paper_runs\v7_live_20260525\${Name}_shadow_exit_models.csv"
+        "--shadow-log", "reports\paper_runs\v7_live_20260525\${Name}_shadow_exit_models.csv",
+        "--health-log", "reports\paper_runs\v7_live_20260525\${Name}_health.json"
     )
     Write-RunLog "${Name}Command=$script:Python $($args -join ' ')"
     $proc = Start-Process -FilePath $script:Python -ArgumentList $args -WorkingDirectory $script:ProjectRoot `
@@ -131,11 +132,10 @@ if ($Mode -eq "main" -or $Mode -eq "all") {
     Stop-MatchingPython "multi_futures_paper.py*v7_live_20260525"
 
     foreach ($name in "classic_core", "gl_watch", "neo", "tail_research") {
-        Remove-Item -LiteralPath (Join-Path $script:RunDir "${name}_multi_futures_paper_trades.csv") -Force -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath (Join-Path $script:RunDir "${name}_live_orderbook_snapshots.csv") -Force -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath (Join-Path $script:RunDir "${name}_multi_paper.log") -Force -ErrorAction SilentlyContinue
-        Remove-Item -LiteralPath (Join-Path $script:RunDir "${name}_multi_paper.err.log") -Force -ErrorAction SilentlyContinue
-        "[]" | Set-Content -LiteralPath (Join-Path $script:RunDir "${name}_paper_open_positions.json") -Encoding UTF8
+        $openPath = Join-Path $script:RunDir "${name}_paper_open_positions.json"
+        if (-not (Test-Path -LiteralPath $openPath)) {
+            "[]" | Set-Content -LiteralPath $openPath -Encoding UTF8
+        }
     }
 
     Start-Portfolio -Name "classic_core" -Secids @("PTZ6", "PDU6", "SiM7", "BRU6", "SVH7", "BRQ6", "PTM6", "BTN6", "BTM6", "BTK6", "PTU6", "LKU6", "BRV6")

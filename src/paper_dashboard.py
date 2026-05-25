@@ -140,8 +140,14 @@ def human_reason(reason: object) -> str:
         return f"прогрев: {text.split('=', 1)[1]} мин"
     if text.startswith("fee_filter"):
         return "фильтр: комиссия велика к стопу"
+    if text.startswith("startup_fee_filter"):
+        return "на старте заблокировано: комиссия велика к стопу"
+    if text.startswith("fee_ok"):
+        return "комиссия к стопу в норме"
     if text.startswith("range_filter"):
         return "фильтр: мало движения"
+    if text == "restored_open_position":
+        return "позиция восстановлена после рестарта"
     if text.startswith("entry_signal long"):
         return "сигнал на вход: long"
     if text.startswith("entry_signal short"):
