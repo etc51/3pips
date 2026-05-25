@@ -147,6 +147,10 @@ def human_reason(reason: object) -> str:
         return "комиссия к стопу в норме"
     if text.startswith("range_filter"):
         return "фильтр: мало движения"
+    if text.startswith("brq6_spread_filter"):
+        return "BR: спред слишком большой к стопу"
+    if text.startswith("brq6_loss_pause"):
+        return "BR: пауза после серии стопов"
     if text == "restored_open_position":
         return "позиция восстановлена после рестарта"
     if text.startswith("expiry_filter"):

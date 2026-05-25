@@ -31,6 +31,10 @@ from ng_scalper_bot import (
 
 ROOT = Path(__file__).resolve().parents[1]
 REPORTS = ROOT / "reports"
+BR_POLICY_MIN_STOP_TICKS = 15
+BR_POLICY_MAX_SPREAD_TO_STOP = 0.40
+BR_POLICY_LOSS_PAUSE_COUNT = 3
+BR_POLICY_LOSS_PAUSE_SECONDS = 2 * 60 * 60
 
 
 @dataclass
@@ -76,6 +80,7 @@ class State:
     last_reason: str = ""
     last_entry_candle_count: int = -1
     cooldown_until: float = 0.0
+    consecutive_losses: int = 0
     shadow_positions: dict[str, Position] = field(default_factory=dict)
     shadow_closed: dict[str, bool] = field(default_factory=dict)
 
@@ -159,6 +164,31 @@ def profile_can_trade(profile: Profile, side_fee: float, spec: Spec, max_fee_to_
     return True, f"fee_ok fee={round_fee_ticks:.1f}t stop={profile.stop_ticks}t"
 
 
+def apply_br_loss_pause(st: State, states: list[State], net: float) -> None:
+    if not br_small_stop_policy_applies(st.profile):
+        return
+    related = [
+        other
+        for other in states
+        if br_small_stop_policy_applies(other.profile) and state_family(other) == state_family(st)
+    ]
+    if net >= 0:
+        for other in related:
+            other.consecutive_losses = 0
+        return
+
+    st.consecutive_losses += 1
+    loss_count = sum(other.consecutive_losses for other in related)
+    if loss_count < BR_POLICY_LOSS_PAUSE_COUNT:
+        return
+
+    pause_until = time.monotonic() + BR_POLICY_LOSS_PAUSE_SECONDS
+    minutes = int(BR_POLICY_LOSS_PAUSE_SECONDS // 60)
+    for other in related:
+        other.cooldown_until = max(other.cooldown_until, pause_until)
+        other.last_reason = f"brq6_loss_pause losses={loss_count} minutes={minutes}"
+
+
 def days_to_expiration(spec: Spec) -> float | None:
     if spec.expiration_date is None:
         return None
@@ -180,7 +210,7 @@ def expiry_new_entry_block_reason(spec: Spec, threshold_days: float) -> str | No
 
 def profile_from_row(row: dict, secid: str | None = None, source_secid: str | None = None) -> Profile:
     ticker = secid or row["ticker"]
-    return Profile(
+    profile = Profile(
         secid=ticker,
         stop_ticks=int(row["stop_ticks"]),
         trail_ticks=int(row["trail_ticks"]),
@@ -191,6 +221,8 @@ def profile_from_row(row: dict, secid: str | None = None, source_secid: str | No
         family=str(row.get("v7_family") or contract_family(ticker)),
         source_secid=source_secid or row["ticker"],
     )
+    apply_profile_policy_overrides(profile)
+    return profile
 
 
 def contract_family(secid: str) -> str:
@@ -203,8 +235,19 @@ def contract_family(secid: str) -> str:
     return head or secid
 
 
+def br_small_stop_policy_applies(profile: Profile) -> bool:
+    source = (profile.source_secid or profile.secid).upper()
+    family = (profile.family or contract_family(profile.secid)).upper()
+    return source == "BRQ6" or (family == "BR" and profile.stop_ticks <= BR_POLICY_MIN_STOP_TICKS)
+
+
+def apply_profile_policy_overrides(profile: Profile) -> None:
+    if br_small_stop_policy_applies(profile) and profile.stop_ticks < BR_POLICY_MIN_STOP_TICKS:
+        profile.stop_ticks = BR_POLICY_MIN_STOP_TICKS
+
+
 def clone_profile_for_contract(profile: Profile, secid: str) -> Profile:
-    return Profile(
+    cloned = Profile(
         secid=secid,
         stop_ticks=profile.stop_ticks,
         trail_ticks=profile.trail_ticks,
@@ -215,6 +258,8 @@ def clone_profile_for_contract(profile: Profile, secid: str) -> Profile:
         family=profile.family or contract_family(secid),
         source_secid=profile.source_secid or profile.secid,
     )
+    apply_profile_policy_overrides(cloned)
+    return cloned
 
 
 def load_profiles(path: Path, secids: list[str] | None = None) -> dict[str, Profile]:
@@ -483,6 +528,13 @@ def signal(state: State, aggressive: bool) -> tuple[Direction | None, str]:
         ask_qty = sum(int(getattr(x, "quantity", 0) or 0) for x in getattr(state.last_order_book, "asks", [])[:3])
     if bid_qty <= 0 or ask_qty <= 0:
         return None, f"book_filter empty_book bid={bid_qty} ask={ask_qty}"
+    if br_small_stop_policy_applies(state.profile):
+        levels = best_levels(state.last_order_book, spec)
+        spread_ticks = levels.get("spread_ticks")
+        max_spread = state.profile.stop_ticks * BR_POLICY_MAX_SPREAD_TO_STOP
+        if spread_ticks is None or float(spread_ticks) > max_spread:
+            spread_txt = "-" if spread_ticks is None else f"{float(spread_ticks):.1f}t"
+            return None, f"brq6_spread_filter spread={spread_txt} stop={state.profile.stop_ticks}t max={max_spread:.1f}t"
     vol_ok = avgv > 0 and last_vol >= avgv * vol_mult
     fee_ticks = (2 * state.side_fee / spec.step_price) if spec.step_price else 999
     if fee_ticks > state.profile.stop_ticks * max_fee_to_stop:
@@ -886,11 +938,12 @@ def process_open_state_exit(
         f"source={fill_source} trigger={actual_trigger_price:g}/{actual_trigger_source} "
         f"ticks={ticks:.1f} net={net:.2f} total={st.closed_net:.2f}"
     )
+    apply_br_loss_pause(st, states, net)
     st.position = None
     if all_shadow_models_closed(st):
         st.shadow_positions = {}
         st.shadow_closed = {}
-    st.cooldown_until = time.monotonic() + 90
+    st.cooldown_until = max(st.cooldown_until, time.monotonic() + 90)
     write_open_positions(Path(args.open_positions_log), states)
 
 
