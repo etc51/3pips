@@ -662,15 +662,29 @@ def print_portfolio_report(states: list[State], portfolio: Portfolio) -> None:
     )
 
 
-def parse_today_time(value: str | None) -> float | None:
+def parse_clock_time(value: str | None) -> int | None:
     if not value:
         return None
-    target = datetime.strptime(value, "%H:%M").replace(
-        year=datetime.now().year,
-        month=datetime.now().month,
-        day=datetime.now().day,
-    )
-    return target.timestamp()
+    target = datetime.strptime(value, "%H:%M")
+    return target.hour * 3600 + target.minute * 60
+
+
+def clock_seconds_now() -> int:
+    current = datetime.now()
+    return current.hour * 3600 + current.minute * 60 + current.second
+
+
+def daily_trading_enabled(no_trade_before: int | None, no_new_after: int | None) -> bool:
+    now_sec = clock_seconds_now()
+    if no_trade_before is not None and now_sec < no_trade_before:
+        return False
+    if no_new_after is not None and now_sec >= no_new_after:
+        return False
+    return True
+
+
+def daily_force_close_due(force_close_at: int | None) -> bool:
+    return force_close_at is not None and clock_seconds_now() >= force_close_at
 
 
 def best_levels(orderbook: object | None, spec: Spec) -> dict:
@@ -872,6 +886,7 @@ def process_open_state_exit(
     candle_closed: bool,
     actual_trigger_override: float | None = None,
     actual_trigger_source_override: str | None = None,
+    force_exit_reason: str | None = None,
 ) -> None:
     if st.position is None:
         if has_active_shadow(st):
@@ -914,7 +929,12 @@ def process_open_state_exit(
     fee_ticks = (2 * st.side_fee / st.spec.step_price) if st.spec.step_price else 999
     expiry_close_days = float(getattr(args, "expiry_force_close_days", 0.0))
     dte = days_to_expiration(st.spec)
-    if expiry_close_days > 0 and dte is not None and dte <= expiry_close_days:
+    if force_exit_reason:
+        fill_price = round_to_step(exit_price, st.spec.min_step)
+        fill_source = force_exit_reason
+        actual_trigger_price = fill_price
+        actual_trigger_source = force_exit_reason
+    elif expiry_close_days > 0 and dte is not None and dte <= expiry_close_days:
         fill_price = round_to_step(exit_price, st.spec.min_step)
         fill_source = "expiry_force_close"
         actual_trigger_price = fill_price
@@ -1060,6 +1080,7 @@ def poll_market_fallback(
                                     st.last_price = round_to_step(price_by_uid[spec.uid], spec.min_step)
                                 if orderbook is not None:
                                     st.last_order_book = orderbook
+                                force_reason = "scheduled_force_close" if st.position is not None and daily_force_close_due(parse_clock_time(getattr(args, "force_close_at", ""))) else None
                                 process_open_state_exit(
                                     st,
                                     args,
@@ -1067,6 +1088,7 @@ def poll_market_fallback(
                                     states,
                                     candle_closed=False,
                                     actual_trigger_source_override="polling_fallback",
+                                    force_exit_reason=force_reason,
                                 )
                         write_open_positions(Path(args.open_positions_log), states)
                         write_microstructure_snapshot(Path(args.snapshot_log), states, trading_enabled=True)
@@ -1404,6 +1426,7 @@ def main() -> None:
     parser.add_argument("--snapshot-sec", type=int, default=10)
     parser.add_argument("--no-trade-before", default="")
     parser.add_argument("--no-new-after", default="")
+    parser.add_argument("--force-close-at", default="")
     parser.add_argument("--paper-capital", type=float, default=200_000.0)
     parser.add_argument("--max-total-margin-pct", type=float, default=0.80)
     parser.add_argument("--max-position-margin-pct", type=float, default=0.20)
@@ -1578,13 +1601,15 @@ def main() -> None:
             f"runtime_sec={args.runtime_sec} paper_capital={portfolio.initial_capital:.0f} "
             f"max_total_margin_pct={portfolio.max_total_margin_pct:.2f} "
             f"max_position_margin_pct={portfolio.max_position_margin_pct:.2f} "
-            f"max_full_stop_rub={float(args.max_full_stop_rub):.0f}"
+            f"max_full_stop_rub={float(args.max_full_stop_rub):.0f} "
+            f"no_new_after={args.no_new_after or '-'} force_close_at={args.force_close_at or '-'}"
         )
         started = time.monotonic()
         next_report = started + args.report_sec
         next_snapshot = started
-        no_trade_before = parse_today_time(args.no_trade_before)
-        no_new_after = parse_today_time(args.no_new_after)
+        no_trade_before = parse_clock_time(args.no_trade_before)
+        no_new_after = parse_clock_time(args.no_new_after)
+        force_close_at = parse_clock_time(args.force_close_at)
         last_stream_event = [time.monotonic()]
         runtime_state: dict[str, object] = {"reconnect_count": 0, "last_stream_error": ""}
         stop_event = threading.Event()
@@ -1612,8 +1637,8 @@ def main() -> None:
         def handle_stream_response(response) -> None:
             nonlocal next_report, next_snapshot
             now = time.monotonic()
-            wall_now = time.time()
-            trading_enabled = (no_trade_before is None or wall_now >= no_trade_before) and (no_new_after is None or wall_now < no_new_after)
+            trading_enabled = daily_trading_enabled(no_trade_before, no_new_after)
+            force_close_due = daily_force_close_due(force_close_at)
             uid = ""
             price = None
             candle = None
@@ -1655,7 +1680,7 @@ def main() -> None:
                         process_open_state_exit(st, args, portfolio, states, candle is not None)
                         if has_active_shadow(st):
                             continue
-                    if st.position is None and trading_enabled:
+                    if st.position is None and trading_enabled and not force_close_due:
                         if st.attempts >= st.profile.max_attempts:
                             st.last_reason = "attempt_filter max_attempts_reached"
                             continue
@@ -1734,6 +1759,7 @@ def main() -> None:
                             candle is not None,
                             actual_trigger_override=trigger_override,
                             actual_trigger_source_override="closed_1m_candle" if candle is not None else None,
+                            force_exit_reason="scheduled_force_close" if force_close_due else None,
                         )
                 if now >= next_report:
                     print_report(states, started)

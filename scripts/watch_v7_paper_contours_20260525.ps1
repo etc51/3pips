@@ -117,7 +117,7 @@ function New-BotArgs {
         [string]$Name,
         [string[]]$Secids
     )
-    return @(
+    $args = @(
         "src\multi_futures_paper.py",
         "--secids"
     ) + $Secids + @(
@@ -147,6 +147,10 @@ function New-BotArgs {
         "--shadow-log", "reports\paper_runs\v7_live_20260525\${Name}_shadow_exit_models.csv",
         "--health-log", "reports\paper_runs\v7_live_20260525\${Name}_health.json"
     )
+    if ($Name -eq "neo") {
+        $args += @("--no-new-after", "23:30", "--force-close-at", "23:50")
+    }
+    return $args
 }
 
 function Restart-Bot {

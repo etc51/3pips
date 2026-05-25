@@ -155,6 +155,8 @@ def human_reason(reason: object) -> str:
         return "BR: пауза после серии стопов"
     if text == "restored_open_position":
         return "позиция восстановлена после рестарта"
+    if text.startswith("scheduled_force_close"):
+        return "плановое закрытие перед переносом"
     if text.startswith("expiry_filter"):
         return "фильтр: близко экспирация, новые входы запрещены"
     if text.startswith("roll_family_filter"):

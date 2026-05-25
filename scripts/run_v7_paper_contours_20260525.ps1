@@ -71,6 +71,9 @@ function Start-Portfolio {
         "--shadow-log", "reports\paper_runs\v7_live_20260525\${Name}_shadow_exit_models.csv",
         "--health-log", "reports\paper_runs\v7_live_20260525\${Name}_health.json"
     )
+    if ($Name -eq "neo") {
+        $args += @("--no-new-after", "23:30", "--force-close-at", "23:50")
+    }
     Write-RunLog "${Name}Command=$script:Python $($args -join ' ')"
     $proc = Start-Process -FilePath $script:Python -ArgumentList $args -WorkingDirectory $script:ProjectRoot `
         -RedirectStandardOutput $stdout -RedirectStandardError $stderr -WindowStyle Hidden -PassThru
