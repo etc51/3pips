@@ -566,9 +566,7 @@ def build_state(base_dir: Path) -> dict:
             startup_reason = startup.get("reason") or ""
             startup_state = str(startup.get("status") or "")
             if startup_state == "skipped":
-                state = readiness_label(0, startup_reason)
-                comment = human_reason(startup_reason)
-                last = startup.get("last_price")
+                continue
             elif startup_state == "loaded":
                 state = "нет потока"
                 comment = "подписан, ждём данные потока"
