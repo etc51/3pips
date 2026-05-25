@@ -592,7 +592,14 @@ def process_open_state_exit(
     actual_trigger_price = actual_trigger_override if actual_trigger_override is not None else exit_price
     actual_trigger_source = actual_trigger_source_override or exit_source
     fee_ticks = (2 * st.side_fee / st.spec.step_price) if st.spec.step_price else 999
-    if args.actual_exit_model == "candle_like":
+    expiry_close_days = float(getattr(args, "expiry_force_close_days", 0.0))
+    dte = days_to_expiration(st.spec)
+    if expiry_close_days > 0 and dte is not None and dte <= expiry_close_days:
+        fill_price = round_to_step(exit_price, st.spec.min_step)
+        fill_source = "expiry_force_close"
+        actual_trigger_price = fill_price
+        actual_trigger_source = f"expiry_dte_{dte:.1f}d"
+    elif args.actual_exit_model == "candle_like":
         if candle_closed:
             actual_trigger_price = round_to_step(actual_trigger_price, st.spec.min_step)
             move_ticks = (
@@ -981,6 +988,7 @@ def main() -> None:
     parser.add_argument("--stream-stale-sec", type=float, default=15.0)
     parser.add_argument("--fallback-poll-sec", type=float, default=2.0)
     parser.add_argument("--no-new-expiry-days", type=float, default=5.0)
+    parser.add_argument("--expiry-force-close-days", type=float, default=3.0)
     args = parser.parse_args()
 
     from t_tech.invest import Client, InstrumentIdType
