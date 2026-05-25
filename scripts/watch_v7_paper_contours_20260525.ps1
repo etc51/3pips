@@ -148,7 +148,7 @@ function New-BotArgs {
         "--health-log", "reports\paper_runs\v7_live_20260525\${Name}_health.json"
     )
     if ($Name -eq "neo") {
-        $args += @("--no-new-after", "23:30", "--force-close-at", "23:50")
+        $args += @("--no-new-after", "19:00", "--force-close-at", "23:50")
     }
     return $args
 }
