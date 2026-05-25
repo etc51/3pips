@@ -864,6 +864,38 @@ def restore_open_positions(path: Path, states: list[State]) -> int:
     return restored
 
 
+def restore_closed_totals(path: Path, states: list[State], portfolio: Portfolio) -> int:
+    if not path.exists() or path.stat().st_size == 0:
+        return 0
+    by_key = {(st.contour, st.spec.secid): st for st in states}
+    restored = 0
+    restored_net = 0.0
+    try:
+        with path.open(newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                contour = str(row.get("contour") or "")
+                secid = str(row.get("secid") or row.get("ticker") or "")
+                st = by_key.get((contour, secid))
+                if st is None:
+                    continue
+                try:
+                    net = float(row.get("net_rub") or 0.0)
+                except Exception:
+                    net = 0.0
+                st.closed += 1
+                st.closed_net += net
+                st.attempts += 1
+                portfolio.closed_net += net
+                restored += 1
+                restored_net += net
+    except Exception as exc:
+        print(f"{now_str()} RESTORE closed_trades_read_error={exc}", flush=True)
+        return 0
+    if restored:
+        print(f"{now_str()} RESTORE closed_trades count={restored} net={restored_net:.2f} source={path}", flush=True)
+    return restored
+
+
 def write_bot_health(
     path: Path,
     states: list[State],
@@ -1009,6 +1041,7 @@ def main() -> None:
         runtime_state: dict[str, object] = {"reconnect_count": 0, "last_stream_error": ""}
         stop_event = threading.Event()
         lock = threading.RLock()
+        restore_closed_totals(Path(args.log), states, portfolio)
         restore_open_positions(Path(args.open_positions_log), states)
         write_open_positions(Path(args.open_positions_log), states)
         write_bot_health(
