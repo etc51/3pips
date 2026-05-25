@@ -153,6 +153,8 @@ def human_reason(reason: object) -> str:
         return "фильтр: близко экспирация, новые входы запрещены"
     if text.startswith("roll_family_filter"):
         return "фильтр: уже есть позиция в этом семействе на переносе"
+    if text.startswith("direction_filter"):
+        return "фильтр: сигнал против направления профиля"
     if text.startswith("entry_signal long"):
         return "сигнал на вход: long"
     if text.startswith("entry_signal short"):

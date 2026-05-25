@@ -55,6 +55,7 @@ class Profile:
     trail_arm_ticks: int
     target_min_ticks: int
     max_attempts: int
+    allowed_direction: str = "both"
     family: str = ""
     source_secid: str = ""
 
@@ -186,6 +187,7 @@ def profile_from_row(row: dict, secid: str | None = None, source_secid: str | No
         trail_arm_ticks=int(row["trail_arm_ticks"]),
         target_min_ticks=int(row["target_min_ticks"]),
         max_attempts=int(row["max_attempts"]),
+        allowed_direction=str(row.get("v7_direction") or "both").lower(),
         family=str(row.get("v7_family") or contract_family(ticker)),
         source_secid=source_secid or row["ticker"],
     )
@@ -209,6 +211,7 @@ def clone_profile_for_contract(profile: Profile, secid: str) -> Profile:
         trail_arm_ticks=profile.trail_arm_ticks,
         target_min_ticks=profile.target_min_ticks,
         max_attempts=profile.max_attempts,
+        allowed_direction=profile.allowed_direction,
         family=profile.family or contract_family(secid),
         source_secid=profile.source_secid or profile.secid,
     )
@@ -1501,6 +1504,10 @@ def main() -> None:
                         direction, reason = signal(st, contour == "aggressive")
                         st.last_reason = reason
                         if direction:
+                            allowed_direction = (st.profile.allowed_direction or "both").lower()
+                            if allowed_direction in {"long", "short"} and direction != allowed_direction:
+                                st.last_reason = f"direction_filter profile={allowed_direction} signal={direction}"
+                                continue
                             entry_price, entry_source = executable_price(st, direction, "entry")
                             if entry_price is None:
                                 st.last_reason = "book_filter no_executable_entry"
