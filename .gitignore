@@ -7,6 +7,11 @@ __pycache__/
 .venv/
 venv/
 
+# Build artifacts
+build/
+dist/
+*.spec
+
 # Secrets/local environment
 .env
 .env.*
