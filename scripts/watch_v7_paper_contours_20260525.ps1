@@ -133,6 +133,7 @@ function New-BotArgs {
         "--actual-exit-model", "candle_like",
         "--stream-stale-sec", "15",
         "--fallback-poll-sec", "2",
+        "--no-new-expiry-days", "5",
         "--snapshot-sec", "10",
         "--log", "reports\paper_runs\v7_live_20260525\${Name}_multi_futures_paper_trades.csv",
         "--snapshot-log", "reports\paper_runs\v7_live_20260525\${Name}_live_orderbook_snapshots.csv",

@@ -41,6 +41,7 @@ class Spec:
     min_step: float
     step_price: float
     last_rub: float
+    expiration_date: datetime | None = None
     margin_buy: float = 0.0
     margin_sell: float = 0.0
 
@@ -129,6 +130,25 @@ def profile_can_trade(profile: Profile, side_fee: float, spec: Spec, max_fee_to_
     if round_fee_ticks > max_allowed:
         return False, f"startup_fee_filter fee={round_fee_ticks:.1f}t stop={profile.stop_ticks}t max={max_allowed:.1f}t"
     return True, f"fee_ok fee={round_fee_ticks:.1f}t stop={profile.stop_ticks}t"
+
+
+def days_to_expiration(spec: Spec) -> float | None:
+    if spec.expiration_date is None:
+        return None
+    exp = spec.expiration_date
+    if exp.tzinfo is None:
+        exp = exp.replace(tzinfo=timezone.utc)
+    return (exp.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds() / 86400
+
+
+def expiry_new_entry_block_reason(spec: Spec, threshold_days: float) -> str | None:
+    if threshold_days <= 0:
+        return None
+    dte = days_to_expiration(spec)
+    if dte is None or dte > threshold_days:
+        return None
+    exp = spec.expiration_date.isoformat() if spec.expiration_date else ""
+    return f"expiry_filter no_new_entries dte={dte:.1f}d threshold={threshold_days:.1f}d exp={exp}"
 
 
 def load_profiles(path: Path, secids: list[str]) -> dict[str, Profile]:
@@ -772,11 +792,14 @@ def write_microstructure_snapshot(path: Path, states: list[State], trading_enabl
 def write_instrument_specs(path: Path, specs: list[Spec]) -> None:
     rows = []
     for spec in specs:
+        dte = days_to_expiration(spec)
         rows.append(
             {
                 "ticker": spec.secid,
                 "figi": spec.figi,
                 "uid": spec.uid,
+                "expiration": spec.expiration_date.isoformat() if spec.expiration_date else "",
+                "days_to_expiration": round(dte, 3) if dte is not None else "",
                 "tick": spec.min_step,
                 "tick_rub": spec.step_price,
                 "last_rub": round(spec.last_rub, 6),
@@ -957,6 +980,7 @@ def main() -> None:
     parser.add_argument("--actual-exit-model", choices=["stream_stoplimit", "candle_like"], default="stream_stoplimit")
     parser.add_argument("--stream-stale-sec", type=float, default=15.0)
     parser.add_argument("--fallback-poll-sec", type=float, default=2.0)
+    parser.add_argument("--no-new-expiry-days", type=float, default=5.0)
     args = parser.parse_args()
 
     from t_tech.invest import Client, InstrumentIdType
@@ -990,6 +1014,7 @@ def main() -> None:
                 min_step=quotation_to_float(info.min_price_increment),
                 step_price=quotation_to_float(info.min_price_increment_amount),
                 last_rub=0.0,
+                expiration_date=getattr(info, "expiration_date", None),
                 margin_buy=quotation_to_float(getattr(info, "initial_margin_on_buy", None)),
                 margin_sell=quotation_to_float(getattr(info, "initial_margin_on_sell", None)),
             )
@@ -1119,6 +1144,10 @@ def main() -> None:
                             continue
                         if has_open_ticker(states, spec.secid):
                             st.last_reason = "duplicate_filter ticker_already_open"
+                            continue
+                        expiry_reason = expiry_new_entry_block_reason(spec, float(args.no_new_expiry_days))
+                        if expiry_reason:
+                            st.last_reason = expiry_reason
                             continue
                         direction, reason = signal(st, contour == "aggressive")
                         st.last_reason = reason
