@@ -60,6 +60,7 @@ function Start-Portfolio {
         "--risk-profit-guard-min-rub", "3000",
         "--risk-profit-guard-drawdown-pct", "0.35",
         "--risk-profit-guard-drawdown-min-rub", "1500",
+        "--risk-stop-to-median-cap", "4",
         "--stop-limit-emergency-ticks", "2",
         "--actual-exit-model", "candle_like",
         "--stream-stale-sec", "15",
@@ -108,6 +109,7 @@ function Start-StockPortfolio {
         "--risk-profit-guard-min-rub", "1500",
         "--risk-profit-guard-drawdown-pct", "0.35",
         "--risk-profit-guard-drawdown-min-rub", "500",
+        "--risk-stop-to-median-cap", "4",
         "--stop-limit-emergency-ticks", "2",
         "--actual-exit-model", "stream_stoplimit",
         "--stream-stale-sec", "15",
@@ -194,6 +196,7 @@ if ($Mode -eq "dashboard" -or $Mode -eq "all") {
 if ($Mode -eq "main" -or $Mode -eq "all") {
     Stop-MatchingPython "multi_futures_paper.py*scalp_once_20260525"
     Stop-MatchingPython "multi_futures_paper.py*v7_live_20260525"
+    Stop-MatchingPython "multi_stocks_paper.py*v7_live_20260525"
 
     foreach ($name in "classic_core", "gl_watch", "neo", "tail_research", "stock_watch") {
         $openPath = Join-Path $script:RunDir "${name}_paper_open_positions.json"

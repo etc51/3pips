@@ -125,6 +125,8 @@ class RiskDecision:
     reason: str
     median_win_rub: float | None = None
     stop_to_median_win: float | None = None
+    median_stop_cap_rub: float | None = None
+    median_win_source: str = ""
     family_day_net: float = 0.0
     family_day_high: float = 0.0
 
@@ -141,6 +143,7 @@ class RiskGovernor:
         profit_guard_drawdown_min_rub: float,
         stop_to_median_reduced: float,
         stop_to_median_micro: float,
+        stop_to_median_cap: float,
         probation_trades: int,
     ) -> None:
         self.path = path
@@ -152,9 +155,11 @@ class RiskGovernor:
         self.profit_guard_drawdown_min_rub = float(profit_guard_drawdown_min_rub)
         self.stop_to_median_reduced = float(stop_to_median_reduced)
         self.stop_to_median_micro = float(stop_to_median_micro)
+        self.stop_to_median_cap = float(stop_to_median_cap)
         self.probation_trades = int(probation_trades)
         self.profile_stats: dict[str, dict] = {}
         self.family_stats: dict[str, dict] = {}
+        self.global_stats: dict = self._empty_stats()
         self.family_days: dict[str, dict] = {}
 
     @staticmethod
@@ -210,6 +215,13 @@ class RiskGovernor:
         return float(median(values))
 
     @staticmethod
+    def _median_win_with_count(stats: dict | None) -> tuple[float | None, int]:
+        values = [float(x) for x in (stats or {}).get("positive_nets", []) if float(x) > 0]
+        if not values:
+            return None, 0
+        return float(median(values)), len(values)
+
+    @staticmethod
     def profile_key(st: State) -> str:
         family = state_family(st)
         source = st.profile.source_secid or st.profile.secid
@@ -255,12 +267,14 @@ class RiskGovernor:
         family_stats = self.family_stats.setdefault(family, self._empty_stats())
         self._record_stats(profile_stats, net, gross, fees)
         self._record_stats(family_stats, net, gross, fees)
+        self._record_stats(self.global_stats, net, gross, fees)
         self._record_day(family, self._date_from_closed_at(closed_at), net)
         self.write()
 
     def rebuild_from_trade_log(self, path: Path, states: list[State]) -> None:
         self.profile_stats = {}
         self.family_stats = {}
+        self.global_stats = self._empty_stats()
         self.family_days = {}
         if not path.exists() or path.stat().st_size == 0:
             self.write()
@@ -300,7 +314,19 @@ class RiskGovernor:
 
         profile_stats = self.profile_stats.get(self.profile_key(st), self._empty_stats())
         family_stats = self.family_stats.get(family, self._empty_stats())
-        median_win = self._median_win(profile_stats) or self._median_win(family_stats)
+        profile_median, profile_positive_count = self._median_win_with_count(profile_stats)
+        family_median, family_positive_count = self._median_win_with_count(family_stats)
+        global_median, global_positive_count = self._median_win_with_count(self.global_stats)
+        median_win = profile_median if profile_median is not None else family_median
+        if median_win is None:
+            median_win = global_median
+        median_source = ""
+        if profile_median is not None:
+            median_source = f"profile_wins={profile_positive_count}"
+        elif family_median is not None:
+            median_source = f"family_wins={family_positive_count}"
+        elif global_median is not None:
+            median_source = f"portfolio_wins={global_positive_count}"
         stop_to_median = (base_limit / median_win) if median_win and median_win > 0 else None
         mode = "normal"
         reasons: list[str] = []
@@ -368,6 +394,19 @@ class RiskGovernor:
             limit = base_limit
             reasons.append("risk_ok")
 
+        median_stop_cap = None
+        if median_win is not None and median_win > 0 and self.stop_to_median_cap > 0:
+            median_stop_cap = median_win * self.stop_to_median_cap
+            if median_stop_cap < limit:
+                limit = max(0.0, median_stop_cap)
+                if mode == "normal":
+                    mode = "median_cap"
+                reasons.append(
+                    f"median_cap median={median_win:.0f} cap_x={self.stop_to_median_cap:.1f} "
+                    f"max_stop={limit:.0f} {median_source}"
+                )
+        stop_to_median = (limit / median_win) if median_win and median_win > 0 else None
+
         return RiskDecision(
             allowed=True,
             mode=mode,
@@ -375,6 +414,8 @@ class RiskGovernor:
             reason="; ".join(reasons),
             median_win_rub=median_win,
             stop_to_median_win=stop_to_median,
+            median_stop_cap_rub=median_stop_cap,
+            median_win_source=median_source,
             family_day_net=float(day.get("net") or 0.0),
             family_day_high=float(day.get("high") or 0.0),
         )
@@ -390,9 +431,11 @@ class RiskGovernor:
             "profit_guard_drawdown_min_rub": self.profit_guard_drawdown_min_rub,
             "stop_to_median_reduced": self.stop_to_median_reduced,
             "stop_to_median_micro": self.stop_to_median_micro,
+            "stop_to_median_cap": self.stop_to_median_cap,
             "probation_trades": self.probation_trades,
             "profile_stats": self.profile_stats,
             "family_stats": self.family_stats,
+            "global_stats": self.global_stats,
             "family_days": self.family_days,
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -1461,6 +1504,9 @@ def write_microstructure_snapshot(
                 "family_day_net": round(risk_decision.family_day_net, 2) if risk_decision is not None else None,
                 "family_day_high": round(risk_decision.family_day_high, 2) if risk_decision is not None else None,
                 "stop_to_median_win": round(risk_decision.stop_to_median_win, 2) if risk_decision is not None and risk_decision.stop_to_median_win is not None else None,
+                "median_win_rub": round(risk_decision.median_win_rub, 2) if risk_decision is not None and risk_decision.median_win_rub is not None else None,
+                "median_stop_cap_rub": round(risk_decision.median_stop_cap_rub, 2) if risk_decision is not None and risk_decision.median_stop_cap_rub is not None else None,
+                "median_win_source": risk_decision.median_win_source if risk_decision is not None else "",
             }
         )
         if spread_review:
@@ -1759,6 +1805,7 @@ def main() -> None:
     parser.add_argument("--risk-profit-guard-drawdown-min-rub", type=float, default=1_500.0)
     parser.add_argument("--risk-stop-to-median-reduced", type=float, default=7.0)
     parser.add_argument("--risk-stop-to-median-micro", type=float, default=10.0)
+    parser.add_argument("--risk-stop-to-median-cap", type=float, default=4.0)
     parser.add_argument("--risk-probation-trades", type=int, default=30)
     parser.add_argument("--stop-limit-emergency-ticks", type=float, default=2.0)
     parser.add_argument("--actual-exit-model", choices=["stream_stoplimit", "candle_like"], default="stream_stoplimit")
@@ -1953,6 +2000,7 @@ def main() -> None:
             profit_guard_drawdown_min_rub=float(args.risk_profit_guard_drawdown_min_rub),
             stop_to_median_reduced=float(args.risk_stop_to_median_reduced),
             stop_to_median_micro=float(args.risk_stop_to_median_micro),
+            stop_to_median_cap=float(args.risk_stop_to_median_cap),
             probation_trades=int(args.risk_probation_trades),
         )
         setattr(args, "risk_governor", risk_governor)

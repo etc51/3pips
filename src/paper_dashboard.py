@@ -155,6 +155,8 @@ def human_reason(reason: object) -> str:
         return "риск: только микро-размер"
     if text.startswith("risk_governor reduced"):
         return "риск: размер уменьшен"
+    if text.startswith("risk_governor median_cap"):
+        return "риск: стоп ограничен медианным плюсом"
     if text.startswith("daily_profit_guard"):
         return "риск: защита дневной прибыли"
     if text.startswith("brq6_spread_filter"):
@@ -228,6 +230,12 @@ def human_reason(reason: object) -> str:
         "paused_today": "пауза до завтра",
         "micro": "микро",
         "reduced": "уменьшен",
+        "median_cap": "лимит по медианному плюсу",
+        "cap_x": "множитель лимита",
+        "max_stop": "макс стоп",
+        "profile_wins": "плюсов профиля",
+        "family_wins": "плюсов семьи",
+        "portfolio_wins": "плюсов контура",
         "normal": "норма",
         "daily_profit_guard": "защита дневной прибыли",
         "stop_to_median": "стоп к медианному плюсу",
