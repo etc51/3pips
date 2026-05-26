@@ -149,6 +149,14 @@ def human_reason(reason: object) -> str:
         return "фильтр: мало движения"
     if text.startswith("risk_filter"):
         return "фильтр: полный стоп больше лимита ₽"
+    if text.startswith("risk_governor paused_today"):
+        return "риск: семья на паузе до завтра, защищаем дневной плюс"
+    if text.startswith("risk_governor micro"):
+        return "риск: только микро-размер"
+    if text.startswith("risk_governor reduced"):
+        return "риск: размер уменьшен"
+    if text.startswith("daily_profit_guard"):
+        return "риск: защита дневной прибыли"
     if text.startswith("brq6_spread_filter"):
         return "BR: спред слишком большой к стопу"
     if text.startswith("brq6_loss_pause"):
@@ -216,6 +224,19 @@ def human_reason(reason: object) -> str:
         "fee": "комиссия",
         "range": "движение",
         "filter": "фильтр",
+        "risk_governor": "риск",
+        "paused_today": "пауза до завтра",
+        "micro": "микро",
+        "reduced": "уменьшен",
+        "normal": "норма",
+        "daily_profit_guard": "защита дневной прибыли",
+        "stop_to_median": "стоп к медианному плюсу",
+        "family_tail": "хвост семьи",
+        "profile_tail": "хвост профиля",
+        "profile_loss_cluster": "серия убытков профиля",
+        "profile_negative": "профиль в минусе",
+        "family_negative": "семья в минусе",
+        "probation_new_contract": "испытание нового контракта",
         "warmup": "прогрев",
     }
     out = text
@@ -590,6 +611,7 @@ def build_state(base_dir: Path) -> dict:
             "ticker": key[1],
             "position": "; ".join(positions_by_ticker.get(key, [])) or "-",
             "state": rec.get("state_label"),
+            "risk": rec.get("risk_mode") or "-",
             "last": rec.get("last_price_target"),
             "bid": rec.get("bid_target"),
             "ask": rec.get("ask_target"),
@@ -628,6 +650,7 @@ def build_state(base_dir: Path) -> dict:
                     "ticker": str(ticker),
                     "position": "; ".join(positions_by_ticker.get(key, [])) or "-",
                     "state": state,
+                    "risk": "-",
                     "last": last,
                     "bid": None,
                     "ask": None,
@@ -828,7 +851,7 @@ HTML = r"""<!doctype html>
         ["Контур","portfolio"], ["Старт ₽","capital",false,2], ["Реальный доход ₽","closed_net",true,2], ["Доход %","return_pct",true,3], ["ГО занято ₽","used_margin",false,2], ["Свободно ₽","free_capital",false,2], ["Позиций","open_positions"], ["Сделок","closed_trades"]
       ], data.portfolio_overview || []);
       table(document.getElementById('tickers'), [
-        ["Контур","portfolio"], ["Тикер","ticker"], ["Позиция","position"], ["Готовность","state",false,null,"state"], ["Last","last"], ["Bid","bid"], ["Ask","ask"], ["Спред","spread"], ["Стоп","stop_ticks"], ["Спред/стоп %","spread_to_stop_pct"], ["Стакан","book"], ["Комментарий","comment",false,null,"comment"]
+        ["Контур","portfolio"], ["Тикер","ticker"], ["Позиция","position"], ["Готовность","state",false,null,"state"], ["Риск","risk"], ["Last","last"], ["Bid","bid"], ["Ask","ask"], ["Спред","spread"], ["Стоп","stop_ticks"], ["Спред/стоп %","spread_to_stop_pct"], ["Стакан","book"], ["Комментарий","comment",false,null,"comment"]
       ], data.ticker_overview || []);
       table(document.getElementById('wideSpread'), [
         ["Контур","portfolio"], ["Тикер","ticker"], ["Last","last"], ["Спред","spread"], ["Стоп","stop_ticks"], ["Спред/стоп %","spread_to_stop_pct"], ["Класс","spread_class"], ["Стакан","book"], ["Комментарий","comment",false,null,"comment"]
@@ -842,7 +865,7 @@ HTML = r"""<!doctype html>
       else {
         posEl.innerHTML = '<div class="table-wrap"><table id="positionsTable"></table></div>';
         table(document.getElementById('positionsTable'), [
-          ["Контур","portfolio"], ["Режим","contour"], ["Тикер","ticker"], ["Напр.","direction"], ["Qty","qty"], ["ГО ₽","margin_rub",false,2], ["Стоп ₽","full_stop_risk_rub",false,2], ["Entry","entry_price"], ["Last","last_price"], ["Mark","mark_price"], ["Stop","stop_price"], ["Тики","unrealized_ticks",true,2], ["Грязными ₽","gross_pnl_rub",true,2], ["Комиссия ₽","fees_rub",false,2], ["Сейчас ₽","unrealized_net_rub",true,2], ["Открыта","opened_at"]
+          ["Контур","portfolio"], ["Режим","contour"], ["Риск","risk_mode"], ["Тикер","ticker"], ["Напр.","direction"], ["Qty","qty"], ["ГО ₽","margin_rub",false,2], ["Стоп ₽","full_stop_risk_rub",false,2], ["Entry","entry_price"], ["Last","last_price"], ["Mark","mark_price"], ["Stop","stop_price"], ["Тики","unrealized_ticks",true,2], ["Грязными ₽","gross_pnl_rub",true,2], ["Комиссия ₽","fees_rub",false,2], ["Сейчас ₽","unrealized_net_rub",true,2], ["Открыта","opened_at"]
         ], positions);
       }
       window.scrollTo(sx, sy);

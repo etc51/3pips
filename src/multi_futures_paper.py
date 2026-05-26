@@ -10,6 +10,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from statistics import median
 
 from ng_scalper_bot import (
     Direction,
@@ -85,6 +86,9 @@ class State:
     last_entry_candle_count: int = -1
     cooldown_until: float = 0.0
     consecutive_losses: int = 0
+    risk_mode: str = "normal"
+    risk_limit_rub: float = DEFAULT_MAX_FULL_STOP_RUB
+    risk_reason: str = ""
     shadow_positions: dict[str, Position] = field(default_factory=dict)
     shadow_closed: dict[str, bool] = field(default_factory=dict)
 
@@ -111,6 +115,290 @@ class SizingDecision:
     full_stop_per_contract_rub: float
     full_stop_rub: float
     reason: str
+
+
+@dataclass
+class RiskDecision:
+    allowed: bool
+    mode: str
+    max_full_stop_rub: float
+    reason: str
+    median_win_rub: float | None = None
+    stop_to_median_win: float | None = None
+    family_day_net: float = 0.0
+    family_day_high: float = 0.0
+
+
+class RiskGovernor:
+    def __init__(
+        self,
+        path: Path,
+        base_max_full_stop_rub: float,
+        reduced_full_stop_rub: float,
+        micro_full_stop_rub: float,
+        profit_guard_min_rub: float,
+        profit_guard_drawdown_pct: float,
+        profit_guard_drawdown_min_rub: float,
+        stop_to_median_reduced: float,
+        stop_to_median_micro: float,
+        probation_trades: int,
+    ) -> None:
+        self.path = path
+        self.base_max_full_stop_rub = float(base_max_full_stop_rub)
+        self.reduced_full_stop_rub = float(reduced_full_stop_rub)
+        self.micro_full_stop_rub = float(micro_full_stop_rub)
+        self.profit_guard_min_rub = float(profit_guard_min_rub)
+        self.profit_guard_drawdown_pct = float(profit_guard_drawdown_pct)
+        self.profit_guard_drawdown_min_rub = float(profit_guard_drawdown_min_rub)
+        self.stop_to_median_reduced = float(stop_to_median_reduced)
+        self.stop_to_median_micro = float(stop_to_median_micro)
+        self.probation_trades = int(probation_trades)
+        self.profile_stats: dict[str, dict] = {}
+        self.family_stats: dict[str, dict] = {}
+        self.family_days: dict[str, dict] = {}
+
+    @staticmethod
+    def _empty_stats() -> dict:
+        return {
+            "trades": 0,
+            "wins": 0,
+            "losses": 0,
+            "net": 0.0,
+            "gross": 0.0,
+            "fees": 0.0,
+            "gross_profit": 0.0,
+            "gross_loss_abs": 0.0,
+            "best_win": 0.0,
+            "worst_loss": 0.0,
+            "positive_nets": [],
+            "recent_nets": [],
+        }
+
+    @staticmethod
+    def _date_from_closed_at(closed_at: object) -> str:
+        text = str(closed_at or "")
+        if len(text) >= 10 and text[4:5] == "-" and text[7:8] == "-":
+            return text[:10]
+        return datetime.now().strftime("%Y-%m-%d")
+
+    @staticmethod
+    def _record_stats(stats: dict, net: float, gross: float, fees: float) -> None:
+        stats["trades"] = int(stats.get("trades") or 0) + 1
+        stats["net"] = float(stats.get("net") or 0.0) + net
+        stats["gross"] = float(stats.get("gross") or 0.0) + gross
+        stats["fees"] = float(stats.get("fees") or 0.0) + fees
+        recent = list(stats.get("recent_nets") or [])
+        recent.append(round(net, 2))
+        stats["recent_nets"] = recent[-20:]
+        if net > 0:
+            stats["wins"] = int(stats.get("wins") or 0) + 1
+            stats["gross_profit"] = float(stats.get("gross_profit") or 0.0) + net
+            stats["best_win"] = max(float(stats.get("best_win") or 0.0), net)
+            positives = list(stats.get("positive_nets") or [])
+            positives.append(round(net, 2))
+            stats["positive_nets"] = positives[-200:]
+        elif net < 0:
+            stats["losses"] = int(stats.get("losses") or 0) + 1
+            stats["gross_loss_abs"] = float(stats.get("gross_loss_abs") or 0.0) + abs(net)
+            stats["worst_loss"] = min(float(stats.get("worst_loss") or 0.0), net)
+
+    @staticmethod
+    def _median_win(stats: dict | None) -> float | None:
+        values = [float(x) for x in (stats or {}).get("positive_nets", []) if float(x) > 0]
+        if not values:
+            return None
+        return float(median(values))
+
+    @staticmethod
+    def profile_key(st: State) -> str:
+        family = state_family(st)
+        source = st.profile.source_secid or st.profile.secid
+        profile_bits = (
+            st.profile.allowed_direction,
+            st.profile.stop_ticks,
+            st.profile.trail_ticks,
+            st.profile.trail_arm_ticks,
+            source,
+        )
+        return "|".join(str(x) for x in (st.contour, family, st.spec.secid, *profile_bits))
+
+    @staticmethod
+    def family_key(st: State) -> str:
+        return state_family(st)
+
+    def _day_key(self, family: str, date_text: str | None = None) -> str:
+        return f"{family}|{date_text or datetime.now().strftime('%Y-%m-%d')}"
+
+    def _record_day(self, family: str, date_text: str, net: float) -> None:
+        key = self._day_key(family, date_text)
+        day = self.family_days.setdefault(key, {"net": 0.0, "high": 0.0, "paused": False, "pause_reason": ""})
+        day["net"] = float(day.get("net") or 0.0) + net
+        day["high"] = max(float(day.get("high") or 0.0), float(day["net"]))
+        self._apply_profit_guard_to_day(day)
+
+    def _apply_profit_guard_to_day(self, day: dict) -> None:
+        high = float(day.get("high") or 0.0)
+        net = float(day.get("net") or 0.0)
+        drawdown = high - net
+        min_drawdown = max(self.profit_guard_drawdown_min_rub, high * self.profit_guard_drawdown_pct)
+        if high >= self.profit_guard_min_rub and drawdown >= min_drawdown:
+            day["paused"] = True
+            day["pause_reason"] = (
+                f"daily_profit_guard high={high:.0f} net={net:.0f} "
+                f"drawdown={drawdown:.0f}"
+            )
+
+    def record_trade(self, st: State, net: float, gross: float, fees: float, closed_at: object | None = None) -> None:
+        family = self.family_key(st)
+        profile_key = self.profile_key(st)
+        profile_stats = self.profile_stats.setdefault(profile_key, self._empty_stats())
+        family_stats = self.family_stats.setdefault(family, self._empty_stats())
+        self._record_stats(profile_stats, net, gross, fees)
+        self._record_stats(family_stats, net, gross, fees)
+        self._record_day(family, self._date_from_closed_at(closed_at), net)
+        self.write()
+
+    def rebuild_from_trade_log(self, path: Path, states: list[State]) -> None:
+        self.profile_stats = {}
+        self.family_stats = {}
+        self.family_days = {}
+        if not path.exists() or path.stat().st_size == 0:
+            self.write()
+            return
+        by_key = {(st.contour, st.spec.secid): st for st in states}
+        try:
+            with path.open(newline="", encoding="utf-8") as f:
+                for row in csv.DictReader(f):
+                    st = by_key.get((str(row.get("contour") or ""), str(row.get("secid") or row.get("ticker") or "")))
+                    if st is None:
+                        continue
+                    try:
+                        net = float(row.get("net_rub") or 0.0)
+                        gross = float(row.get("gross_rub") or 0.0)
+                        fees = float(row.get("fees_rub") or 0.0)
+                    except Exception:
+                        continue
+                    self.record_trade(st, net, gross, fees, row.get("closed_at"))
+        except Exception as exc:
+            print(f"{now_str()} RISK restore_error={exc}", flush=True)
+        self.write()
+
+    def decide(self, st: State, base_max_full_stop_rub: float | None = None) -> RiskDecision:
+        base_limit = float(base_max_full_stop_rub or self.base_max_full_stop_rub)
+        family = self.family_key(st)
+        day = self.family_days.setdefault(self._day_key(family), {"net": 0.0, "high": 0.0, "paused": False, "pause_reason": ""})
+        self._apply_profit_guard_to_day(day)
+        if bool(day.get("paused")):
+            return RiskDecision(
+                allowed=False,
+                mode="paused_today",
+                max_full_stop_rub=0.0,
+                reason=str(day.get("pause_reason") or "daily_profit_guard"),
+                family_day_net=float(day.get("net") or 0.0),
+                family_day_high=float(day.get("high") or 0.0),
+            )
+
+        profile_stats = self.profile_stats.get(self.profile_key(st), self._empty_stats())
+        family_stats = self.family_stats.get(family, self._empty_stats())
+        median_win = self._median_win(profile_stats) or self._median_win(family_stats)
+        stop_to_median = (base_limit / median_win) if median_win and median_win > 0 else None
+        mode = "normal"
+        reasons: list[str] = []
+
+        profile_trades = int(profile_stats.get("trades") or 0)
+        family_trades = int(family_stats.get("trades") or 0)
+        family_profit = float(family_stats.get("gross_profit") or 0.0)
+        family_net = float(family_stats.get("net") or 0.0)
+        family_losses = int(family_stats.get("losses") or 0)
+        family_worst_abs = abs(float(family_stats.get("worst_loss") or 0.0))
+        profile_profit = float(profile_stats.get("gross_profit") or 0.0)
+        profile_net = float(profile_stats.get("net") or 0.0)
+        profile_losses = int(profile_stats.get("losses") or 0)
+        profile_worst_abs = abs(float(profile_stats.get("worst_loss") or 0.0))
+        source = st.profile.source_secid or st.profile.secid
+
+        if source != st.spec.secid and profile_trades < self.probation_trades:
+            mode = "micro"
+            reasons.append(f"probation_new_contract trades={profile_trades}/{self.probation_trades}")
+        if profile_trades >= 2 and profile_losses >= 2 and profile_net < 0:
+            mode = "micro"
+            reasons.append(f"profile_loss_cluster net={profile_net:.0f}")
+        elif profile_trades >= 2 and profile_net <= -base_limit * 0.50 and mode != "micro":
+            mode = "reduced"
+            reasons.append(f"profile_negative net={profile_net:.0f}")
+        if family_trades >= 2 and family_net <= -base_limit and family_losses >= 2:
+            mode = "micro"
+            reasons.append(f"family_negative net={family_net:.0f}")
+        elif family_trades >= 2 and family_net <= -base_limit * 0.50 and mode != "micro":
+            mode = "reduced"
+            reasons.append(f"family_negative net={family_net:.0f}")
+        if stop_to_median is not None:
+            if stop_to_median >= self.stop_to_median_micro:
+                mode = "micro"
+                reasons.append(f"stop_to_median={stop_to_median:.1f}")
+            elif stop_to_median >= self.stop_to_median_reduced and mode != "micro":
+                mode = "reduced"
+                reasons.append(f"stop_to_median={stop_to_median:.1f}")
+        if profile_trades >= 3 and profile_profit > 0:
+            profile_tail = profile_worst_abs / profile_profit
+            if profile_tail >= 0.90:
+                mode = "micro"
+                reasons.append(f"profile_tail={profile_tail:.2f}")
+            elif profile_tail >= 0.50 and mode != "micro":
+                mode = "reduced"
+                reasons.append(f"profile_tail={profile_tail:.2f}")
+        if family_trades >= 5 and family_profit > 0:
+            family_tail = family_worst_abs / family_profit
+            if family_tail >= 0.90:
+                mode = "micro"
+                reasons.append(f"family_tail={family_tail:.2f}")
+            elif family_tail >= 0.55 and mode != "micro":
+                mode = "reduced"
+                reasons.append(f"family_tail={family_tail:.2f}")
+        recent = [float(x) for x in profile_stats.get("recent_nets", [])]
+        if len(recent) >= 3 and all(x < 0 for x in recent[-3:]):
+            mode = "micro"
+            reasons.append("recent_losses=3")
+
+        if mode == "micro":
+            limit = min(base_limit, self.micro_full_stop_rub)
+        elif mode == "reduced":
+            limit = min(base_limit, self.reduced_full_stop_rub)
+        else:
+            limit = base_limit
+            reasons.append("risk_ok")
+
+        return RiskDecision(
+            allowed=True,
+            mode=mode,
+            max_full_stop_rub=limit,
+            reason="; ".join(reasons),
+            median_win_rub=median_win,
+            stop_to_median_win=stop_to_median,
+            family_day_net=float(day.get("net") or 0.0),
+            family_day_high=float(day.get("high") or 0.0),
+        )
+
+    def write(self) -> None:
+        payload = {
+            "updated_at": now_str(),
+            "base_max_full_stop_rub": self.base_max_full_stop_rub,
+            "reduced_full_stop_rub": self.reduced_full_stop_rub,
+            "micro_full_stop_rub": self.micro_full_stop_rub,
+            "profit_guard_min_rub": self.profit_guard_min_rub,
+            "profit_guard_drawdown_pct": self.profit_guard_drawdown_pct,
+            "profit_guard_drawdown_min_rub": self.profit_guard_drawdown_min_rub,
+            "stop_to_median_reduced": self.stop_to_median_reduced,
+            "stop_to_median_micro": self.stop_to_median_micro,
+            "probation_trades": self.probation_trades,
+            "profile_stats": self.profile_stats,
+            "family_stats": self.family_stats,
+            "family_days": self.family_days,
+        }
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(f"{self.path.suffix}.tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(self.path)
 
 
 def position_margin(spec: Spec, direction: Direction | str, qty: int) -> float:
@@ -1001,10 +1289,11 @@ def process_open_state_exit(
     st.closed += 1
     st.closed_net += net
     portfolio.closed_net += net
+    closed_at = now_str()
     append_trade(
         Path(args.log),
         {
-            "closed_at": now_str(),
+            "closed_at": closed_at,
             "contour": st.contour,
             "secid": st.spec.secid,
             "direction": st.position.direction,
@@ -1023,6 +1312,9 @@ def process_open_state_exit(
             "closed_net_rub": round(st.closed_net, 2),
         },
     )
+    risk = getattr(args, "risk_governor", None)
+    if risk is not None:
+        risk.record_trade(st, net, gross, 2 * st.side_fee * st.position.qty, closed_at)
     print(
         f"{now_str()} CLOSE {st.contour} {st.spec.secid} exit={fill_price:g} "
         f"source={fill_source} trigger={actual_trigger_price:g}/{actual_trigger_source} "
@@ -1091,7 +1383,13 @@ def poll_market_fallback(
                                     force_exit_reason=force_reason,
                                 )
                         write_open_positions(Path(args.open_positions_log), states)
-                        write_microstructure_snapshot(Path(args.snapshot_log), states, trading_enabled=True)
+                        write_microstructure_snapshot(
+                            Path(args.snapshot_log),
+                            states,
+                            trading_enabled=True,
+                            risk=getattr(args, "risk_governor", None),
+                            base_max_full_stop_rub=float(args.max_full_stop_rub),
+                        )
                         write_bot_health(
                             Path(args.health_log),
                             states,
@@ -1109,7 +1407,13 @@ def poll_market_fallback(
                 time.sleep(3)
 
 
-def write_microstructure_snapshot(path: Path, states: list[State], trading_enabled: bool) -> None:
+def write_microstructure_snapshot(
+    path: Path,
+    states: list[State],
+    trading_enabled: bool,
+    risk: RiskGovernor | None = None,
+    base_max_full_stop_rub: float = DEFAULT_MAX_FULL_STOP_RUB,
+) -> None:
     rows = []
     spread_review_rows = []
     snapshot_time = now_str()
@@ -1122,6 +1426,11 @@ def write_microstructure_snapshot(path: Path, states: list[State], trading_enabl
             st.profile.stop_ticks,
         )
         fee_to_stop = fee_ticks(st.side_fee, st.spec) / st.profile.stop_ticks if st.profile.stop_ticks > 0 else None
+        risk_decision = risk.decide(st, base_max_full_stop_rub) if risk is not None else None
+        if risk_decision is not None:
+            st.risk_mode = risk_decision.mode
+            st.risk_limit_rub = risk_decision.max_full_stop_rub
+            st.risk_reason = risk_decision.reason
         rows.append(
             {
                 "snapshot_time": snapshot_time,
@@ -1146,6 +1455,12 @@ def write_microstructure_snapshot(path: Path, states: list[State], trading_enabl
                 "session_phase": "stream",
                 "can_open_new_paper_trade": trading_enabled,
                 "last_reason": st.last_reason,
+                "risk_mode": risk_decision.mode if risk_decision is not None else st.risk_mode,
+                "risk_limit_rub": round(risk_decision.max_full_stop_rub, 2) if risk_decision is not None else round(st.risk_limit_rub, 2),
+                "risk_reason": risk_decision.reason if risk_decision is not None else st.risk_reason,
+                "family_day_net": round(risk_decision.family_day_net, 2) if risk_decision is not None else None,
+                "family_day_high": round(risk_decision.family_day_high, 2) if risk_decision is not None else None,
+                "stop_to_median_win": round(risk_decision.stop_to_median_win, 2) if risk_decision is not None and risk_decision.stop_to_median_win is not None else None,
             }
         )
         if spread_review:
@@ -1164,6 +1479,8 @@ def write_microstructure_snapshot(path: Path, states: list[State], trading_enabl
                     "spread_to_stop_ratio": round(spread_ratio, 4) if spread_ratio is not None else None,
                     "spread_class": spread_class,
                     "last_reason": st.last_reason,
+                    "risk_mode": risk_decision.mode if risk_decision is not None else st.risk_mode,
+                    "risk_reason": risk_decision.reason if risk_decision is not None else st.risk_reason,
                 }
             )
     for row in rows:
@@ -1272,6 +1589,9 @@ def write_open_positions(path: Path, states: list[State]) -> None:
                 "full_stop_risk_rub": round(full_stop_risk_rub(st.profile, st.spec, st.side_fee, st.position.qty), 2),
                 "full_stop_gross_rub": round(st.profile.stop_ticks * st.spec.step_price * st.position.qty, 2),
                 "margin_rub": round(position_margin(st.spec, st.position.direction, st.position.qty), 2),
+                "risk_mode": st.risk_mode,
+                "risk_limit_rub": round(st.risk_limit_rub, 2),
+                "risk_reason": st.risk_reason,
                 "opened_at": st.position.opened_at,
             }
         )
@@ -1431,6 +1751,15 @@ def main() -> None:
     parser.add_argument("--max-total-margin-pct", type=float, default=0.80)
     parser.add_argument("--max-position-margin-pct", type=float, default=0.20)
     parser.add_argument("--max-full-stop-rub", type=float, default=DEFAULT_MAX_FULL_STOP_RUB)
+    parser.add_argument("--risk-state-log", default=str(REPORTS / "paper_risk_policy_state.json"))
+    parser.add_argument("--risk-reduced-full-stop-rub", type=float, default=2_000.0)
+    parser.add_argument("--risk-micro-full-stop-rub", type=float, default=1_000.0)
+    parser.add_argument("--risk-profit-guard-min-rub", type=float, default=3_000.0)
+    parser.add_argument("--risk-profit-guard-drawdown-pct", type=float, default=0.35)
+    parser.add_argument("--risk-profit-guard-drawdown-min-rub", type=float, default=1_500.0)
+    parser.add_argument("--risk-stop-to-median-reduced", type=float, default=7.0)
+    parser.add_argument("--risk-stop-to-median-micro", type=float, default=10.0)
+    parser.add_argument("--risk-probation-trades", type=int, default=30)
     parser.add_argument("--stop-limit-emergency-ticks", type=float, default=2.0)
     parser.add_argument("--actual-exit-model", choices=["stream_stoplimit", "candle_like"], default="stream_stoplimit")
     parser.add_argument("--stream-stale-sec", type=float, default=15.0)
@@ -1614,7 +1943,21 @@ def main() -> None:
         runtime_state: dict[str, object] = {"reconnect_count": 0, "last_stream_error": ""}
         stop_event = threading.Event()
         lock = threading.RLock()
+        risk_governor = RiskGovernor(
+            Path(args.risk_state_log),
+            base_max_full_stop_rub=float(args.max_full_stop_rub),
+            reduced_full_stop_rub=float(args.risk_reduced_full_stop_rub),
+            micro_full_stop_rub=float(args.risk_micro_full_stop_rub),
+            profit_guard_min_rub=float(args.risk_profit_guard_min_rub),
+            profit_guard_drawdown_pct=float(args.risk_profit_guard_drawdown_pct),
+            profit_guard_drawdown_min_rub=float(args.risk_profit_guard_drawdown_min_rub),
+            stop_to_median_reduced=float(args.risk_stop_to_median_reduced),
+            stop_to_median_micro=float(args.risk_stop_to_median_micro),
+            probation_trades=int(args.risk_probation_trades),
+        )
+        setattr(args, "risk_governor", risk_governor)
         restore_closed_totals(Path(args.log), states, portfolio)
+        risk_governor.rebuild_from_trade_log(Path(args.log), states)
         restore_open_positions(Path(args.open_positions_log), states)
         write_open_positions(Path(args.open_positions_log), states)
         write_bot_health(
@@ -1717,6 +2060,13 @@ def main() -> None:
                             if entry_price is None:
                                 st.last_reason = "book_filter no_executable_entry"
                                 continue
+                            risk_decision = args.risk_governor.decide(st, float(args.max_full_stop_rub))
+                            st.risk_mode = risk_decision.mode
+                            st.risk_limit_rub = risk_decision.max_full_stop_rub
+                            st.risk_reason = risk_decision.reason
+                            if not risk_decision.allowed:
+                                st.last_reason = f"risk_governor {risk_decision.mode} {risk_decision.reason}"
+                                continue
                             sizing = paper_sizing(
                                 portfolio,
                                 states,
@@ -1724,7 +2074,7 @@ def main() -> None:
                                 st.profile,
                                 direction,
                                 st.side_fee,
-                                float(args.max_full_stop_rub),
+                                risk_decision.max_full_stop_rub,
                             )
                             qty = sizing.qty
                             if qty < 1:
@@ -1745,7 +2095,9 @@ def main() -> None:
                                 f"{now_str()} OPEN {contour} {spec.secid} {direction} qty={qty} "
                                 f"entry={entry_price:g} source={entry_source} stop={st.position.stop_price:g} "
                                 f"margin={position_margin(spec, direction, qty):.2f} "
-                                f"full_stop_risk={sizing.full_stop_rub:.2f} {sizing.reason} {reason}",
+                                f"full_stop_risk={sizing.full_stop_rub:.2f} "
+                                f"risk={risk_decision.mode}/{risk_decision.max_full_stop_rub:.0f} "
+                                f"{risk_decision.reason} {sizing.reason} {reason}",
                                 flush=True,
                             )
                             write_open_positions(Path(args.open_positions_log), states)
@@ -1766,7 +2118,13 @@ def main() -> None:
                     print_portfolio_report(states, portfolio)
                     next_report += args.report_sec
                 if now >= next_snapshot:
-                    write_microstructure_snapshot(Path(args.snapshot_log), states, trading_enabled)
+                    write_microstructure_snapshot(
+                        Path(args.snapshot_log),
+                        states,
+                        trading_enabled,
+                        risk=args.risk_governor,
+                        base_max_full_stop_rub=float(args.max_full_stop_rub),
+                    )
                     write_open_positions(Path(args.open_positions_log), states)
                     write_bot_health(
                         Path(args.health_log),
