@@ -2159,10 +2159,11 @@ def process_open_state_exit(
     st.closed_net += net
     portfolio.closed_net += net
     closed_at = now_str()
-    append_trade(
+    append_schema_stable_csv(
         Path(args.log),
         {
             "closed_at": closed_at,
+            "opened_at": st.position.opened_at,
             "contour": st.contour,
             "secid": st.spec.secid,
             "direction": st.position.direction,
