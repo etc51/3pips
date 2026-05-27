@@ -40,6 +40,52 @@ SPREAD_WATCH_RATIO = 0.25
 SPREAD_HEAVY_RATIO = 0.40
 SPREAD_DOMINATES_RATIO = 1.00
 DEFAULT_MAX_FULL_STOP_RUB = 4_000.0
+ENTRY_AUDIT_COLUMNS = [
+    "event_time",
+    "event_type",
+    "entry_id",
+    "contour",
+    "secid",
+    "family",
+    "direction",
+    "qty",
+    "entry_price",
+    "exit_price",
+    "exit_source",
+    "net_rub",
+    "ticks",
+    "last_price",
+    "last_close",
+    "vwap",
+    "directional_vwap_ticks",
+    "directional_vwap_to_stop",
+    "momentum_ticks",
+    "trend_ticks",
+    "last_volume",
+    "avg_volume",
+    "volume_ratio",
+    "bid_qty_top3",
+    "ask_qty_top3",
+    "book_signal_ratio",
+    "spread_ticks",
+    "spread_to_stop_ratio",
+    "fee_ticks",
+    "fee_to_stop_ratio",
+    "recent_range_ticks",
+    "breakout_margin_ticks",
+    "stop_ticks",
+    "trail_ticks",
+    "trail_arm_ticks",
+    "full_stop_risk_rub",
+    "risk_mode",
+    "risk_reason",
+    "sizing_reason",
+    "soft_entry_allow",
+    "soft_entry_reason",
+    "hard_entry_allow",
+    "hard_entry_reason",
+    "raw_signal_reason",
+]
 
 
 @dataclass
@@ -83,6 +129,7 @@ class State:
     last_price: float = 0.0
     last_order_book: object | None = None
     last_reason: str = ""
+    last_signal_metrics: dict = field(default_factory=dict)
     last_entry_candle_count: int = -1
     cooldown_until: float = 0.0
     consecutive_losses: int = 0
@@ -991,6 +1038,7 @@ def avg_volume(rows: list[dict], n: int) -> float:
 
 def signal(state: State, aggressive: bool) -> tuple[Direction | None, str]:
     rows = list(state.candles)
+    state.last_signal_metrics = {}
     if len(rows) < 12:
         return None, f"warmup={len(rows)}"
     spec = state.spec
@@ -1022,9 +1070,42 @@ def signal(state: State, aggressive: bool) -> tuple[Direction | None, str]:
         bid_qty = sum(int(getattr(x, "quantity", 0) or 0) for x in getattr(state.last_order_book, "bids", [])[:3])
         ask_qty = sum(int(getattr(x, "quantity", 0) or 0) for x in getattr(state.last_order_book, "asks", [])[:3])
     if bid_qty <= 0 or ask_qty <= 0:
+        state.last_signal_metrics = {
+            "last_price": state.last_price,
+            "last_close": last_close,
+            "vwap": vwap,
+            "mom": mom,
+            "trend": trend,
+            "last_vol": last_vol,
+            "avgv": avgv,
+            "bid_qty": bid_qty,
+            "ask_qty": ask_qty,
+        }
         return None, f"book_filter empty_book bid={bid_qty} ask={ask_qty}"
     levels = best_levels(state.last_order_book, spec)
     spread_ticks = levels.get("spread_ticks")
+    fee_ticks = (2 * state.side_fee / spec.step_price) if spec.step_price else 999
+    recent_range_ticks = max(float(r["high"]) - float(r["low"]) for r in rows[-5:]) / spec.min_step
+    state.last_signal_metrics = {
+        "last_price": state.last_price,
+        "last_close": last_close,
+        "prev_close": prev_close,
+        "vwap": vwap,
+        "mom": mom,
+        "trend": trend,
+        "last_vol": last_vol,
+        "avgv": avgv,
+        "vol_ratio": (last_vol / avgv) if avgv else None,
+        "bid_qty": bid_qty,
+        "ask_qty": ask_qty,
+        "spread_ticks": spread_ticks,
+        "fee_ticks": fee_ticks,
+        "recent_range_ticks": recent_range_ticks,
+        "recent_high": high,
+        "recent_low": low,
+        "long_breakout_margin_ticks": (last_close - high) / spec.min_step,
+        "short_breakout_margin_ticks": (low - last_close) / spec.min_step,
+    }
     max_general_spread = state.profile.stop_ticks * SPREAD_DOMINATES_RATIO
     if spread_ticks is None or float(spread_ticks) > max_general_spread:
         spread_txt = "-" if spread_ticks is None else f"{float(spread_ticks):.1f}t"
@@ -1035,10 +1116,9 @@ def signal(state: State, aggressive: bool) -> tuple[Direction | None, str]:
             spread_txt = "-" if spread_ticks is None else f"{float(spread_ticks):.1f}t"
             return None, f"brq6_spread_filter spread={spread_txt} stop={state.profile.stop_ticks}t max={max_spread:.1f}t"
     vol_ok = avgv > 0 and last_vol >= avgv * vol_mult
-    fee_ticks = (2 * state.side_fee / spec.step_price) if spec.step_price else 999
     if fee_ticks > state.profile.stop_ticks * max_fee_to_stop:
         return None, f"fee_filter fee={fee_ticks:.1f}t stop={state.profile.stop_ticks}t"
-    if max(float(r["high"]) - float(r["low"]) for r in rows[-5:]) / spec.min_step < fee_ticks + 2:
+    if recent_range_ticks < fee_ticks + 2:
         return None, f"range_filter fee={fee_ticks:.1f}t"
     long_book = bid_qty >= ask_qty * book_imbalance if ask_qty > 0 else True
     short_book = ask_qty >= bid_qty * book_imbalance if bid_qty > 0 else True
@@ -1065,6 +1145,167 @@ def signal(state: State, aggressive: bool) -> tuple[Direction | None, str]:
     if short_ok:
         return "short", f"entry_signal short {reason}"
     return None, f"watch_conditions {reason}"
+
+
+def entry_shadow_flags(st: State, direction: Direction) -> dict:
+    metrics = st.last_signal_metrics or {}
+    stop_ticks = max(int(st.profile.stop_ticks or 0), 1)
+    bid_qty = float(metrics.get("bid_qty") or 0)
+    ask_qty = float(metrics.get("ask_qty") or 0)
+    if direction == "long":
+        book_signal_ratio = bid_qty / ask_qty if ask_qty > 0 else None
+        directional_vwap_ticks = (
+            (float(metrics.get("last_price") or 0) - float(metrics.get("vwap") or 0)) / st.spec.min_step
+            if metrics.get("vwap") is not None and st.spec.min_step
+            else None
+        )
+        breakout_margin_ticks = metrics.get("long_breakout_margin_ticks")
+    else:
+        book_signal_ratio = ask_qty / bid_qty if bid_qty > 0 else None
+        directional_vwap_ticks = (
+            (float(metrics.get("vwap") or 0) - float(metrics.get("last_price") or 0)) / st.spec.min_step
+            if metrics.get("vwap") is not None and st.spec.min_step
+            else None
+        )
+        breakout_margin_ticks = metrics.get("short_breakout_margin_ticks")
+    spread_ticks = metrics.get("spread_ticks")
+    fee_ticks = metrics.get("fee_ticks")
+    vol_ratio = metrics.get("vol_ratio")
+    mom = abs(float(metrics.get("mom") or 0))
+    trend = abs(float(metrics.get("trend") or 0))
+    directional_vwap_to_stop = (
+        abs(float(directional_vwap_ticks)) / stop_ticks if directional_vwap_ticks is not None else None
+    )
+    spread_to_stop = float(spread_ticks) / stop_ticks if spread_ticks is not None else None
+    fee_to_stop = float(fee_ticks) / stop_ticks if fee_ticks is not None else None
+
+    soft_reasons: list[str] = []
+    hard_reasons: list[str] = []
+    if vol_ratio is not None and book_signal_ratio is not None and vol_ratio < 1.2 and book_signal_ratio < 1.5:
+        soft_reasons.append("low_volume_and_weak_book")
+    if mom < 15 and trend < 10:
+        soft_reasons.append("weak_momentum_trend")
+    if directional_vwap_to_stop is not None and directional_vwap_to_stop > 1.25:
+        soft_reasons.append("late_chase_from_vwap")
+
+    if vol_ratio is None or vol_ratio < 1.2:
+        hard_reasons.append("volume_lt_1_2x")
+    if book_signal_ratio is None or book_signal_ratio < 1.5:
+        hard_reasons.append("book_lt_1_5x")
+    if mom < 20 and trend < 10:
+        hard_reasons.append("weak_momentum_trend")
+    if spread_to_stop is not None and spread_to_stop > 0.40:
+        hard_reasons.append("spread_gt_40pct_stop")
+    if directional_vwap_to_stop is not None and directional_vwap_to_stop > 1.25:
+        hard_reasons.append("late_chase_from_vwap")
+
+    return {
+        "book_signal_ratio": book_signal_ratio,
+        "directional_vwap_ticks": directional_vwap_ticks,
+        "directional_vwap_to_stop": directional_vwap_to_stop,
+        "breakout_margin_ticks": breakout_margin_ticks,
+        "spread_to_stop_ratio": spread_to_stop,
+        "fee_to_stop_ratio": fee_to_stop,
+        "soft_entry_allow": not soft_reasons,
+        "soft_entry_reason": "ok" if not soft_reasons else ";".join(soft_reasons),
+        "hard_entry_allow": not hard_reasons,
+        "hard_entry_reason": "ok" if not hard_reasons else ";".join(hard_reasons),
+    }
+
+
+def append_entry_audit(path: Path, row: dict) -> None:
+    if not str(path):
+        return
+    stable = {key: row.get(key) for key in ENTRY_AUDIT_COLUMNS}
+    append_schema_stable_csv(path, stable)
+
+
+def write_entry_audit_open(
+    path: Path,
+    st: State,
+    direction: Direction,
+    entry_price: float,
+    qty: int,
+    sizing: SizingDecision,
+    risk_decision: RiskDecision,
+    raw_signal_reason: str,
+) -> None:
+    metrics = st.last_signal_metrics or {}
+    flags = entry_shadow_flags(st, direction)
+    opened_at = st.position.opened_at if st.position is not None else now_str()
+    entry_id = f"{opened_at}|{st.contour}|{st.spec.secid}|{direction}|{entry_price:g}"
+    append_entry_audit(
+        path,
+        {
+            "event_time": opened_at,
+            "event_type": "entry",
+            "entry_id": entry_id,
+            "contour": st.contour,
+            "secid": st.spec.secid,
+            "family": state_family(st),
+            "direction": direction,
+            "qty": qty,
+            "entry_price": entry_price,
+            "last_price": metrics.get("last_price"),
+            "last_close": metrics.get("last_close"),
+            "vwap": metrics.get("vwap"),
+            "directional_vwap_ticks": flags.get("directional_vwap_ticks"),
+            "directional_vwap_to_stop": flags.get("directional_vwap_to_stop"),
+            "momentum_ticks": metrics.get("mom"),
+            "trend_ticks": metrics.get("trend"),
+            "last_volume": metrics.get("last_vol"),
+            "avg_volume": metrics.get("avgv"),
+            "volume_ratio": metrics.get("vol_ratio"),
+            "bid_qty_top3": metrics.get("bid_qty"),
+            "ask_qty_top3": metrics.get("ask_qty"),
+            "book_signal_ratio": flags.get("book_signal_ratio"),
+            "spread_ticks": metrics.get("spread_ticks"),
+            "spread_to_stop_ratio": flags.get("spread_to_stop_ratio"),
+            "fee_ticks": metrics.get("fee_ticks"),
+            "fee_to_stop_ratio": flags.get("fee_to_stop_ratio"),
+            "recent_range_ticks": metrics.get("recent_range_ticks"),
+            "breakout_margin_ticks": flags.get("breakout_margin_ticks"),
+            "stop_ticks": st.profile.stop_ticks,
+            "trail_ticks": st.profile.trail_ticks,
+            "trail_arm_ticks": st.profile.trail_arm_ticks,
+            "full_stop_risk_rub": sizing.full_stop_rub,
+            "risk_mode": risk_decision.mode,
+            "risk_reason": risk_decision.reason,
+            "sizing_reason": sizing.reason,
+            "soft_entry_allow": flags.get("soft_entry_allow"),
+            "soft_entry_reason": flags.get("soft_entry_reason"),
+            "hard_entry_allow": flags.get("hard_entry_allow"),
+            "hard_entry_reason": flags.get("hard_entry_reason"),
+            "raw_signal_reason": raw_signal_reason,
+        },
+    )
+
+
+def write_entry_audit_close(path: Path, st: State, fill_price: float, fill_source: str, ticks: float, net: float) -> None:
+    if st.position is None:
+        return
+    entry_id = f"{st.position.opened_at}|{st.contour}|{st.spec.secid}|{st.position.direction}|{st.position.entry_price:g}"
+    append_entry_audit(
+        path,
+        {
+            "event_time": now_str(),
+            "event_type": "exit",
+            "entry_id": entry_id,
+            "contour": st.contour,
+            "secid": st.spec.secid,
+            "family": state_family(st),
+            "direction": st.position.direction,
+            "qty": st.position.qty,
+            "entry_price": st.position.entry_price,
+            "exit_price": fill_price,
+            "exit_source": fill_source,
+            "net_rub": round(net, 2),
+            "ticks": round(ticks, 3),
+            "stop_ticks": st.profile.stop_ticks,
+            "trail_ticks": st.profile.trail_ticks,
+            "trail_arm_ticks": st.profile.trail_arm_ticks,
+        },
+    )
 
 
 def print_report(states: list[State], started: float) -> None:
@@ -1427,6 +1668,7 @@ def process_open_state_exit(
             stop_overrun_ticks,
         )
     ticks, gross, net = pnl_rub(st.position, fill_price, st.spec, st.side_fee)
+    write_entry_audit_close(Path(getattr(args, "entry_audit_log", "")), st, fill_price, fill_source, ticks, net)
     st.closed += 1
     st.closed_net += net
     portfolio.closed_net += net
@@ -1886,6 +2128,7 @@ def main() -> None:
     parser.add_argument("--instrument-specs-log", default=str(REPORTS / "paper_instrument_specs.csv"))
     parser.add_argument("--startup-status-log", default=str(REPORTS / "paper_startup_status.csv"))
     parser.add_argument("--shadow-log", default=str(REPORTS / "paper_shadow_exit_models.csv"))
+    parser.add_argument("--entry-audit-log", default=str(REPORTS / "paper_entry_audit.csv"))
     parser.add_argument("--health-log", default=str(REPORTS / "paper_bot_health.json"))
     parser.add_argument("--snapshot-sec", type=int, default=10)
     parser.add_argument("--no-trade-before", default="")
@@ -2237,6 +2480,16 @@ def main() -> None:
                             }
                             st.shadow_closed = {}
                             st.last_entry_candle_count = len(st.candles)
+                            write_entry_audit_open(
+                                Path(getattr(args, "entry_audit_log", "")),
+                                st,
+                                direction,
+                                entry_price,
+                                qty,
+                                sizing,
+                                risk_decision,
+                                reason,
+                            )
                             print(
                                 f"{now_str()} OPEN {contour} {spec.secid} {direction} qty={qty} "
                                 f"entry={entry_price:g} source={entry_source} stop={st.position.stop_price:g} "

@@ -76,6 +76,7 @@ function Start-Portfolio {
         "--instrument-specs-log", "reports\paper_runs\v7_live_20260525\${Name}_instrument_specs.csv",
         "--startup-status-log", "reports\paper_runs\v7_live_20260525\${Name}_startup_status.csv",
         "--shadow-log", "reports\paper_runs\v7_live_20260525\${Name}_shadow_exit_models.csv",
+        "--entry-audit-log", "reports\paper_runs\v7_live_20260525\${Name}_entry_audit.csv",
         "--health-log", "reports\paper_runs\v7_live_20260525\${Name}_health.json"
     )
     if ($Name -eq "neo") {
