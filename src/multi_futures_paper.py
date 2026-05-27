@@ -161,6 +161,9 @@ class RiskGovernor:
         self.family_stats: dict[str, dict] = {}
         self.global_stats: dict = self._empty_stats()
         self.family_days: dict[str, dict] = {}
+        self.global_days: dict[str, dict] = {}
+        self._shared_day_cache_at = 0.0
+        self._shared_day_cache: dict[str, dict] = {}
 
     @staticmethod
     def _empty_stats() -> dict:
@@ -248,6 +251,45 @@ class RiskGovernor:
         day["high"] = max(float(day.get("high") or 0.0), float(day["net"]))
         self._apply_profit_guard_to_day(day)
 
+    def _record_global_day(self, date_text: str, net: float) -> None:
+        day = self.global_days.setdefault(date_text, {"net": 0.0, "high": 0.0, "protect_active": False, "paused": False, "pause_reason": ""})
+        day["net"] = float(day.get("net") or 0.0) + net
+        day["high"] = max(float(day.get("high") or 0.0), float(day["net"]))
+        self._apply_global_profit_guard_to_day(day)
+
+    def _shared_day_from_trade_logs(self, date_text: str) -> dict:
+        now = time.monotonic()
+        if now - self._shared_day_cache_at <= 3.0 and date_text in self._shared_day_cache:
+            return dict(self._shared_day_cache[date_text])
+
+        trades: list[tuple[str, float]] = []
+        for path in sorted(self.path.parent.glob("*_multi_futures_paper_trades.csv")):
+            if not path.exists() or path.stat().st_size == 0:
+                continue
+            try:
+                with path.open(newline="", encoding="utf-8") as f:
+                    for row in csv.DictReader(f):
+                        closed_at = str(row.get("closed_at") or row.get("time") or "")
+                        if not closed_at.startswith(date_text):
+                            continue
+                        raw_net = row.get("net_rub")
+                        if raw_net in (None, ""):
+                            raw_net = row.get("net_pnl_rub")
+                        trades.append((closed_at, float(raw_net or 0.0)))
+            except Exception:
+                continue
+
+        net = 0.0
+        high = 0.0
+        for _, value in sorted(trades, key=lambda x: x[0]):
+            net += value
+            high = max(high, net)
+        day = {"net": net, "high": high, "protect_active": False, "paused": False, "pause_reason": ""}
+        self._apply_global_profit_guard_to_day(day)
+        self._shared_day_cache = {date_text: dict(day)}
+        self._shared_day_cache_at = now
+        return day
+
     def _apply_profit_guard_to_day(self, day: dict) -> None:
         high = float(day.get("high") or 0.0)
         net = float(day.get("net") or 0.0)
@@ -260,15 +302,30 @@ class RiskGovernor:
                 f"drawdown={drawdown:.0f}"
             )
 
+    def _apply_global_profit_guard_to_day(self, day: dict) -> None:
+        high = float(day.get("high") or 0.0)
+        net = float(day.get("net") or 0.0)
+        protect = self.profit_guard_min_rub
+        if high >= protect:
+            day["protect_active"] = True
+        if bool(day.get("protect_active")) and net < protect:
+            day["paused"] = True
+            day["pause_reason"] = (
+                f"daily_profit_guard_floor high={high:.0f} net={net:.0f} "
+                f"protect={protect:.0f}"
+            )
+
     def record_trade(self, st: State, net: float, gross: float, fees: float, closed_at: object | None = None) -> None:
         family = self.family_key(st)
+        date_text = self._date_from_closed_at(closed_at)
         profile_key = self.profile_key(st)
         profile_stats = self.profile_stats.setdefault(profile_key, self._empty_stats())
         family_stats = self.family_stats.setdefault(family, self._empty_stats())
         self._record_stats(profile_stats, net, gross, fees)
         self._record_stats(family_stats, net, gross, fees)
         self._record_stats(self.global_stats, net, gross, fees)
-        self._record_day(family, self._date_from_closed_at(closed_at), net)
+        self._record_day(family, date_text, net)
+        self._record_global_day(date_text, net)
         self.write()
 
     def rebuild_from_trade_log(self, path: Path, states: list[State]) -> None:
@@ -276,6 +333,7 @@ class RiskGovernor:
         self.family_stats = {}
         self.global_stats = self._empty_stats()
         self.family_days = {}
+        self.global_days = {}
         if not path.exists() or path.stat().st_size == 0:
             self.write()
             return
@@ -300,6 +358,35 @@ class RiskGovernor:
     def decide(self, st: State, base_max_full_stop_rub: float | None = None) -> RiskDecision:
         base_limit = float(base_max_full_stop_rub or self.base_max_full_stop_rub)
         family = self.family_key(st)
+        today = datetime.now().strftime("%Y-%m-%d")
+        local_global_day = self.global_days.setdefault(today, {"net": 0.0, "high": 0.0, "protect_active": False, "paused": False, "pause_reason": ""})
+        self._apply_global_profit_guard_to_day(local_global_day)
+        global_day = self._shared_day_from_trade_logs(today)
+        if float(global_day.get("high") or 0.0) <= 0 and float(local_global_day.get("high") or 0.0) > 0:
+            global_day = local_global_day
+        self._apply_global_profit_guard_to_day(global_day)
+        global_guard_active = bool(global_day.get("protect_active"))
+        if bool(global_day.get("paused")):
+            return RiskDecision(
+                allowed=False,
+                mode="paused_today",
+                max_full_stop_rub=0.0,
+                reason=str(global_day.get("pause_reason") or "daily_profit_guard_floor"),
+                family_day_net=float(global_day.get("net") or 0.0),
+                family_day_high=float(global_day.get("high") or 0.0),
+            )
+        if global_guard_active and st.contour == "aggressive":
+            return RiskDecision(
+                allowed=False,
+                mode="profit_guard_aggressive_off",
+                max_full_stop_rub=0.0,
+                reason=(
+                    f"daily_profit_guard_aggressive_off high={float(global_day.get('high') or 0.0):.0f} "
+                    f"net={float(global_day.get('net') or 0.0):.0f} protect={self.profit_guard_min_rub:.0f}"
+                ),
+                family_day_net=float(global_day.get("net") or 0.0),
+                family_day_high=float(global_day.get("high") or 0.0),
+            )
         day = self.family_days.setdefault(self._day_key(family), {"net": 0.0, "high": 0.0, "paused": False, "pause_reason": ""})
         self._apply_profit_guard_to_day(day)
         if bool(day.get("paused")):
@@ -346,6 +433,12 @@ class RiskGovernor:
         if source != st.spec.secid and profile_trades < self.probation_trades:
             mode = "micro"
             reasons.append(f"probation_new_contract trades={profile_trades}/{self.probation_trades}")
+        if global_guard_active:
+            mode = "micro"
+            reasons.append(
+                f"daily_profit_guard_active high={float(global_day.get('high') or 0.0):.0f} "
+                f"net={float(global_day.get('net') or 0.0):.0f} protect={self.profit_guard_min_rub:.0f}"
+            )
         if profile_trades >= 2 and profile_losses >= 2 and profile_net < 0:
             mode = "micro"
             reasons.append(f"profile_loss_cluster net={profile_net:.0f}")
@@ -437,6 +530,7 @@ class RiskGovernor:
             "family_stats": self.family_stats,
             "global_stats": self.global_stats,
             "family_days": self.family_days,
+            "global_days": self.global_days,
         }
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_suffix(f"{self.path.suffix}.tmp")

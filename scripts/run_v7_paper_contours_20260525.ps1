@@ -57,7 +57,7 @@ function Start-Portfolio {
         "--risk-state-log", "reports\paper_runs\v7_live_20260525\${Name}_risk_policy_state.json",
         "--risk-reduced-full-stop-rub", "2000",
         "--risk-micro-full-stop-rub", "1000",
-        "--risk-profit-guard-min-rub", "3000",
+        "--risk-profit-guard-min-rub", "7000",
         "--risk-profit-guard-drawdown-pct", "0.35",
         "--risk-profit-guard-drawdown-min-rub", "1500",
         "--risk-stop-to-median-cap", "4",

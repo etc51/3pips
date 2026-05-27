@@ -150,7 +150,15 @@ def human_reason(reason: object) -> str:
     if text.startswith("risk_filter"):
         return "фильтр: полный стоп больше лимита ₽"
     if text.startswith("risk_governor paused_today"):
-        return "риск: семья на паузе до завтра, защищаем дневной плюс"
+        return "риск: пауза до завтра, защищаем дневной плюс"
+    if text.startswith("risk_governor profit_guard_aggressive_off"):
+        return "риск: после дневного плюса aggressive выключен"
+    if text.startswith("daily_profit_guard_active"):
+        return "риск: защита прибыли, только микро"
+    if text.startswith("daily_profit_guard_floor"):
+        return "риск: защищённый дневной плюс, новые входы стоп"
+    if text.startswith("daily_profit_guard_aggressive_off"):
+        return "риск: после дневного плюса aggressive выключен"
     if text.startswith("risk_governor micro"):
         return "риск: только микро-размер"
     if text.startswith("risk_governor reduced"):
@@ -230,6 +238,10 @@ def human_reason(reason: object) -> str:
         "filter": "фильтр",
         "risk_governor": "риск",
         "paused_today": "пауза до завтра",
+        "profit_guard_aggressive_off": "aggressive выключен защитой прибыли",
+        "daily_profit_guard_floor": "защищённый дневной плюс",
+        "daily_profit_guard_active": "защита прибыли",
+        "daily_profit_guard_aggressive_off": "aggressive выключен защитой прибыли",
         "micro": "микро",
         "reduced": "уменьшен",
         "median_cap": "лимит по медианному плюсу",
@@ -440,11 +452,22 @@ def build_state(base_dir: Path) -> dict:
     open_positions = [enrich_position_pnl(item) if isinstance(item, dict) else item for item in open_positions]
 
     closed = trades[pd.to_numeric(trades.get("net_pnl_rub"), errors="coerce").notna()].copy() if not trades.empty else pd.DataFrame()
+    if not closed.empty and "time" in closed:
+        closed["_day"] = pd.to_datetime(closed["time"], errors="coerce").dt.strftime("%Y-%m-%d")
+    today_text = datetime.now().strftime("%Y-%m-%d")
+    closed_today = closed[closed["_day"] == today_text].copy() if not closed.empty and "_day" in closed else pd.DataFrame()
     stats = equity_stats(closed.get("net_pnl_rub", pd.Series(dtype=float)))
+    day_stats = equity_stats(closed_today.get("net_pnl_rub", pd.Series(dtype=float)))
     open_net_values = [item.get("unrealized_net_rub") for item in open_positions if isinstance(item, dict)]
     open_net = sum(float(v) for v in open_net_values if v is not None and math.isfinite(float(v)))
     stats["open_net"] = number(open_net)
     stats["total_net"] = number((stats.get("net") or 0.0) + open_net)
+    stats["day_net"] = day_stats["net"]
+    stats["day_max_drawdown"] = day_stats["max_drawdown"]
+    stats["day_wins"] = day_stats["wins"]
+    stats["day_losses"] = day_stats["losses"]
+    stats["day_win_rate"] = day_stats["win_rate"]
+    stats["day_closed_trades"] = int(len(closed_today))
     stats["closed_trades"] = int(len(closed))
     stats["open_positions"] = len(open_positions) if isinstance(open_positions, list) else 0
     watched_paths = [base_dir / "paper_execution_trades.csv", base_dir / "paper_monitor_heartbeat.csv"]
@@ -482,7 +505,9 @@ def build_state(base_dir: Path) -> dict:
     for portfolio in portfolio_names:
         capital = float(config.get(portfolio, {}).get("capital", PORTFOLIO_CAPITAL_RUB)) if isinstance(config.get(portfolio), dict) else PORTFOLIO_CAPITAL_RUB
         closed_part = closed[closed["portfolio"] == portfolio] if not closed.empty and "portfolio" in closed else pd.DataFrame()
+        day_part = closed_today[closed_today["portfolio"] == portfolio] if not closed_today.empty and "portfolio" in closed_today else pd.DataFrame()
         closed_net = float(pd.to_numeric(closed_part.get("net_pnl_rub", pd.Series(dtype=float)), errors="coerce").dropna().sum())
+        day_net = float(pd.to_numeric(day_part.get("net_pnl_rub", pd.Series(dtype=float)), errors="coerce").dropna().sum())
         open_part = [p for p in open_positions if isinstance(p, dict) and p.get("portfolio") == portfolio]
         open_net = sum(float(p.get("unrealized_net_rub") or 0.0) for p in open_part)
         margin = sum(float(p.get("margin_rub") or 0.0) for p in open_part)
@@ -491,6 +516,7 @@ def build_state(base_dir: Path) -> dict:
             {
                 "portfolio": portfolio,
                 "capital": capital,
+                "day_net": number(day_net),
                 "closed_net": number(closed_net),
                 "open_net": number(open_net),
                 "total_net": number(total),
@@ -741,7 +767,7 @@ HTML = r"""<!doctype html>
     .status { color: var(--muted); font-size: 13px; text-align: right; }
     main { padding: 18px 22px 30px; max-width: 1480px; margin: 0 auto; }
     .grid { display: grid; gap: 14px; }
-    .cards { grid-template-columns: repeat(4, minmax(140px, 1fr)); }
+    .cards { grid-template-columns: repeat(5, minmax(140px, 1fr)); }
     .two { grid-template-columns: 1.2fr 0.8fr; align-items: start; }
     .card, section {
       background: var(--panel);
@@ -793,10 +819,11 @@ HTML = r"""<!doctype html>
   </header>
   <main>
     <div class="grid cards">
-      <div class="card"><div class="label">Реальный доход ₽</div><div id="net" class="value">0</div></div>
+      <div class="card"><div class="label">Итого день ₽</div><div id="dayNet" class="value">0</div></div>
+      <div class="card"><div class="label">Итого всего ₽</div><div id="net" class="value">0</div></div>
       <div class="card"><div class="label">Открыто позиций</div><div id="open" class="value">0</div></div>
-      <div class="card"><div class="label">Сделок закрыто</div><div id="closed" class="value">0</div></div>
-      <div class="card"><div class="label">W / L</div><div id="wl" class="value">0 / 0</div></div>
+      <div class="card"><div class="label">Сделок сегодня</div><div id="closed" class="value">0</div></div>
+      <div class="card"><div class="label">W / L день</div><div id="wl" class="value">0 / 0</div></div>
     </div>
     <section>
       <h2>Капитал контуров</h2>
@@ -851,14 +878,17 @@ HTML = r"""<!doctype html>
       }
       const s = data.stats || {};
       document.getElementById('updated').textContent = s.last_update || "-";
+      const dayNetEl = document.getElementById('dayNet');
+      dayNetEl.textContent = fmt(s.day_net);
+      dayNetEl.className = "value " + cls(s.day_net);
       const netEl = document.getElementById('net');
       netEl.textContent = fmt(s.net);
       netEl.className = "value " + cls(s.net);
-      document.getElementById('closed').textContent = s.closed_trades || 0;
+      document.getElementById('closed').textContent = s.day_closed_trades || 0;
       document.getElementById('open').textContent = s.open_positions || 0;
-      document.getElementById('wl').textContent = `${s.wins || 0} / ${s.losses || 0}`;
+      document.getElementById('wl').textContent = `${s.day_wins || 0} / ${s.day_losses || 0}`;
       table(document.getElementById('portfolios'), [
-        ["Контур","portfolio"], ["Старт ₽","capital",false,2], ["Реальный доход ₽","closed_net",true,2], ["Доход %","return_pct",true,3], ["ГО занято ₽","used_margin",false,2], ["Свободно ₽","free_capital",false,2], ["Позиций","open_positions"], ["Сделок","closed_trades"]
+        ["Контур","portfolio"], ["Старт ₽","capital",false,2], ["День ₽","day_net",true,2], ["Всего ₽","closed_net",true,2], ["Доход %","return_pct",true,3], ["ГО занято ₽","used_margin",false,2], ["Свободно ₽","free_capital",false,2], ["Позиций","open_positions"], ["Сделок","closed_trades"]
       ], data.portfolio_overview || []);
       table(document.getElementById('tickers'), [
         ["Контур","portfolio"], ["Тикер","ticker"], ["Позиция","position"], ["Готовность","state",false,null,"state"], ["Риск","risk"], ["Last","last"], ["Bid","bid"], ["Ask","ask"], ["Спред","spread"], ["Стоп","stop_ticks"], ["Спред/стоп %","spread_to_stop_pct"], ["Стакан","book"], ["Комментарий","comment",false,null,"comment"]
