@@ -100,17 +100,46 @@ def find_tbank_token() -> str:
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(f"tinkoff-investments SDK unavailable: {type(exc).__name__}") from exc
 
+    best: tuple[int, str, str] | None = None
     for source, token in candidates:
         if token in seen:
             continue
         seen.add(token)
         try:
             with Client(token) as client:
-                client.users.get_accounts()
-            print(f"{now_str()} tbank_token source={source} status=working")
-            return token
+                accounts = list(client.users.get_accounts().accounts or [])
+                score = 0
+                label_parts = []
+                for account in accounts:
+                    name = str(getattr(account, "name", "") or "")
+                    account_id = str(getattr(account, "id", "") or "")
+                    account_score = 10
+                    if "фьючер" in name.lower() or "future" in name.lower():
+                        account_score += 200
+                    try:
+                        portfolio = client.operations.get_portfolio(account_id=account_id)
+                        total = quotation_to_float(getattr(portfolio, "total_amount_portfolio", None))
+                    except Exception:
+                        total = 0.0
+                    if total > 0:
+                        account_score += 50
+                    try:
+                        positions = client.operations.get_positions(account_id=account_id)
+                        futures_count = len(getattr(positions, "futures", []) or [])
+                    except Exception:
+                        futures_count = 0
+                    if futures_count:
+                        account_score += 25
+                    score = max(score, account_score)
+                    label_parts.append(f"{name or account_id}:total={total:.2f}:futures={futures_count}")
+            print(f"{now_str()} tbank_token source={source} status=working score={score} accounts={'|'.join(label_parts)}")
+            if best is None or score > best[0]:
+                best = (score, source, token)
         except Exception as exc:  # noqa: BLE001
             last_error = f"{source}:{type(exc).__name__}"
+    if best is not None:
+        print(f"{now_str()} tbank_token selected source={best[1]} score={best[0]}")
+        return best[2]
     raise RuntimeError(f"No working T-Bank token found ({last_error})")
 
 

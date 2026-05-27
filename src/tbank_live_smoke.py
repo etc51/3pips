@@ -158,6 +158,21 @@ def active_stop_orders(client: object, account_id: str, instrument: Instrument) 
     return result
 
 
+def instrument_position_lots(client: object, account_id: str, instrument: Instrument) -> int:
+    portfolio = client.operations.get_portfolio(account_id=account_id)
+    for position in getattr(portfolio, "positions", []) or []:
+        if (
+            getattr(position, "figi", "") == instrument.figi
+            or getattr(position, "instrument_uid", "") == instrument.uid
+            or str(getattr(position, "ticker", "")).upper() == instrument.ticker.upper()
+        ):
+            quantity_lots = quotation_to_float(getattr(position, "quantity_lots", None))
+            if quantity_lots:
+                return int(round(quantity_lots))
+            return int(round(quotation_to_float(getattr(position, "quantity", None))))
+    return 0
+
+
 def wait_order_fill(client: object, account_id: str, order_id_value: str, timeout_sec: int, log_path: Path) -> tuple[int, float, str]:
     from t_tech.invest import OrderExecutionReportStatus, PriceType
 
@@ -314,24 +329,83 @@ def post_stop_limit(
     return stop_order_id
 
 
-def cancel_stop_if_any(client: object, account_id: str, stop_order_id: str, log_path: Path, reason: str) -> None:
+def cancel_stop_if_any(client: object, account_id: str, stop_order_id: str, log_path: Path, reason: str) -> bool:
     if not stop_order_id:
-        return
+        return True
     try:
         response = client.stop_orders.cancel_stop_order(account_id=account_id, stop_order_id=stop_order_id)
         log_event(log_path, "cancel_stop_order", stop_order_id=stop_order_id, reason=reason, time=getattr(response, "time", None))
+        return True
     except Exception as exc:  # noqa: BLE001
         log_event(log_path, "cancel_stop_order_error", stop_order_id=stop_order_id, reason=reason, error=f"{type(exc).__name__}: {exc}")
+        return False
 
 
-def cancel_regular_if_any(client: object, account_id: str, order_id_value: str, log_path: Path, reason: str) -> None:
+def cancel_regular_if_any(client: object, account_id: str, order_id_value: str, log_path: Path, reason: str) -> bool:
     if not order_id_value:
-        return
+        return True
     try:
         response = client.orders.cancel_order(account_id=account_id, order_id=order_id_value)
         log_event(log_path, "cancel_order", order_id=order_id_value, reason=reason, time=getattr(response, "time", None))
+        return True
     except Exception as exc:  # noqa: BLE001
         log_event(log_path, "cancel_order_error", order_id=order_id_value, reason=reason, error=f"{type(exc).__name__}: {exc}")
+        return False
+
+
+def flatten_instrument_position(
+    client: object,
+    account_id: str,
+    instrument: Instrument,
+    client_id_prefix: str,
+    log_path: Path,
+    confirm_margin_trade: bool,
+    reason: str,
+    fill_timeout_sec: int,
+) -> int:
+    for stop_order in active_stop_orders(client, account_id, instrument):
+        cancel_stop_if_any(client, account_id, str(getattr(stop_order, "stop_order_id", "")), log_path, f"{reason}_active_stop_cleanup")
+    for regular_order in active_regular_orders(client, account_id, instrument):
+        cancel_regular_if_any(client, account_id, str(getattr(regular_order, "order_id", "")), log_path, f"{reason}_active_regular_cleanup")
+    time.sleep(1.0)
+
+    remaining_stops = active_stop_orders(client, account_id, instrument)
+    remaining_regular = active_regular_orders(client, account_id, instrument)
+    if remaining_stops or remaining_regular:
+        qty = instrument_position_lots(client, account_id, instrument)
+        log_event(
+            log_path,
+            "flatten_blocked_broker_orders_remain",
+            ticker=instrument.ticker,
+            reason=reason,
+            quantity_lots=qty,
+            active_regular=[str(getattr(x, "order_id", "")) for x in remaining_regular],
+            active_stop=[str(getattr(x, "stop_order_id", "")) for x in remaining_stops],
+        )
+        return qty
+
+    qty = instrument_position_lots(client, account_id, instrument)
+    log_event(log_path, "position_reconciled_before_flatten", ticker=instrument.ticker, reason=reason, quantity_lots=qty)
+    if qty == 0:
+        log_event(log_path, "market_close_skipped_position_flat", ticker=instrument.ticker, reason=reason)
+        return 0
+
+    close_direction: Direction = "short" if qty > 0 else "long"
+    _, close_order_id = post_market_order(
+        client,
+        account_id,
+        instrument,
+        close_direction,
+        abs(qty),
+        client_id_prefix,
+        reason,
+        log_path,
+        confirm_margin_trade,
+    )
+    wait_order_fill(client, account_id, close_order_id, fill_timeout_sec, log_path)
+    final_qty = instrument_position_lots(client, account_id, instrument)
+    log_event(log_path, "position_reconciled_after_flatten", ticker=instrument.ticker, reason=reason, quantity_lots=final_qty)
+    return final_qty
 
 
 def audit_duplicates(client: object, account_id: str, instrument: Instrument, log_path: Path, fail_on_duplicate: bool = True) -> tuple[int, int]:
@@ -421,6 +495,10 @@ def run(args: argparse.Namespace) -> int:
         regular_count, stop_count = audit_duplicates(client, account_id, instrument, log_path, fail_on_duplicate=False)
         if (regular_count or stop_count) and not args.allow_existing_instrument_orders:
             raise RuntimeError(f"existing_instrument_orders regular={regular_count} stop={stop_count}")
+        existing_position_lots = instrument_position_lots(client, account_id, instrument)
+        log_event(log_path, "broker_position_audit", ticker=instrument.ticker, quantity_lots=existing_position_lots)
+        if existing_position_lots and not args.allow_existing_instrument_position:
+            raise RuntimeError(f"existing_instrument_position quantity_lots={existing_position_lots}")
         if not args.real_orders:
             log_event(log_path, "dry_run_done", note="No real order was sent")
             return 0
@@ -499,7 +577,21 @@ def run(args: argparse.Namespace) -> int:
                 log_event(log_path, "forced_replace_test", mark=mark, new_stop=position.stop_price)
             if moved and time.monotonic() - last_replace >= float(args.min_stop_replace_interval_sec):
                 old_stop_id = position.stop_order_id
-                cancel_stop_if_any(client, account_id, old_stop_id, log_path, "trail_replace")
+                cancelled = cancel_stop_if_any(client, account_id, old_stop_id, log_path, "trail_replace")
+                if not cancelled:
+                    log_event(log_path, "trail_replace_reconcile_after_cancel_failure", old_stop_id=old_stop_id)
+                    flatten_instrument_position(
+                        client,
+                        account_id,
+                        instrument,
+                        args.client_id_prefix,
+                        log_path,
+                        bool(args.confirm_margin_trade),
+                        "trail_replace_cancel_failed",
+                        int(args.order_fill_timeout_sec),
+                    )
+                    audit_duplicates(client, account_id, instrument, log_path, fail_on_duplicate=False)
+                    return 2
                 post_stop_limit(
                     client,
                     account_id,
@@ -515,38 +607,32 @@ def run(args: argparse.Namespace) -> int:
             if emergency_stop_hit(position, instrument, float(mark), int(args.emergency_ticks)):
                 log_event(log_path, "emergency_market_close", mark=mark, stop=position.stop_price)
                 cancel_stop_if_any(client, account_id, position.stop_order_id, log_path, "emergency_market_close")
-                close_direction: Direction = "short" if position.direction == "long" else "long"
-                _, close_order_id = post_market_order(
+                flatten_instrument_position(
                     client,
                     account_id,
                     instrument,
-                    close_direction,
-                    position.qty,
                     args.client_id_prefix,
-                    "emerg",
                     log_path,
                     bool(args.confirm_margin_trade),
+                    "emergency_market_close",
+                    int(args.order_fill_timeout_sec),
                 )
-                wait_order_fill(client, account_id, close_order_id, int(args.order_fill_timeout_sec), log_path)
                 audit_duplicates(client, account_id, instrument, log_path, fail_on_duplicate=False)
                 return 2
             log_event(log_path, "heartbeat", mark=mark, stop=position.stop_price, best=position.best_price, **levels)
             time.sleep(float(args.heartbeat_sec))
 
         cancel_stop_if_any(client, account_id, position.stop_order_id, log_path, "scheduled_smoke_end")
-        close_direction = "short" if position.direction == "long" else "long"
-        _, close_order_id = post_market_order(
+        flatten_instrument_position(
             client,
             account_id,
             instrument,
-            close_direction,
-            position.qty,
             args.client_id_prefix,
-            "exit",
             log_path,
             bool(args.confirm_margin_trade),
+            "scheduled_smoke_end",
+            int(args.order_fill_timeout_sec),
         )
-        wait_order_fill(client, account_id, close_order_id, int(args.order_fill_timeout_sec), log_path)
         audit_duplicates(client, account_id, instrument, log_path, fail_on_duplicate=False)
         log_event(log_path, "smoke_done", status="completed", duration_sec=int(args.duration_sec))
         return 0
@@ -572,6 +658,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--client-id-prefix", default="3pips-smoke")
     parser.add_argument("--log", default=str(REPORTS / "runtime" / f"live_smoke_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"))
     parser.add_argument("--allow-existing-instrument-orders", action="store_true")
+    parser.add_argument("--allow-existing-instrument-position", action="store_true")
     parser.add_argument("--confirm-margin-trade", action="store_true")
     parser.add_argument("--real-orders", action="store_true")
     parser.add_argument("--confirm-real-orders", default="")
