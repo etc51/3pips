@@ -86,6 +86,40 @@ ENTRY_AUDIT_COLUMNS = [
     "hard_entry_reason",
     "raw_signal_reason",
 ]
+GPT_SHADOW_COLUMNS = [
+    "event_time",
+    "event_type",
+    "model",
+    "contour",
+    "secid",
+    "family",
+    "signal_family",
+    "entry_timing",
+    "session_filter",
+    "direction",
+    "qty",
+    "entry_price",
+    "exit_price",
+    "exit_source",
+    "trigger_price",
+    "trigger_source",
+    "stop_price",
+    "best_price",
+    "stop_ticks",
+    "trail_ticks",
+    "trail_arm_ticks",
+    "max_hold_minutes",
+    "ticks",
+    "gross_rub",
+    "fees_rub",
+    "net_rub",
+    "closed_net_rub",
+    "full_stop_risk_rub",
+    "risk_mode",
+    "risk_reason",
+    "sizing_reason",
+    "signal_reason",
+]
 
 
 @dataclass
@@ -113,6 +147,21 @@ class Profile:
     allowed_direction: str = "both"
     family: str = ""
     source_secid: str = ""
+    signal_family: str = "online_current"
+    entry_timing: str = "stream_executable"
+    session_filter: str = "all_available_data"
+    momentum_pct: float = 0.0
+    momentum_ticks: float = 0.0
+    breakout_lookback: int = 6
+    trend_fast: int = 0
+    trend_slow: int = 0
+    volume_multiplier: float = 1.0
+    volume_window: int = 20
+    vwap_mode: str = "disabled"
+    vwap_buffer_pct: float = 0.0
+    cooldown_minutes: int = 0
+    max_hold_minutes: int = 0
+    gpt_params_loaded: bool = False
 
 
 @dataclass
@@ -138,6 +187,17 @@ class State:
     risk_reason: str = ""
     shadow_positions: dict[str, Position] = field(default_factory=dict)
     shadow_closed: dict[str, bool] = field(default_factory=dict)
+    gpt_shadow_position: Position | None = None
+    gpt_shadow_attempts: int = 0
+    gpt_shadow_closed: int = 0
+    gpt_shadow_net: float = 0.0
+    gpt_shadow_last_reason: str = ""
+    gpt_shadow_entry_reason: str = ""
+    gpt_shadow_entry_sizing_reason: str = ""
+    gpt_shadow_risk_mode: str = ""
+    gpt_shadow_risk_reason: str = ""
+    gpt_shadow_last_entry_candle_count: int = -1
+    gpt_shadow_cooldown_until: float = 0.0
 
 
 @dataclass
@@ -752,6 +812,20 @@ def expiry_new_entry_block_reason(spec: Spec, threshold_days: float) -> str | No
 
 def profile_from_row(row: dict, secid: str | None = None, source_secid: str | None = None) -> Profile:
     ticker = secid or row["ticker"]
+    def as_int(name: str, default: int = 0) -> int:
+        try:
+            raw = row.get(name)
+            return int(float(raw)) if raw not in (None, "") else default
+        except Exception:
+            return default
+
+    def as_float(name: str, default: float = 0.0) -> float:
+        try:
+            raw = row.get(name)
+            return float(raw) if raw not in (None, "") else default
+        except Exception:
+            return default
+
     profile = Profile(
         secid=ticker,
         stop_ticks=int(row["stop_ticks"]),
@@ -762,6 +836,21 @@ def profile_from_row(row: dict, secid: str | None = None, source_secid: str | No
         allowed_direction=str(row.get("v7_direction") or "both").lower(),
         family=str(row.get("v7_family") or contract_family(ticker)),
         source_secid=source_secid or row["ticker"],
+        signal_family=str(row.get("signal_family") or row.get("v7_signal_family") or "online_current"),
+        entry_timing=str(row.get("entry_timing") or row.get("v7_entry_timing") or "stream_executable"),
+        session_filter=str(row.get("session_filter") or "all_available_data"),
+        momentum_pct=as_float("momentum_pct"),
+        momentum_ticks=as_float("momentum_ticks"),
+        breakout_lookback=as_int("breakout_lookback", 6),
+        trend_fast=as_int("trend_fast"),
+        trend_slow=as_int("trend_slow"),
+        volume_multiplier=as_float("volume_multiplier", 1.0),
+        volume_window=as_int("volume_window", 20),
+        vwap_mode=str(row.get("vwap_mode") or "disabled"),
+        vwap_buffer_pct=as_float("vwap_buffer_pct"),
+        cooldown_minutes=as_int("cooldown_minutes"),
+        max_hold_minutes=as_int("max_hold_minutes"),
+        gpt_params_loaded=bool(row.get("signal_family") or row.get("momentum_ticks") or row.get("max_hold_minutes")),
     )
     apply_profile_policy_overrides(profile)
     return profile
@@ -799,6 +888,21 @@ def clone_profile_for_contract(profile: Profile, secid: str) -> Profile:
         allowed_direction=profile.allowed_direction,
         family=profile.family or contract_family(secid),
         source_secid=profile.source_secid or profile.secid,
+        signal_family=profile.signal_family,
+        entry_timing=profile.entry_timing,
+        session_filter=profile.session_filter,
+        momentum_pct=profile.momentum_pct,
+        momentum_ticks=profile.momentum_ticks,
+        breakout_lookback=profile.breakout_lookback,
+        trend_fast=profile.trend_fast,
+        trend_slow=profile.trend_slow,
+        volume_multiplier=profile.volume_multiplier,
+        volume_window=profile.volume_window,
+        vwap_mode=profile.vwap_mode,
+        vwap_buffer_pct=profile.vwap_buffer_pct,
+        cooldown_minutes=profile.cooldown_minutes,
+        max_hold_minutes=profile.max_hold_minutes,
+        gpt_params_loaded=profile.gpt_params_loaded,
     )
     apply_profile_policy_overrides(cloned)
     return cloned
@@ -815,6 +919,51 @@ def load_profiles(path: Path, secids: list[str] | None = None) -> dict[str, Prof
             continue
         out[row["ticker"]] = profile_from_row(row)
     return out
+
+
+def apply_gpt_shadow_params(profiles: dict[str, Profile], path: Path) -> None:
+    if not path or not path.exists():
+        print(f"{now_str()} GPT_SHADOW params_missing path={path}", flush=True)
+        return
+    rows = list(csv.DictReader(path.open(encoding="utf-8")))
+    by_ticker = {str(row.get("ticker") or "").upper(): row for row in rows if row.get("ticker")}
+
+    def as_int(row: dict, name: str, current: int) -> int:
+        try:
+            raw = row.get(name)
+            return int(float(raw)) if raw not in (None, "") else current
+        except Exception:
+            return current
+
+    def as_float(row: dict, name: str, current: float) -> float:
+        try:
+            raw = row.get(name)
+            return float(raw) if raw not in (None, "") else current
+        except Exception:
+            return current
+
+    applied = 0
+    for ticker, profile in profiles.items():
+        row = by_ticker.get(ticker.upper())
+        if row is None:
+            continue
+        profile.signal_family = str(row.get("signal_family") or profile.signal_family)
+        profile.entry_timing = str(row.get("entry_timing") or profile.entry_timing)
+        profile.session_filter = str(row.get("session_filter") or profile.session_filter)
+        profile.momentum_pct = as_float(row, "momentum_pct", profile.momentum_pct)
+        profile.momentum_ticks = as_float(row, "momentum_ticks", profile.momentum_ticks)
+        profile.breakout_lookback = as_int(row, "breakout_lookback", profile.breakout_lookback)
+        profile.trend_fast = as_int(row, "trend_fast", profile.trend_fast)
+        profile.trend_slow = as_int(row, "trend_slow", profile.trend_slow)
+        profile.volume_multiplier = as_float(row, "volume_multiplier", profile.volume_multiplier)
+        profile.volume_window = as_int(row, "volume_window", profile.volume_window)
+        profile.vwap_mode = str(row.get("vwap_mode") or profile.vwap_mode)
+        profile.vwap_buffer_pct = as_float(row, "vwap_buffer_pct", profile.vwap_buffer_pct)
+        profile.cooldown_minutes = as_int(row, "cooldown_minutes", profile.cooldown_minutes)
+        profile.max_hold_minutes = as_int(row, "max_hold_minutes", profile.max_hold_minutes)
+        profile.gpt_params_loaded = True
+        applied += 1
+    print(f"{now_str()} GPT_SHADOW params_loaded applied={applied} path={path}", flush=True)
 
 
 def seed_candles(client: object, figi: str, minutes: int) -> deque[dict]:
@@ -1145,6 +1294,139 @@ def signal(state: State, aggressive: bool) -> tuple[Direction | None, str]:
     if short_ok:
         return "short", f"entry_signal short {reason}"
     return None, f"watch_conditions {reason}"
+
+
+def mean_close(rows: list[dict], n: int) -> float:
+    subset = rows[-max(1, n) :]
+    return sum(float(r["close"]) for r in subset) / len(subset) if subset else 0.0
+
+
+def rolling_vwap(rows: list[dict], n: int | None) -> float:
+    subset = rows[-n:] if n else rows
+    volume_sum = sum(float(r.get("volume") or 0) for r in subset)
+    if volume_sum <= 0:
+        return float(subset[-1]["close"]) if subset else 0.0
+    return sum(float(r["close"]) * float(r.get("volume") or 0) for r in subset) / volume_sum
+
+
+def gpt_session_allowed(profile: Profile) -> bool:
+    mode = (profile.session_filter or "all_available_data").lower()
+    if mode in {"", "all_available_data", "all"}:
+        return True
+    now_sec = clock_seconds_now()
+    start = 10 * 3600
+    end = 18 * 3600 + 45 * 60
+    if mode == "exclude_first_last_10_minutes":
+        start += 10 * 60
+        end -= 10 * 60
+    return start <= now_sec < end
+
+
+def gpt_profile_signal(state: State) -> tuple[Direction | None, str]:
+    profile = state.profile
+    rows = list(state.candles)
+    if not profile.gpt_params_loaded:
+        return None, "gpt_shadow params_missing"
+    if not gpt_session_allowed(profile):
+        return None, f"gpt_shadow session_filter {profile.session_filter}"
+
+    lookback = max(2, int(profile.breakout_lookback or 6))
+    trend_fast = max(1, int(profile.trend_fast or 3))
+    trend_slow = max(trend_fast + 1, int(profile.trend_slow or max(8, trend_fast + 1)))
+    vol_window = max(2, int(profile.volume_window or 20))
+    needed = max(lookback + 2, trend_slow + 1, vol_window + 2, 12)
+    if len(rows) < needed:
+        return None, f"gpt_shadow warmup={len(rows)}/{needed}"
+
+    spec = state.spec
+    last = rows[-1]
+    prev = rows[-2]
+    recent = rows[-lookback - 1 : -1]
+    last_close = float(last["close"])
+    prev_close = float(prev["close"])
+    last_vol = float(last.get("volume") or 0)
+    avgv = avg_volume(rows[:-1], vol_window)
+    mom = (last_close - prev_close) / spec.min_step
+    threshold = float(profile.momentum_ticks or 0.0)
+    if profile.momentum_pct:
+        threshold = max(threshold, abs(float(profile.momentum_pct) * last_close / spec.min_step))
+    if threshold <= 0:
+        threshold = 2.0
+    fast = mean_close(rows, trend_fast)
+    slow = mean_close(rows, trend_slow)
+    trend = (fast - slow) / spec.min_step
+    high = max(float(r["high"]) for r in recent)
+    low = min(float(r["low"]) for r in recent)
+    recent_range_ticks = max(float(r["high"]) - float(r["low"]) for r in rows[-5:]) / spec.min_step
+
+    vwap_mode = (profile.vwap_mode or "disabled").lower()
+    if vwap_mode == "rolling20":
+        vwap = rolling_vwap(rows, 20)
+    elif vwap_mode == "rolling60":
+        vwap = rolling_vwap(rows, 60)
+    elif vwap_mode == "session":
+        vwap = rolling_vwap(rows, None)
+    else:
+        vwap, _ = volume_vwap(rows, state.last_price)
+    vwap_buffer_ticks = abs(float(profile.vwap_buffer_pct or 0.0) * last_close / spec.min_step)
+
+    bid_qty = ask_qty = 0
+    if state.last_order_book is not None:
+        bid_qty = sum(int(getattr(x, "quantity", 0) or 0) for x in getattr(state.last_order_book, "bids", [])[:3])
+        ask_qty = sum(int(getattr(x, "quantity", 0) or 0) for x in getattr(state.last_order_book, "asks", [])[:3])
+    if bid_qty <= 0 or ask_qty <= 0:
+        return None, f"gpt_shadow book_filter empty_book bid={bid_qty} ask={ask_qty}"
+    levels = best_levels(state.last_order_book, spec)
+    spread_ticks = levels.get("spread_ticks")
+    max_general_spread = state.profile.stop_ticks * SPREAD_DOMINATES_RATIO
+    if spread_ticks is None or float(spread_ticks) > max_general_spread:
+        spread_txt = "-" if spread_ticks is None else f"{float(spread_ticks):.1f}t"
+        return None, f"gpt_shadow spread_filter spread={spread_txt} stop={state.profile.stop_ticks}t max={max_general_spread:.1f}t"
+
+    fee_t = fee_ticks(state.side_fee, spec)
+    vol_mult = float(profile.volume_multiplier if profile.volume_multiplier is not None else 1.0)
+    vol_ok = vol_mult <= 0 or (avgv > 0 and last_vol >= avgv * vol_mult)
+    if not vol_ok:
+        return None, f"gpt_shadow volume_filter vol={last_vol:.0f}/{avgv:.0f} mult={vol_mult:g}"
+
+    family = (profile.signal_family or "pure_trailing_after_impulse").lower()
+    allowed = (profile.allowed_direction or "both").lower()
+    vwap_long_ok = vwap_mode == "disabled" or (last_close - vwap) / spec.min_step >= vwap_buffer_ticks
+    vwap_short_ok = vwap_mode == "disabled" or (vwap - last_close) / spec.min_step >= vwap_buffer_ticks
+    long_break = last_close >= high
+    short_break = last_close <= low
+    long_mom = mom >= threshold
+    short_mom = mom <= -threshold
+    long_trend = trend >= 0
+    short_trend = trend <= 0
+
+    if family == "momentum_breakout":
+        long_ok = long_mom and long_break and long_trend and vwap_long_ok
+        short_ok = short_mom and short_break and short_trend and vwap_short_ok
+    elif family == "vwap_impulse":
+        long_ok = long_mom and long_trend and vwap_long_ok
+        short_ok = short_mom and short_trend and vwap_short_ok
+    elif family == "range_expansion":
+        min_range = max(threshold, fee_t + float(spread_ticks or 0) + 2.0)
+        long_ok = recent_range_ticks >= min_range and long_break and mom > 0 and vwap_long_ok
+        short_ok = recent_range_ticks >= min_range and short_break and mom < 0 and vwap_short_ok
+    elif family == "trend_pullback":
+        long_ok = long_trend and mom >= max(1.0, threshold * 0.5) and vwap_long_ok
+        short_ok = short_trend and mom <= -max(1.0, threshold * 0.5) and vwap_short_ok
+    else:
+        long_ok = long_mom and long_trend and vwap_long_ok
+        short_ok = short_mom and short_trend and vwap_short_ok
+
+    reason = (
+        f"gpt_shadow family={family} p={state.last_price:g} close={last_close:g} "
+        f"mom={mom:.1f}/{threshold:.1f} trend={trend:.1f} "
+        f"vol={last_vol:.0f}/{avgv:.0f} vwap={vwap:g} spread={spread_ticks} book={bid_qty}/{ask_qty}"
+    )
+    if long_ok and allowed in {"long", "both"}:
+        return "long", f"gpt_entry_signal long {reason}"
+    if short_ok and allowed in {"short", "both"}:
+        return "short", f"gpt_entry_signal short {reason}"
+    return None, f"gpt_watch_conditions {reason}"
 
 
 def entry_shadow_flags(st: State, direction: Direction) -> dict:
@@ -1712,6 +1994,300 @@ def process_open_state_exit(
     write_open_positions(Path(args.open_positions_log), states)
 
 
+def gpt_shadow_used_margin(states: list[State]) -> float:
+    total = 0.0
+    for st in states:
+        if st.gpt_shadow_position is not None:
+            total += position_margin(st.spec, st.gpt_shadow_position.direction, st.gpt_shadow_position.qty)
+    return total
+
+
+def gpt_shadow_sizing(
+    args: argparse.Namespace,
+    states: list[State],
+    spec: Spec,
+    profile: Profile,
+    direction: Direction | str,
+    side_fee: float,
+    max_full_stop_rub: float,
+) -> SizingDecision:
+    initial_capital = float(getattr(args, "paper_capital", 200_000.0))
+    equity = initial_capital + sum(st.gpt_shadow_net for st in states)
+    per_contract = spec.margin_buy if direction == "long" else spec.margin_sell
+    if per_contract <= 0:
+        per_contract = max(spec.margin_buy, spec.margin_sell, 0.0)
+    if per_contract <= 0:
+        margin_qty = 1
+    else:
+        max_total_margin = equity * float(getattr(args, "max_total_margin_pct", 0.80))
+        free_margin = max(0.0, max_total_margin - gpt_shadow_used_margin(states))
+        per_position_limit = equity * float(getattr(args, "max_position_margin_pct", 0.20))
+        budget = min(free_margin, per_position_limit)
+        margin_qty = max(0, int(budget // per_contract))
+
+    gross_stop_per_contract = max(0.0, profile.stop_ticks * spec.step_price)
+    round_turn_fee_per_contract = max(0.0, 2 * side_fee)
+    full_stop_per_contract = gross_stop_per_contract + round_turn_fee_per_contract
+    risk_qty = None
+    if max_full_stop_rub > 0 and full_stop_per_contract > 0:
+        risk_qty = int(max_full_stop_rub // full_stop_per_contract)
+    qty = margin_qty if risk_qty is None else min(margin_qty, risk_qty)
+    qty = max(0, qty)
+    full_stop_rub = qty * full_stop_per_contract
+    reason = (
+        f"gpt_shadow_sizing margin_qty={margin_qty} risk_qty={risk_qty if risk_qty is not None else '-'} "
+        f"full_stop_1lot={full_stop_per_contract:.2f} full_stop={full_stop_rub:.2f} "
+        f"max_full_stop={max_full_stop_rub:.0f}"
+    )
+    return SizingDecision(
+        qty=qty,
+        margin_qty=margin_qty,
+        risk_qty=risk_qty,
+        gross_stop_per_contract_rub=gross_stop_per_contract,
+        round_turn_fee_per_contract_rub=round_turn_fee_per_contract,
+        full_stop_per_contract_rub=full_stop_per_contract,
+        full_stop_rub=full_stop_rub,
+        reason=reason,
+    )
+
+
+def append_gpt_shadow_event(path: Path, st: State, event_type: str, row: dict) -> None:
+    if not str(path):
+        return
+    base = {
+        "event_time": now_str(),
+        "event_type": event_type,
+        "model": "gpt_profile_shadow",
+        "contour": st.contour,
+        "secid": st.spec.secid,
+        "family": state_family(st),
+        "signal_family": st.profile.signal_family,
+        "entry_timing": st.profile.entry_timing,
+        "session_filter": st.profile.session_filter,
+        "direction": "",
+        "qty": "",
+        "entry_price": "",
+        "exit_price": "",
+        "exit_source": "",
+        "trigger_price": "",
+        "trigger_source": "",
+        "stop_price": "",
+        "best_price": "",
+        "stop_ticks": st.profile.stop_ticks,
+        "trail_ticks": st.profile.trail_ticks,
+        "trail_arm_ticks": st.profile.trail_arm_ticks,
+        "max_hold_minutes": st.profile.max_hold_minutes,
+        "ticks": "",
+        "gross_rub": "",
+        "fees_rub": "",
+        "net_rub": "",
+        "closed_net_rub": round(st.gpt_shadow_net, 2),
+        "full_stop_risk_rub": "",
+        "risk_mode": st.gpt_shadow_risk_mode,
+        "risk_reason": st.gpt_shadow_risk_reason,
+        "sizing_reason": st.gpt_shadow_entry_sizing_reason,
+        "signal_reason": st.gpt_shadow_entry_reason or st.gpt_shadow_last_reason,
+    }
+    base.update(row)
+    append_schema_stable_csv(path, {key: base.get(key) for key in GPT_SHADOW_COLUMNS})
+
+
+def opened_minutes_ago(pos: Position) -> float:
+    try:
+        opened = datetime.strptime(str(pos.opened_at), "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return 0.0
+    return max(0.0, (datetime.now() - opened).total_seconds() / 60.0)
+
+
+def close_gpt_shadow(
+    st: State,
+    args: argparse.Namespace,
+    fill_price: float,
+    fill_source: str,
+    trigger_price: float,
+    trigger_source: str,
+) -> None:
+    pos = st.gpt_shadow_position
+    if pos is None:
+        return
+    ticks, gross, net = pnl_rub(pos, fill_price, st.spec, st.side_fee)
+    st.gpt_shadow_closed += 1
+    st.gpt_shadow_net += net
+    append_gpt_shadow_event(
+        Path(args.gpt_shadow_log),
+        st,
+        "close",
+        {
+            "direction": pos.direction,
+            "qty": pos.qty,
+            "entry_price": pos.entry_price,
+            "exit_price": fill_price,
+            "exit_source": fill_source,
+            "trigger_price": trigger_price,
+            "trigger_source": trigger_source,
+            "stop_price": pos.stop_price,
+            "best_price": pos.best_price,
+            "ticks": round(ticks, 3),
+            "gross_rub": round(gross, 2),
+            "fees_rub": round(2 * st.side_fee * pos.qty, 2),
+            "net_rub": round(net, 2),
+            "closed_net_rub": round(st.gpt_shadow_net, 2),
+            "full_stop_risk_rub": round(full_stop_risk_rub(st.profile, st.spec, st.side_fee, pos.qty), 2),
+        },
+    )
+    print(
+        f"{now_str()} GPT_SHADOW_CLOSE {st.spec.secid} {pos.direction} "
+        f"exit={fill_price:g} source={fill_source} ticks={ticks:.1f} "
+        f"net={net:.2f} total={st.gpt_shadow_net:.2f}",
+        flush=True,
+    )
+    st.gpt_shadow_position = None
+    cooldown = max(0, int(st.profile.cooldown_minutes or 0)) * 60
+    st.gpt_shadow_cooldown_until = max(st.gpt_shadow_cooldown_until, time.monotonic() + max(60, cooldown))
+
+
+def process_gpt_shadow(
+    st: State,
+    args: argparse.Namespace,
+    portfolio: Portfolio,
+    states: list[State],
+    trading_enabled: bool,
+    force_close_due: bool,
+    candle_closed: bool,
+) -> None:
+    if not bool(getattr(args, "enable_gpt_shadow", False)):
+        return
+    if st.contour != str(getattr(args, "gpt_shadow_contour", "strict")):
+        return
+
+    pos = st.gpt_shadow_position
+    if pos is not None:
+        exit_price, exit_source = executable_price(st, pos.direction, "exit")
+        if exit_price is None:
+            st.gpt_shadow_last_reason = "gpt_shadow book_filter no_executable_exit"
+            return
+        force_reason = None
+        max_hold = int(st.profile.max_hold_minutes or 0)
+        if force_close_due:
+            force_reason = "gpt_scheduled_force_close"
+        elif max_hold > 0 and opened_minutes_ago(pos) >= max_hold:
+            force_reason = "gpt_max_hold_exit"
+
+        fee_t = fee_ticks(st.side_fee, st.spec)
+        if force_reason:
+            close_gpt_shadow(st, args, round_to_step(exit_price, st.spec.min_step), force_reason, exit_price, exit_source)
+            return
+
+        move_ticks = (
+            (exit_price - pos.entry_price) / st.spec.min_step
+            if pos.direction == "long"
+            else (pos.entry_price - exit_price) / st.spec.min_step
+        )
+        if move_ticks >= max(st.profile.trail_arm_ticks, fee_t + 1):
+            update_stop(pos, exit_price, st.profile.trail_ticks, st.spec)
+            min_net_stop = (
+                pos.entry_price + (fee_t + 0.5) * st.spec.min_step
+                if pos.direction == "long"
+                else pos.entry_price - (fee_t + 0.5) * st.spec.min_step
+            )
+            if pos.direction == "long":
+                pos.stop_price = max(pos.stop_price, round_to_step(min_net_stop, st.spec.min_step))
+            else:
+                pos.stop_price = min(pos.stop_price, round_to_step(min_net_stop, st.spec.min_step))
+
+        fill_price, fill_source, _stop_qty, _overrun = stop_limit_fill_price(
+            st,
+            pos,
+            exit_price,
+            float(args.stop_limit_emergency_ticks),
+        )
+        if fill_price is not None:
+            close_gpt_shadow(st, args, fill_price, fill_source, exit_price, exit_source)
+        return
+
+    if not trading_enabled or force_close_due:
+        st.gpt_shadow_last_reason = "gpt_shadow time_gate"
+        return
+    if not candle_closed:
+        return
+    if st.gpt_shadow_attempts >= st.profile.max_attempts:
+        st.gpt_shadow_last_reason = "gpt_shadow attempt_filter max_attempts_reached"
+        return
+    if time.monotonic() < st.gpt_shadow_cooldown_until:
+        st.gpt_shadow_last_reason = "gpt_shadow cooldown_filter wait_after_close"
+        return
+    if st.gpt_shadow_last_entry_candle_count == len(st.candles):
+        st.gpt_shadow_last_reason = "gpt_shadow candle_filter wait_new_candle"
+        return
+    expiry_reason = expiry_new_entry_block_reason(st.spec, float(args.no_new_expiry_days))
+    if expiry_reason:
+        st.gpt_shadow_last_reason = f"gpt_shadow {expiry_reason}"
+        return
+
+    direction, reason = gpt_profile_signal(st)
+    st.gpt_shadow_last_reason = reason
+    if direction is None:
+        return
+    entry_price, entry_source = executable_price(st, direction, "entry")
+    if entry_price is None:
+        st.gpt_shadow_last_reason = "gpt_shadow book_filter no_executable_entry"
+        return
+    if (st.profile.entry_timing or "").lower() == "adverse_1tick":
+        entry_price += st.spec.min_step if direction == "long" else -st.spec.min_step
+        entry_price = round_to_step(entry_price, st.spec.min_step)
+
+    risk_decision = args.risk_governor.decide(st, float(args.max_full_stop_rub))
+    st.gpt_shadow_risk_mode = risk_decision.mode
+    st.gpt_shadow_risk_reason = risk_decision.reason
+    if not risk_decision.allowed:
+        st.gpt_shadow_last_reason = f"gpt_shadow risk_governor {risk_decision.mode} {risk_decision.reason}"
+        return
+    sizing = gpt_shadow_sizing(
+        args,
+        states,
+        st.spec,
+        st.profile,
+        direction,
+        st.side_fee,
+        risk_decision.max_full_stop_rub,
+    )
+    if sizing.qty < 1:
+        st.gpt_shadow_last_reason = f"gpt_shadow risk_filter full_stop_gt_limit {sizing.reason}"
+        return
+
+    st.gpt_shadow_attempts += 1
+    st.gpt_shadow_entry_reason = reason
+    st.gpt_shadow_entry_sizing_reason = sizing.reason
+    st.gpt_shadow_position = open_position(direction, entry_price, sizing.qty, st.profile.stop_ticks, st.profile.trail_ticks, st.spec)
+    st.gpt_shadow_last_entry_candle_count = len(st.candles)
+    append_gpt_shadow_event(
+        Path(args.gpt_shadow_log),
+        st,
+        "open",
+        {
+            "event_time": st.gpt_shadow_position.opened_at,
+            "direction": direction,
+            "qty": sizing.qty,
+            "entry_price": entry_price,
+            "exit_source": entry_source,
+            "stop_price": st.gpt_shadow_position.stop_price,
+            "best_price": st.gpt_shadow_position.best_price,
+            "full_stop_risk_rub": round(sizing.full_stop_rub, 2),
+            "risk_mode": risk_decision.mode,
+            "risk_reason": risk_decision.reason,
+            "sizing_reason": sizing.reason,
+            "signal_reason": reason,
+        },
+    )
+    print(
+        f"{now_str()} GPT_SHADOW_OPEN {st.spec.secid} {direction} qty={sizing.qty} "
+        f"entry={entry_price:g} source={entry_source} stop={st.gpt_shadow_position.stop_price:g} "
+        f"risk={risk_decision.mode}/{risk_decision.max_full_stop_rub:.0f} {reason}",
+        flush=True,
+    )
+
+
 def poll_market_fallback(
     token: str,
     specs: list[Spec],
@@ -1755,7 +2331,21 @@ def poll_market_fallback(
                                     st.last_price = round_to_step(price_by_uid[spec.uid], spec.min_step)
                                 if orderbook is not None:
                                     st.last_order_book = orderbook
-                                force_reason = "scheduled_force_close" if st.position is not None and daily_force_close_due(parse_clock_time(getattr(args, "force_close_at", ""))) else None
+                                trading_enabled = daily_trading_enabled(
+                                    parse_clock_time(getattr(args, "no_trade_before", "")),
+                                    parse_clock_time(getattr(args, "no_new_after", "")),
+                                )
+                                force_due = daily_force_close_due(parse_clock_time(getattr(args, "force_close_at", "")))
+                                process_gpt_shadow(
+                                    st,
+                                    args,
+                                    portfolio,
+                                    states,
+                                    trading_enabled=trading_enabled,
+                                    force_close_due=force_due,
+                                    candle_closed=False,
+                                )
+                                force_reason = "scheduled_force_close" if st.position is not None and force_due else None
                                 process_open_state_exit(
                                     st,
                                     args,
@@ -2062,6 +2652,77 @@ def restore_closed_totals(path: Path, states: list[State], portfolio: Portfolio)
     return restored
 
 
+def restore_gpt_shadow_from_log(path: Path, states: list[State]) -> int:
+    if not path.exists() or path.stat().st_size == 0:
+        return 0
+    by_key = {(st.contour, st.spec.secid): st for st in states}
+    open_rows: dict[tuple[str, str], dict] = {}
+    restored_net: dict[tuple[str, str], float] = {}
+    restored_closed: dict[tuple[str, str], int] = {}
+    restored_attempts: dict[tuple[str, str], int] = {}
+    try:
+        with path.open(newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                key = (str(row.get("contour") or ""), str(row.get("secid") or ""))
+                if key not in by_key:
+                    continue
+                event = str(row.get("event_type") or "").lower()
+                if event == "open":
+                    open_rows[key] = row
+                    restored_attempts[key] = restored_attempts.get(key, 0) + 1
+                elif event == "close":
+                    open_rows.pop(key, None)
+                    restored_closed[key] = restored_closed.get(key, 0) + 1
+                    try:
+                        restored_net[key] = restored_net.get(key, 0.0) + float(row.get("net_rub") or 0.0)
+                    except Exception:
+                        pass
+    except Exception as exc:
+        print(f"{now_str()} GPT_SHADOW restore_error={exc}", flush=True)
+        return 0
+
+    restored_open = 0
+    for key, st in by_key.items():
+        st.gpt_shadow_net += restored_net.get(key, 0.0)
+        st.gpt_shadow_closed += restored_closed.get(key, 0)
+        st.gpt_shadow_attempts += restored_attempts.get(key, 0)
+        row = open_rows.get(key)
+        if not row or st.gpt_shadow_position is not None:
+            continue
+        try:
+            direction = str(row["direction"])
+            entry = float(row["entry_price"])
+            qty = int(float(row["qty"]))
+            stop = float(row["stop_price"])
+            best_raw = row.get("best_price")
+            best = float(best_raw) if best_raw not in (None, "") else entry
+            opened_at = str(row.get("event_time") or now_str())
+        except Exception as exc:
+            print(f"{now_str()} GPT_SHADOW restore_skip_bad {key} error={exc}", flush=True)
+            continue
+        st.gpt_shadow_position = Position(
+            direction=direction,
+            entry_price=entry,
+            qty=qty,
+            best_price=best,
+            stop_price=stop,
+            opened_at=opened_at,
+        )
+        st.gpt_shadow_entry_reason = str(row.get("signal_reason") or "")
+        st.gpt_shadow_entry_sizing_reason = str(row.get("sizing_reason") or "")
+        st.gpt_shadow_risk_mode = str(row.get("risk_mode") or "")
+        st.gpt_shadow_risk_reason = str(row.get("risk_reason") or "")
+        st.gpt_shadow_last_reason = "gpt_shadow_restored_open_position"
+        restored_open += 1
+    if restored_open or restored_closed:
+        print(
+            f"{now_str()} GPT_SHADOW restore open={restored_open} "
+            f"closed={sum(restored_closed.values())} net={sum(restored_net.values()):.2f} source={path}",
+            flush=True,
+        )
+    return restored_open
+
+
 def write_bot_health(
     path: Path,
     states: list[State],
@@ -2129,6 +2790,10 @@ def main() -> None:
     parser.add_argument("--startup-status-log", default=str(REPORTS / "paper_startup_status.csv"))
     parser.add_argument("--shadow-log", default=str(REPORTS / "paper_shadow_exit_models.csv"))
     parser.add_argument("--entry-audit-log", default=str(REPORTS / "paper_entry_audit.csv"))
+    parser.add_argument("--enable-gpt-shadow", action="store_true")
+    parser.add_argument("--gpt-shadow-contour", default="strict")
+    parser.add_argument("--gpt-shadow-params", default=str(REPORTS / "futures_scalp_profiles_v7_paper_20260525_gpt_shadow_params.csv"))
+    parser.add_argument("--gpt-shadow-log", default=str(REPORTS / "paper_gpt_shadow_trades.csv"))
     parser.add_argument("--health-log", default=str(REPORTS / "paper_bot_health.json"))
     parser.add_argument("--snapshot-sec", type=int, default=10)
     parser.add_argument("--no-trade-before", default="")
@@ -2162,6 +2827,8 @@ def main() -> None:
     from t_tech.invest import Client, InstrumentIdType
 
     all_profiles = load_profiles(Path(args.profiles))
+    if args.enable_gpt_shadow:
+        apply_gpt_shadow_params(all_profiles, Path(args.gpt_shadow_params))
     profiles = {secid: all_profiles[secid] for secid in args.secids if secid in all_profiles}
     portfolio = Portfolio(
         initial_capital=float(args.paper_capital),
@@ -2348,6 +3015,8 @@ def main() -> None:
         restore_closed_totals(Path(args.log), states, portfolio)
         risk_governor.rebuild_from_trade_log(Path(args.log), states)
         restore_open_positions(Path(args.open_positions_log), states)
+        if args.enable_gpt_shadow:
+            restore_gpt_shadow_from_log(Path(args.gpt_shadow_log), states)
         write_open_positions(Path(args.open_positions_log), states)
         write_bot_health(
             Path(args.health_log),
@@ -2408,6 +3077,15 @@ def main() -> None:
                                 "volume": int(candle.volume),
                             }
                         )
+                    process_gpt_shadow(
+                        st,
+                        args,
+                        portfolio,
+                        states,
+                        trading_enabled=trading_enabled,
+                        force_close_due=force_close_due,
+                        candle_closed=candle is not None,
+                    )
                     if st.position is None and has_active_shadow(st):
                         process_open_state_exit(st, args, portfolio, states, candle is not None)
                         if has_active_shadow(st):

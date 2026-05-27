@@ -187,6 +187,12 @@ def human_reason(reason: object) -> str:
         return "сигнал на вход: long"
     if text.startswith("entry_signal short"):
         return "сигнал на вход: short"
+    if text.startswith("gpt_entry_signal long"):
+        return "GPT shadow: вход long"
+    if text.startswith("gpt_entry_signal short"):
+        return "GPT shadow: вход short"
+    if text.startswith("gpt_watch_conditions"):
+        return "GPT shadow: условия наблюдаются"
     if text.startswith("watch_conditions") or text.startswith("p="):
         return "условия наблюдаются, входа нет"
     if text == "duplicate_filter ticker_already_open" or text == "duplicate_filter_ticker_already_open":
@@ -211,6 +217,10 @@ def human_reason(reason: object) -> str:
         "listening": "слушает рынок",
         "book": "стакан",
         "shadow_compare_active": "идёт сравнение моделей выхода",
+        "gpt_profile_shadow": "GPT shadow",
+        "gpt_shadow": "GPT shadow",
+        "gpt_max_hold_exit": "GPT shadow: выход по max hold",
+        "gpt_scheduled_force_close": "GPT shadow: плановое закрытие",
         "duplicate_filter ticker_already_open": "позиция по тикеру уже открыта",
         "duplicate_filter_ticker_already_open": "позиция по тикеру уже открыта",
         "duplicate_filter": "дубль заблокирован",
@@ -393,6 +403,29 @@ def normalize_execution_trades(df: pd.DataFrame, portfolio: str) -> pd.DataFrame
     return out
 
 
+def normalize_gpt_shadow_trades(df: pd.DataFrame, portfolio: str) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame()
+    out = df.copy()
+    if "event_type" in out:
+        out = out[out["event_type"].astype(str).str.lower() == "close"].copy()
+    if out.empty:
+        return pd.DataFrame()
+    if "secid" in out:
+        out["ticker"] = out["secid"]
+    if "event_time" in out:
+        out["time"] = out["event_time"]
+    if "net_rub" in out:
+        out["net_pnl_rub"] = pd.to_numeric(out["net_rub"], errors="coerce")
+    if "fees_rub" in out:
+        out["fees_rub"] = pd.to_numeric(out["fees_rub"], errors="coerce")
+    if "ticks" in out:
+        out["ticks"] = pd.to_numeric(out["ticks"], errors="coerce")
+    out["source"] = "gpt_shadow"
+    out["portfolio"] = portfolio
+    return out
+
+
 def equity_stats(pnl: pd.Series) -> dict:
     pnl = pd.to_numeric(pnl, errors="coerce").dropna()
     if pnl.empty:
@@ -421,9 +454,21 @@ def build_state(base_dir: Path) -> dict:
         )
     trade_parts.append(normalize_execution_trades(read_csv(base_dir / "paper_execution_trades.csv"), "strong"))
     trades = pd.concat(trade_parts, ignore_index=True, sort=False)
+    gpt_shadow_parts = []
+    for portfolio in portfolio_names:
+        gpt_shadow_parts.append(
+            normalize_gpt_shadow_trades(
+                read_csv(portfolio_path(base_dir, portfolio, "gpt_shadow_trades.csv")),
+                portfolio,
+            )
+        )
+    gpt_shadow_trades = pd.concat(gpt_shadow_parts, ignore_index=True, sort=False)
     if not trades.empty and "time" in trades:
         trades["_time_sort"] = pd.to_datetime(trades["time"], errors="coerce")
         trades = trades.sort_values("_time_sort", na_position="last")
+    if not gpt_shadow_trades.empty and "time" in gpt_shadow_trades:
+        gpt_shadow_trades["_time_sort"] = pd.to_datetime(gpt_shadow_trades["time"], errors="coerce")
+        gpt_shadow_trades = gpt_shadow_trades.sort_values("_time_sort", na_position="last")
 
     snapshot_parts = []
     for portfolio in portfolio_names:
@@ -478,6 +523,7 @@ def build_state(base_dir: Path) -> dict:
                 portfolio_path(base_dir, portfolio, "live_orderbook_snapshots.csv"),
                 portfolio_path(base_dir, portfolio, "paper_open_positions.json"),
                 portfolio_path(base_dir, portfolio, "startup_status.csv"),
+                portfolio_path(base_dir, portfolio, "gpt_shadow_trades.csv"),
             ]
         )
     stats["last_update"] = latest_mtime(watched_paths)
@@ -528,6 +574,48 @@ def build_state(base_dir: Path) -> dict:
                 "closed_trades": int(len(closed_part)),
             }
         )
+
+    gpt_shadow_overview = []
+    if not gpt_shadow_trades.empty and "portfolio" in gpt_shadow_trades:
+        for portfolio, g in gpt_shadow_trades.groupby("portfolio", dropna=True):
+            pnl = pd.to_numeric(g.get("net_pnl_rub", pd.Series(dtype=float)), errors="coerce").dropna()
+            s = equity_stats(pnl)
+            gpt_shadow_overview.append(
+                {
+                    "portfolio": str(portfolio),
+                    "net": s["net"],
+                    "trades": int(len(pnl)),
+                    "wins": s["wins"],
+                    "losses": s["losses"],
+                    "win_rate": s["win_rate"],
+                    "avg_trade": number(pnl.mean()) if not pnl.empty else 0,
+                }
+            )
+        gpt_shadow_overview.sort(key=lambda x: x["net"] or 0, reverse=True)
+
+    gpt_shadow_recent_cols = [
+        "time",
+        "portfolio",
+        "contour",
+        "ticker",
+        "signal_family",
+        "entry_timing",
+        "direction",
+        "qty",
+        "entry_price",
+        "exit_price",
+        "ticks",
+        "fees_rub",
+        "net_pnl_rub",
+        "exit_source",
+    ]
+    gpt_shadow_recent = []
+    if not gpt_shadow_trades.empty:
+        view = gpt_shadow_trades[[c for c in gpt_shadow_recent_cols if c in gpt_shadow_trades.columns]].tail(50)
+        for col in ("exit_source",):
+            if col in view:
+                view[col] = view[col].map(human_cell)
+        gpt_shadow_recent = json.loads(view.where(pd.notna(view), None).to_json(orient="records"))
 
     recent_trades_cols = [
         "time",
@@ -715,6 +803,8 @@ def build_state(base_dir: Path) -> dict:
         "portfolio_overview": portfolio_overview,
         "ticker_overview": ticker_overview,
         "wide_spread_watchlist": wide_spread_watchlist,
+        "gpt_shadow_overview": gpt_shadow_overview,
+        "gpt_shadow_recent": gpt_shadow_recent,
         "open_positions": open_positions,
         "recent_trades": recent_trades,
         "micro": micro,
@@ -834,6 +924,10 @@ HTML = r"""<!doctype html>
       <div id="positions"></div>
     </section>
     <section>
+      <h2>GPT-модель в тени</h2>
+      <div class="table-wrap"><table id="gptShadow"></table></div>
+    </section>
+    <section>
       <h2>Тикеры</h2>
       <div class="table-wrap"><table id="tickers"></table></div>
     </section>
@@ -844,6 +938,10 @@ HTML = r"""<!doctype html>
     <section>
       <h2>Последние сделки</h2>
       <div class="table-wrap"><table id="trades"></table></div>
+    </section>
+    <section>
+      <h2>Последние сделки GPT-модели</h2>
+      <div class="table-wrap"><table id="gptTrades"></table></div>
     </section>
   </main>
   <script>
@@ -890,6 +988,9 @@ HTML = r"""<!doctype html>
       table(document.getElementById('portfolios'), [
         ["Контур","portfolio"], ["Старт ₽","capital",false,2], ["День ₽","day_net",true,2], ["Всего ₽","closed_net",true,2], ["Доход %","return_pct",true,3], ["ГО занято ₽","used_margin",false,2], ["Свободно ₽","free_capital",false,2], ["Позиций","open_positions"], ["Сделок","closed_trades"]
       ], data.portfolio_overview || []);
+      table(document.getElementById('gptShadow'), [
+        ["Контур","portfolio"], ["Тень ₽","net",true,2], ["Сделок","trades"], ["Плюс","wins"], ["Минус","losses"], ["Плюс %","win_rate",false,1], ["Средняя ₽","avg_trade",true,2]
+      ], data.gpt_shadow_overview || []);
       table(document.getElementById('tickers'), [
         ["Контур","portfolio"], ["Тикер","ticker"], ["Позиция","position"], ["Готовность","state",false,null,"state"], ["Риск","risk"], ["Last","last"], ["Bid","bid"], ["Ask","ask"], ["Спред","spread"], ["Стоп","stop_ticks"], ["Спред/стоп %","spread_to_stop_pct"], ["Стакан","book"], ["Комментарий","comment",false,null,"comment"]
       ], data.ticker_overview || []);
@@ -899,6 +1000,9 @@ HTML = r"""<!doctype html>
       table(document.getElementById('trades'), [
         ["Время","time"], ["Портфель","portfolio"], ["Контур","contour"], ["Тикер","ticker"], ["Напр.","direction"], ["Qty","qty"], ["Entry","entry_price"], ["Exit","exit_price"], ["Ticks","ticks",true,2], ["Fee","fees_rub",false,2], ["Net","net_pnl_rub",true,2], ["Статус","fill_status"], ["Причина","skip_reason"]
       ], data.recent_trades || []);
+      table(document.getElementById('gptTrades'), [
+        ["Время","time"], ["Портфель","portfolio"], ["Сигнал","signal_family"], ["Тикер","ticker"], ["Напр.","direction"], ["Qty","qty"], ["Entry","entry_price"], ["Exit","exit_price"], ["Тики","ticks",true,2], ["Комиссия ₽","fees_rub",false,2], ["Результат ₽","net_pnl_rub",true,2], ["Выход","exit_source"]
+      ], data.gpt_shadow_recent || []);
       const positions = data.open_positions || [];
       const posEl = document.getElementById('positions');
       if (!positions.length) posEl.innerHTML = '<div class="empty">Нет открытых позиций</div>';

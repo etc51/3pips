@@ -77,6 +77,10 @@ function Start-Portfolio {
         "--startup-status-log", "reports\paper_runs\v7_live_20260525\${Name}_startup_status.csv",
         "--shadow-log", "reports\paper_runs\v7_live_20260525\${Name}_shadow_exit_models.csv",
         "--entry-audit-log", "reports\paper_runs\v7_live_20260525\${Name}_entry_audit.csv",
+        "--enable-gpt-shadow",
+        "--gpt-shadow-contour", "strict",
+        "--gpt-shadow-params", "reports\futures_scalp_profiles_v7_paper_20260525_gpt_shadow_params.csv",
+        "--gpt-shadow-log", "reports\paper_runs\v7_live_20260525\${Name}_gpt_shadow_trades.csv",
         "--health-log", "reports\paper_runs\v7_live_20260525\${Name}_health.json"
     )
     if ($Name -eq "neo") {
@@ -140,6 +144,7 @@ function Write-PortfolioConfig {
         run_name = "v7_live_20260525"
         capital_per_contour = 800000
         profiles_csv = "reports/futures_scalp_profiles_v7_paper_20260525.csv"
+        gpt_shadow_params_csv = "reports/futures_scalp_profiles_v7_paper_20260525_gpt_shadow_params.csv"
         portfolios = [ordered]@{
             classic_core = [ordered]@{
                 capital = 800000
