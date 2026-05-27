@@ -114,7 +114,7 @@ def read_json(path: Path):
     if not path.exists() or path.stat().st_size == 0:
         return []
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception:
         return []
 
