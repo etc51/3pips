@@ -108,6 +108,9 @@ GPT_SHADOW_COLUMNS = [
     "stop_ticks",
     "trail_ticks",
     "trail_arm_ticks",
+    "exit_mode",
+    "source_stage2_id",
+    "match_quality",
     "max_hold_minutes",
     "ticks",
     "gross_rub",
@@ -162,6 +165,16 @@ class Profile:
     cooldown_minutes: int = 0
     max_hold_minutes: int = 0
     gpt_params_loaded: bool = False
+    gpt_exit_loaded: bool = False
+    gpt_exit_mode: str = ""
+    gpt_stop_ticks: float = 0.0
+    gpt_trail_ticks: float = 0.0
+    gpt_trail_arm_ticks: float = 0.0
+    gpt_stop_pct: float = 0.0
+    gpt_trail_pct: float = 0.0
+    gpt_trail_arm_pct: float = 0.0
+    gpt_source_stage2_id: str = ""
+    gpt_match_quality: str = ""
 
 
 @dataclass
@@ -214,6 +227,10 @@ class GptShadowRuntime:
     risk_reason: str = ""
     last_entry_candle_count: int = -1
     cooldown_until: float = 0.0
+    active_stop_ticks: int = 0
+    active_trail_ticks: int = 0
+    active_trail_arm_ticks: int = 0
+    active_exit_mode: str = ""
 
 
 @dataclass(frozen=True)
@@ -288,6 +305,14 @@ class SizingDecision:
     full_stop_per_contract_rub: float
     full_stop_rub: float
     reason: str
+
+
+@dataclass(frozen=True)
+class GptExitTicks:
+    stop_ticks: int
+    trail_ticks: int
+    trail_arm_ticks: int
+    exit_mode: str
 
 
 @dataclass
@@ -807,6 +832,43 @@ def full_stop_risk_rub(profile: Profile, spec: Spec, side_fee: float, qty: int) 
     return max(0.0, (profile.stop_ticks * spec.step_price + 2 * side_fee) * qty)
 
 
+def full_stop_risk_rub_ticks(stop_ticks: int, spec: Spec, side_fee: float, qty: int) -> float:
+    return max(0.0, (max(1, int(stop_ticks)) * spec.step_price + 2 * side_fee) * qty)
+
+
+def percent_to_ticks(percent: float, reference_price: float, spec: Spec) -> int:
+    if percent <= 0 or reference_price <= 0 or spec.min_step <= 0:
+        return 1
+    return max(1, int(round(abs(percent) * reference_price / spec.min_step)))
+
+
+def gpt_shadow_exit_ticks(profile: Profile, spec: Spec, reference_price: float | None = None) -> GptExitTicks:
+    ref = float(reference_price or 0.0)
+    if ref <= 0:
+        ref = float(spec.last_price or spec.last_rub or 0.0)
+    mode = (profile.gpt_exit_mode or "").lower()
+    if profile.gpt_exit_loaded and mode == "percent":
+        return GptExitTicks(
+            stop_ticks=percent_to_ticks(float(profile.gpt_stop_pct or 0.0), ref, spec),
+            trail_ticks=percent_to_ticks(float(profile.gpt_trail_pct or 0.0), ref, spec),
+            trail_arm_ticks=percent_to_ticks(float(profile.gpt_trail_arm_pct or 0.0), ref, spec),
+            exit_mode="percent",
+        )
+    if profile.gpt_exit_loaded:
+        return GptExitTicks(
+            stop_ticks=max(1, int(round(float(profile.gpt_stop_ticks or profile.stop_ticks or 1)))),
+            trail_ticks=max(1, int(round(float(profile.gpt_trail_ticks or profile.trail_ticks or 1)))),
+            trail_arm_ticks=max(1, int(round(float(profile.gpt_trail_arm_ticks or profile.trail_arm_ticks or 1)))),
+            exit_mode=mode or "direct_ticks",
+        )
+    return GptExitTicks(
+        stop_ticks=max(1, int(profile.stop_ticks or 1)),
+        trail_ticks=max(1, int(profile.trail_ticks or 1)),
+        trail_arm_ticks=max(1, int(profile.trail_arm_ticks or 1)),
+        exit_mode="profile_ticks",
+    )
+
+
 def fee_ticks(side_fee: float, spec: Spec) -> float:
     return (2 * side_fee / spec.step_price) if spec.step_price else 999.0
 
@@ -969,6 +1031,16 @@ def clone_profile_for_contract(profile: Profile, secid: str) -> Profile:
         cooldown_minutes=profile.cooldown_minutes,
         max_hold_minutes=profile.max_hold_minutes,
         gpt_params_loaded=profile.gpt_params_loaded,
+        gpt_exit_loaded=profile.gpt_exit_loaded,
+        gpt_exit_mode=profile.gpt_exit_mode,
+        gpt_stop_ticks=profile.gpt_stop_ticks,
+        gpt_trail_ticks=profile.gpt_trail_ticks,
+        gpt_trail_arm_ticks=profile.gpt_trail_arm_ticks,
+        gpt_stop_pct=profile.gpt_stop_pct,
+        gpt_trail_pct=profile.gpt_trail_pct,
+        gpt_trail_arm_pct=profile.gpt_trail_arm_pct,
+        gpt_source_stage2_id=profile.gpt_source_stage2_id,
+        gpt_match_quality=profile.gpt_match_quality,
     )
     apply_profile_policy_overrides(cloned)
     return cloned
@@ -991,8 +1063,9 @@ def apply_gpt_shadow_params(profiles: dict[str, Profile], path: Path) -> None:
     if not path or not path.exists():
         print(f"{now_str()} GPT_SHADOW params_missing path={path}", flush=True)
         return
-    rows = list(csv.DictReader(path.open(encoding="utf-8")))
+    rows = list(csv.DictReader(path.open(encoding="utf-8-sig")))
     by_ticker = {str(row.get("ticker") or "").upper(): row for row in rows if row.get("ticker")}
+    source_cache: dict[Path, dict[str, dict]] = {}
 
     def as_int(row: dict, name: str, current: int) -> int:
         try:
@@ -1008,11 +1081,67 @@ def apply_gpt_shadow_params(profiles: dict[str, Profile], path: Path) -> None:
         except Exception:
             return current
 
+    def as_float_any(row: dict | None, name: str, current: float = 0.0) -> float:
+        if not row:
+            return current
+        try:
+            raw = row.get(name)
+            return float(raw) if raw not in (None, "") else current
+        except Exception:
+            return current
+
+    def exact_source_row(row: dict) -> dict | None:
+        source_file = str(row.get("source_file") or "")
+        stage2_id = str(row.get("source_stage2_id") or "")
+        if not source_file or not stage2_id:
+            return None
+        source_path = Path(source_file)
+        if not source_path.is_absolute():
+            source_path = ROOT / source_path
+        if source_path not in source_cache:
+            source_cache[source_path] = {}
+            try:
+                with source_path.open(newline="", encoding="utf-8-sig") as f:
+                    source_cache[source_path] = {str(r.get("stage2_id") or ""): r for r in csv.DictReader(f)}
+            except Exception as exc:
+                print(f"{now_str()} GPT_SHADOW source_read_error path={source_path} error={exc}", flush=True)
+        return source_cache.get(source_path, {}).get(stage2_id)
+
+    def apply_gpt_exit(profile: Profile, row: dict, source_row: dict | None) -> bool:
+        source = source_row or row
+        mode = str(source.get("exit_mode") or "").lower()
+        profile.gpt_source_stage2_id = str(row.get("source_stage2_id") or source.get("stage2_id") or "")
+        profile.gpt_match_quality = str(row.get("match_quality") or "")
+        if mode == "percent":
+            profile.gpt_exit_loaded = True
+            profile.gpt_exit_mode = "percent"
+            profile.gpt_stop_pct = as_float_any(source, "stop_pct")
+            profile.gpt_trail_pct = as_float_any(source, "trail_pct")
+            profile.gpt_trail_arm_pct = as_float_any(source, "activation_pct")
+            profile.gpt_stop_ticks = as_float_any(source, "avg_stop_ticks", as_float_any(row, "source_stop_ticks"))
+            profile.gpt_trail_ticks = as_float_any(source, "avg_trail_ticks", as_float_any(row, "source_trail_ticks"))
+            profile.gpt_trail_arm_ticks = as_float_any(source, "avg_activation_ticks", as_float_any(row, "source_activation_ticks"))
+            return profile.gpt_stop_pct > 0 and profile.gpt_trail_pct > 0 and profile.gpt_trail_arm_pct > 0
+
+        stop_ticks = as_float_any(source, "stop_ticks", as_float_any(row, "source_stop_ticks"))
+        trail_ticks = as_float_any(source, "trail_ticks", as_float_any(row, "source_trail_ticks"))
+        arm_ticks = as_float_any(source, "activation_ticks", as_float_any(row, "source_activation_ticks"))
+        if stop_ticks > 0 and trail_ticks > 0 and arm_ticks > 0:
+            profile.gpt_exit_loaded = True
+            profile.gpt_exit_mode = mode or "direct_ticks"
+            profile.gpt_stop_ticks = stop_ticks
+            profile.gpt_trail_ticks = trail_ticks
+            profile.gpt_trail_arm_ticks = arm_ticks
+            return True
+        return False
+
     applied = 0
+    exit_applied = 0
     for ticker, profile in profiles.items():
         row = by_ticker.get(ticker.upper())
         if row is None:
             continue
+        source_row = exact_source_row(row)
         profile.signal_family = str(row.get("signal_family") or profile.signal_family)
         profile.entry_timing = str(row.get("entry_timing") or profile.entry_timing)
         profile.session_filter = str(row.get("session_filter") or profile.session_filter)
@@ -1028,8 +1157,10 @@ def apply_gpt_shadow_params(profiles: dict[str, Profile], path: Path) -> None:
         profile.cooldown_minutes = as_int(row, "cooldown_minutes", profile.cooldown_minutes)
         profile.max_hold_minutes = as_int(row, "max_hold_minutes", profile.max_hold_minutes)
         profile.gpt_params_loaded = True
+        if apply_gpt_exit(profile, row, source_row):
+            exit_applied += 1
         applied += 1
-    print(f"{now_str()} GPT_SHADOW params_loaded applied={applied} path={path}", flush=True)
+    print(f"{now_str()} GPT_SHADOW params_loaded applied={applied} exits={exit_applied} path={path}", flush=True)
 
 
 def seed_candles(client: object, figi: str, minutes: int) -> deque[dict]:
@@ -1447,10 +1578,11 @@ def gpt_profile_signal(state: State, layer: GptShadowLayerConfig | None = None) 
         return None, f"gpt_shadow {layer.name} book_filter empty_book bid={bid_qty} ask={ask_qty}"
     levels = best_levels(state.last_order_book, spec)
     spread_ticks = levels.get("spread_ticks")
-    max_general_spread = state.profile.stop_ticks * max(0.1, float(layer.spread_stop_ratio))
+    exit_ticks = gpt_shadow_exit_ticks(profile, spec, state.last_price or last_close)
+    max_general_spread = exit_ticks.stop_ticks * max(0.1, float(layer.spread_stop_ratio))
     if spread_ticks is None or float(spread_ticks) > max_general_spread:
         spread_txt = "-" if spread_ticks is None else f"{float(spread_ticks):.1f}t"
-        return None, f"gpt_shadow {layer.name} spread_filter spread={spread_txt} stop={state.profile.stop_ticks}t max={max_general_spread:.1f}t"
+        return None, f"gpt_shadow {layer.name} spread_filter spread={spread_txt} stop={exit_ticks.stop_ticks}t max={max_general_spread:.1f}t"
 
     fee_t = fee_ticks(state.side_fee, spec)
     vol_mult = float(profile.volume_multiplier if profile.volume_multiplier is not None else 1.0)
@@ -2117,6 +2249,7 @@ def gpt_shadow_sizing(
     states: list[State],
     spec: Spec,
     profile: Profile,
+    exit_ticks: GptExitTicks,
     direction: Direction | str,
     side_fee: float,
     max_full_stop_rub: float,
@@ -2136,7 +2269,7 @@ def gpt_shadow_sizing(
         budget = min(free_margin, per_position_limit)
         margin_qty = max(0, int(budget // per_contract))
 
-    gross_stop_per_contract = max(0.0, profile.stop_ticks * spec.step_price)
+    gross_stop_per_contract = max(0.0, exit_ticks.stop_ticks * spec.step_price)
     round_turn_fee_per_contract = max(0.0, 2 * side_fee)
     full_stop_per_contract = gross_stop_per_contract + round_turn_fee_per_contract
     risk_qty = None
@@ -2146,7 +2279,9 @@ def gpt_shadow_sizing(
     qty = max(0, qty)
     full_stop_rub = qty * full_stop_per_contract
     reason = (
-        f"gpt_shadow_sizing layer={layer_name} margin_qty={margin_qty} risk_qty={risk_qty if risk_qty is not None else '-'} "
+        f"gpt_shadow_sizing layer={layer_name} exit={exit_ticks.exit_mode} "
+        f"stop={exit_ticks.stop_ticks}t trail={exit_ticks.trail_ticks}t arm={exit_ticks.trail_arm_ticks}t "
+        f"margin_qty={margin_qty} risk_qty={risk_qty if risk_qty is not None else '-'} "
         f"full_stop_1lot={full_stop_per_contract:.2f} full_stop={full_stop_rub:.2f} "
         f"max_full_stop={max_full_stop_rub:.0f}"
     )
@@ -2166,6 +2301,10 @@ def append_gpt_shadow_event(path: Path, st: State, layer_name: str, rt: GptShado
     if not str(path):
         return
     layer_name = gpt_shadow_layer_from_model(layer_name)
+    exit_ticks = gpt_shadow_exit_ticks(st.profile, st.spec, st.last_price)
+    active_stop_ticks = rt.active_stop_ticks or exit_ticks.stop_ticks
+    active_trail_ticks = rt.active_trail_ticks or exit_ticks.trail_ticks
+    active_trail_arm_ticks = rt.active_trail_arm_ticks or exit_ticks.trail_arm_ticks
     base = {
         "event_time": now_str(),
         "event_type": event_type,
@@ -2185,9 +2324,12 @@ def append_gpt_shadow_event(path: Path, st: State, layer_name: str, rt: GptShado
         "trigger_source": "",
         "stop_price": "",
         "best_price": "",
-        "stop_ticks": st.profile.stop_ticks,
-        "trail_ticks": st.profile.trail_ticks,
-        "trail_arm_ticks": st.profile.trail_arm_ticks,
+        "stop_ticks": active_stop_ticks,
+        "trail_ticks": active_trail_ticks,
+        "trail_arm_ticks": active_trail_arm_ticks,
+        "exit_mode": rt.active_exit_mode or exit_ticks.exit_mode,
+        "source_stage2_id": st.profile.gpt_source_stage2_id,
+        "match_quality": st.profile.gpt_match_quality,
         "max_hold_minutes": st.profile.max_hold_minutes,
         "ticks": "",
         "gross_rub": "",
@@ -2250,7 +2392,14 @@ def close_gpt_shadow(
             "fees_rub": round(2 * st.side_fee * pos.qty, 2),
             "net_rub": round(net, 2),
             "closed_net_rub": round(rt.net, 2),
-            "full_stop_risk_rub": round(full_stop_risk_rub(st.profile, st.spec, st.side_fee, pos.qty), 2),
+            "stop_ticks": rt.active_stop_ticks or st.profile.stop_ticks,
+            "trail_ticks": rt.active_trail_ticks or st.profile.trail_ticks,
+            "trail_arm_ticks": rt.active_trail_arm_ticks or st.profile.trail_arm_ticks,
+            "exit_mode": rt.active_exit_mode or st.profile.gpt_exit_mode or "profile_ticks",
+            "full_stop_risk_rub": round(
+                full_stop_risk_rub_ticks(rt.active_stop_ticks or st.profile.stop_ticks, st.spec, st.side_fee, pos.qty),
+                2,
+            ),
         },
     )
     print(
@@ -2260,6 +2409,10 @@ def close_gpt_shadow(
         flush=True,
     )
     rt.position = None
+    rt.active_stop_ticks = 0
+    rt.active_trail_ticks = 0
+    rt.active_trail_arm_ticks = 0
+    rt.active_exit_mode = ""
     cooldown = max(0, int(st.profile.cooldown_minutes or 0)) * 60
     rt.cooldown_until = max(rt.cooldown_until, time.monotonic() + max(60, cooldown))
 
@@ -2283,6 +2436,12 @@ def process_gpt_shadow(
         rt = gpt_shadow_runtime(st, layer_name)
         pos = rt.position
         if pos is not None:
+            active_exit_ticks = GptExitTicks(
+                stop_ticks=rt.active_stop_ticks or st.profile.stop_ticks,
+                trail_ticks=rt.active_trail_ticks or st.profile.trail_ticks,
+                trail_arm_ticks=rt.active_trail_arm_ticks or st.profile.trail_arm_ticks,
+                exit_mode=rt.active_exit_mode or st.profile.gpt_exit_mode or "profile_ticks",
+            )
             exit_price, exit_source = executable_price(st, pos.direction, "exit")
             if exit_price is None:
                 rt.last_reason = f"gpt_shadow {layer_name} book_filter no_executable_exit"
@@ -2304,8 +2463,8 @@ def process_gpt_shadow(
                 if pos.direction == "long"
                 else (pos.entry_price - exit_price) / st.spec.min_step
             )
-            if move_ticks >= max(st.profile.trail_arm_ticks, fee_t + 1):
-                update_stop(pos, exit_price, st.profile.trail_ticks, st.spec)
+            if move_ticks >= max(active_exit_ticks.trail_arm_ticks, fee_t + 1):
+                update_stop(pos, exit_price, active_exit_ticks.trail_ticks, st.spec)
                 min_net_stop = (
                     pos.entry_price + (fee_t + 0.5) * st.spec.min_step
                     if pos.direction == "long"
@@ -2363,11 +2522,13 @@ def process_gpt_shadow(
         if not risk_decision.allowed:
             rt.last_reason = f"gpt_shadow {layer_name} risk_governor {risk_decision.mode} {risk_decision.reason}"
             continue
+        exit_ticks = gpt_shadow_exit_ticks(st.profile, st.spec, entry_price)
         sizing = gpt_shadow_sizing(
             args,
             states,
             st.spec,
             st.profile,
+            exit_ticks,
             direction,
             st.side_fee,
             risk_decision.max_full_stop_rub,
@@ -2380,7 +2541,11 @@ def process_gpt_shadow(
         rt.attempts += 1
         rt.entry_reason = reason
         rt.entry_sizing_reason = sizing.reason
-        rt.position = open_position(direction, entry_price, sizing.qty, st.profile.stop_ticks, st.profile.trail_ticks, st.spec)
+        rt.active_stop_ticks = exit_ticks.stop_ticks
+        rt.active_trail_ticks = exit_ticks.trail_ticks
+        rt.active_trail_arm_ticks = exit_ticks.trail_arm_ticks
+        rt.active_exit_mode = exit_ticks.exit_mode
+        rt.position = open_position(direction, entry_price, sizing.qty, exit_ticks.stop_ticks, exit_ticks.trail_ticks, st.spec)
         rt.last_entry_candle_count = len(st.candles)
         append_gpt_shadow_event(
             Path(args.gpt_shadow_log),
@@ -2396,6 +2561,10 @@ def process_gpt_shadow(
                 "exit_source": entry_source,
                 "stop_price": rt.position.stop_price,
                 "best_price": rt.position.best_price,
+                "stop_ticks": exit_ticks.stop_ticks,
+                "trail_ticks": exit_ticks.trail_ticks,
+                "trail_arm_ticks": exit_ticks.trail_arm_ticks,
+                "exit_mode": exit_ticks.exit_mode,
                 "full_stop_risk_rub": round(sizing.full_stop_rub, 2),
                 "risk_mode": risk_decision.mode,
                 "risk_reason": risk_decision.reason,
@@ -2406,6 +2575,7 @@ def process_gpt_shadow(
         print(
             f"{now_str()} GPT_SHADOW_OPEN layer={layer_name} {st.spec.secid} {direction} qty={sizing.qty} "
             f"entry={entry_price:g} source={entry_source} stop={rt.position.stop_price:g} "
+            f"exit={exit_ticks.exit_mode} {exit_ticks.stop_ticks}/{exit_ticks.trail_ticks}/{exit_ticks.trail_arm_ticks}t "
             f"risk={risk_decision.mode}/{risk_decision.max_full_stop_rub:.0f} {reason}",
             flush=True,
         )
@@ -2827,6 +2997,9 @@ def restore_gpt_shadow_from_log(path: Path, states: list[State]) -> int:
             best_raw = row.get("best_price")
             best = float(best_raw) if best_raw not in (None, "") else entry
             opened_at = str(row.get("event_time") or now_str())
+            stop_ticks = int(float(row.get("stop_ticks") or 0))
+            trail_ticks = int(float(row.get("trail_ticks") or 0))
+            trail_arm_ticks = int(float(row.get("trail_arm_ticks") or 0))
         except Exception as exc:
             print(f"{now_str()} GPT_SHADOW restore_skip_bad {key} error={exc}", flush=True)
             continue
@@ -2842,6 +3015,10 @@ def restore_gpt_shadow_from_log(path: Path, states: list[State]) -> int:
         rt.entry_sizing_reason = str(row.get("sizing_reason") or "")
         rt.risk_mode = str(row.get("risk_mode") or "")
         rt.risk_reason = str(row.get("risk_reason") or "")
+        rt.active_stop_ticks = stop_ticks or st.profile.stop_ticks
+        rt.active_trail_ticks = trail_ticks or st.profile.trail_ticks
+        rt.active_trail_arm_ticks = trail_arm_ticks or st.profile.trail_arm_ticks
+        rt.active_exit_mode = str(row.get("exit_mode") or st.profile.gpt_exit_mode or "profile_ticks")
         rt.last_reason = "gpt_shadow_restored_open_position"
         restored_open += 1
 
