@@ -1,9 +1,9 @@
 # Паспорт проекта 3pips / MOEX Paper Bot
 
-Дата актуализации: 2026-05-26  
+Дата актуализации: 2026-05-27  
 Рабочая папка: `D:\мен и тренд`  
 Репозиторий: `https://github.com/etc51/3pips`  
-Текущий режим: paper trading, реальные заявки брокеру не отправляются.
+Текущий режим: paper trading; добавлен отдельный предбоевой live-smoke слой для 15-минутной проверки реальных заявок, но основной бот реальные заявки брокеру не отправляет.
 
 ## 1. Короткая суть проекта
 
@@ -65,6 +65,14 @@ Runtime PID/logs:
 
 `reports/runtime`
 
+Предбоевой live-smoke слой:
+
+`src/tbank_live_smoke.py`
+
+Запуск 15-минутной проверки:
+
+`scripts/run_live_smoke_15m.ps1`
+
 Дашборд:
 
 `http://127.0.0.1:8768/`
@@ -83,7 +91,35 @@ Python:
 - ведет журналы;
 - не отправляет реальные торговые заявки.
 
-Если проект переводить в live, нужно отдельно реализовать слой реальных заявок, сверку с брокером, контроль частичных исполнений, отмену/перестановку stop-limit и аварийное закрытие.
+Для перехода в live добавлен отдельный smoke-слой, но он не является полным боевым исполнителем стратегии.
+
+Live-smoke проверяет:
+
+- подключение к T-Bank API и выбор счета;
+- получение стакана по выбранному фьючерсу;
+- отсутствие активных дублей обычных и stop-order заявок по инструменту;
+- выставление минимальной real-заявки только при двойном подтверждении;
+- постановку защитного stop-limit;
+- отмену старого stop-limit и постановку нового при подтягивании;
+- аудит, что у брокера не возникли дубли защитных заявок;
+- аварийное market-закрытие при пробое дальше stop-limit;
+- принудительное закрытие позиции и отмену stop-order по окончании 15 минут.
+
+Предохранители live-smoke:
+
+- по умолчанию работает dry-run и не отправляет заявок;
+- real-заявки возможны только если одновременно заданы `LIVE_SMOKE_ENABLE=1`, `--real-orders` и `--confirm-real-orders YES`;
+- базовый размер проверки - 1 контракт;
+- если по инструменту уже есть активные заявки/stop-order, запуск блокируется без отдельного `--allow-existing-instrument-orders`;
+- все события пишутся в `reports/runtime/live_smoke_<ticker>_<timestamp>.jsonl`.
+
+Пример безопасного dry-run:
+
+`powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_live_smoke_15m.ps1 -Ticker BRN6 -Direction long -Qty 1 -DurationSec 60 -StopTicks 20 -TrailTicks 3 -MaxSpreadTicks 10`
+
+Пример реального 15-минутного smoke-запуска после ручного решения:
+
+`$env:LIVE_SMOKE_ENABLE='1'; powershell -NoProfile -ExecutionPolicy Bypass -File scripts\run_live_smoke_15m.ps1 -Ticker BRN6 -Direction long -Qty 1 -DurationSec 900 -StopTicks 20 -TrailTicks 3 -MaxSpreadTicks 10 -RealOrders`
 
 ## 4. История отбора профилей
 
