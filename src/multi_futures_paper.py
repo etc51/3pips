@@ -198,6 +198,72 @@ class State:
     gpt_shadow_risk_reason: str = ""
     gpt_shadow_last_entry_candle_count: int = -1
     gpt_shadow_cooldown_until: float = 0.0
+    gpt_shadow_layers: dict[str, "GptShadowRuntime"] = field(default_factory=dict)
+
+
+@dataclass
+class GptShadowRuntime:
+    position: Position | None = None
+    attempts: int = 0
+    closed: int = 0
+    net: float = 0.0
+    last_reason: str = ""
+    entry_reason: str = ""
+    entry_sizing_reason: str = ""
+    risk_mode: str = ""
+    risk_reason: str = ""
+    last_entry_candle_count: int = -1
+    cooldown_until: float = 0.0
+
+
+@dataclass(frozen=True)
+class GptShadowLayerConfig:
+    name: str
+    threshold_mult: float
+    volume_mult: float
+    trend_tolerance_ticks: float
+    trend_tolerance_mult: float
+    breakout_tolerance_ticks: float
+    vwap_buffer_mult: float
+    spread_stop_ratio: float
+    range_cost_mult: float
+
+
+GPT_SHADOW_LAYER_CONFIGS = {
+    "full": GptShadowLayerConfig(
+        name="full",
+        threshold_mult=1.0,
+        volume_mult=1.0,
+        trend_tolerance_ticks=0.0,
+        trend_tolerance_mult=0.0,
+        breakout_tolerance_ticks=0.0,
+        vwap_buffer_mult=1.0,
+        spread_stop_ratio=SPREAD_DOMINATES_RATIO,
+        range_cost_mult=1.0,
+    ),
+    "relaxed": GptShadowLayerConfig(
+        name="relaxed",
+        threshold_mult=0.75,
+        volume_mult=0.75,
+        trend_tolerance_ticks=1.0,
+        trend_tolerance_mult=0.20,
+        breakout_tolerance_ticks=1.0,
+        vwap_buffer_mult=0.50,
+        spread_stop_ratio=1.15,
+        range_cost_mult=0.85,
+    ),
+    "loose": GptShadowLayerConfig(
+        name="loose",
+        threshold_mult=0.55,
+        volume_mult=0.50,
+        trend_tolerance_ticks=2.0,
+        trend_tolerance_mult=0.35,
+        breakout_tolerance_ticks=2.0,
+        vwap_buffer_mult=0.0,
+        spread_stop_ratio=1.30,
+        range_cost_mult=0.70,
+    ),
+}
 
 
 @dataclass
@@ -1322,13 +1388,14 @@ def gpt_session_allowed(profile: Profile) -> bool:
     return start <= now_sec < end
 
 
-def gpt_profile_signal(state: State) -> tuple[Direction | None, str]:
+def gpt_profile_signal(state: State, layer: GptShadowLayerConfig | None = None) -> tuple[Direction | None, str]:
+    layer = layer or GPT_SHADOW_LAYER_CONFIGS["full"]
     profile = state.profile
     rows = list(state.candles)
     if not profile.gpt_params_loaded:
-        return None, "gpt_shadow params_missing"
+        return None, f"gpt_shadow {layer.name} params_missing"
     if not gpt_session_allowed(profile):
-        return None, f"gpt_shadow session_filter {profile.session_filter}"
+        return None, f"gpt_shadow {layer.name} session_filter {profile.session_filter}"
 
     lookback = max(2, int(profile.breakout_lookback or 6))
     trend_fast = max(1, int(profile.trend_fast or 3))
@@ -1336,7 +1403,7 @@ def gpt_profile_signal(state: State) -> tuple[Direction | None, str]:
     vol_window = max(2, int(profile.volume_window or 20))
     needed = max(lookback + 2, trend_slow + 1, vol_window + 2, 12)
     if len(rows) < needed:
-        return None, f"gpt_shadow warmup={len(rows)}/{needed}"
+        return None, f"gpt_shadow {layer.name} warmup={len(rows)}/{needed}"
 
     spec = state.spec
     last = rows[-1]
@@ -1350,6 +1417,7 @@ def gpt_profile_signal(state: State) -> tuple[Direction | None, str]:
     threshold = float(profile.momentum_ticks or 0.0)
     if profile.momentum_pct:
         threshold = max(threshold, abs(float(profile.momentum_pct) * last_close / spec.min_step))
+    threshold *= max(0.05, float(layer.threshold_mult))
     if threshold <= 0:
         threshold = 2.0
     fast = mean_close(rows, trend_fast)
@@ -1369,36 +1437,40 @@ def gpt_profile_signal(state: State) -> tuple[Direction | None, str]:
     else:
         vwap, _ = volume_vwap(rows, state.last_price)
     vwap_buffer_ticks = abs(float(profile.vwap_buffer_pct or 0.0) * last_close / spec.min_step)
+    vwap_buffer_ticks *= max(0.0, float(layer.vwap_buffer_mult))
 
     bid_qty = ask_qty = 0
     if state.last_order_book is not None:
         bid_qty = sum(int(getattr(x, "quantity", 0) or 0) for x in getattr(state.last_order_book, "bids", [])[:3])
         ask_qty = sum(int(getattr(x, "quantity", 0) or 0) for x in getattr(state.last_order_book, "asks", [])[:3])
     if bid_qty <= 0 or ask_qty <= 0:
-        return None, f"gpt_shadow book_filter empty_book bid={bid_qty} ask={ask_qty}"
+        return None, f"gpt_shadow {layer.name} book_filter empty_book bid={bid_qty} ask={ask_qty}"
     levels = best_levels(state.last_order_book, spec)
     spread_ticks = levels.get("spread_ticks")
-    max_general_spread = state.profile.stop_ticks * SPREAD_DOMINATES_RATIO
+    max_general_spread = state.profile.stop_ticks * max(0.1, float(layer.spread_stop_ratio))
     if spread_ticks is None or float(spread_ticks) > max_general_spread:
         spread_txt = "-" if spread_ticks is None else f"{float(spread_ticks):.1f}t"
-        return None, f"gpt_shadow spread_filter spread={spread_txt} stop={state.profile.stop_ticks}t max={max_general_spread:.1f}t"
+        return None, f"gpt_shadow {layer.name} spread_filter spread={spread_txt} stop={state.profile.stop_ticks}t max={max_general_spread:.1f}t"
 
     fee_t = fee_ticks(state.side_fee, spec)
     vol_mult = float(profile.volume_multiplier if profile.volume_multiplier is not None else 1.0)
+    vol_mult *= max(0.0, float(layer.volume_mult))
     vol_ok = vol_mult <= 0 or (avgv > 0 and last_vol >= avgv * vol_mult)
     if not vol_ok:
-        return None, f"gpt_shadow volume_filter vol={last_vol:.0f}/{avgv:.0f} mult={vol_mult:g}"
+        return None, f"gpt_shadow {layer.name} volume_filter vol={last_vol:.0f}/{avgv:.0f} mult={vol_mult:g}"
 
     family = (profile.signal_family or "pure_trailing_after_impulse").lower()
     allowed = (profile.allowed_direction or "both").lower()
     vwap_long_ok = vwap_mode == "disabled" or (last_close - vwap) / spec.min_step >= vwap_buffer_ticks
     vwap_short_ok = vwap_mode == "disabled" or (vwap - last_close) / spec.min_step >= vwap_buffer_ticks
-    long_break = last_close >= high
-    short_break = last_close <= low
+    break_tol = max(0.0, float(layer.breakout_tolerance_ticks)) * spec.min_step
+    long_break = last_close >= high - break_tol
+    short_break = last_close <= low + break_tol
     long_mom = mom >= threshold
     short_mom = mom <= -threshold
-    long_trend = trend >= 0
-    short_trend = trend <= 0
+    trend_tol = max(float(layer.trend_tolerance_ticks), abs(threshold) * float(layer.trend_tolerance_mult))
+    long_trend = trend >= -trend_tol
+    short_trend = trend <= trend_tol
 
     if family == "momentum_breakout":
         long_ok = long_mom and long_break and long_trend and vwap_long_ok
@@ -1407,7 +1479,7 @@ def gpt_profile_signal(state: State) -> tuple[Direction | None, str]:
         long_ok = long_mom and long_trend and vwap_long_ok
         short_ok = short_mom and short_trend and vwap_short_ok
     elif family == "range_expansion":
-        min_range = max(threshold, fee_t + float(spread_ticks or 0) + 2.0)
+        min_range = max(threshold, (fee_t + float(spread_ticks or 0) + 2.0) * max(0.1, float(layer.range_cost_mult)))
         long_ok = recent_range_ticks >= min_range and long_break and mom > 0 and vwap_long_ok
         short_ok = recent_range_ticks >= min_range and short_break and mom < 0 and vwap_short_ok
     elif family == "trend_pullback":
@@ -1418,7 +1490,7 @@ def gpt_profile_signal(state: State) -> tuple[Direction | None, str]:
         short_ok = short_mom and short_trend and vwap_short_ok
 
     reason = (
-        f"gpt_shadow family={family} p={state.last_price:g} close={last_close:g} "
+        f"gpt_shadow layer={layer.name} family={family} p={state.last_price:g} close={last_close:g} "
         f"mom={mom:.1f}/{threshold:.1f} trend={trend:.1f} "
         f"vol={last_vol:.0f}/{avgv:.0f} vwap={vwap:g} spread={spread_ticks} book={bid_qty}/{ask_qty}"
     )
@@ -1994,11 +2066,49 @@ def process_open_state_exit(
     write_open_positions(Path(args.open_positions_log), states)
 
 
-def gpt_shadow_used_margin(states: list[State]) -> float:
+def gpt_shadow_layer_names(args: argparse.Namespace) -> list[str]:
+    raw = str(getattr(args, "gpt_shadow_layers", "full,relaxed,loose") or "")
+    names: list[str] = []
+    for item in raw.replace(";", ",").split(","):
+        name = item.strip().lower()
+        if not name:
+            continue
+        if name == "strict":
+            name = "full"
+        if name in GPT_SHADOW_LAYER_CONFIGS and name not in names:
+            names.append(name)
+    return names or ["full"]
+
+
+def gpt_shadow_layer_from_model(model: str) -> str:
+    name = (model or "").strip().lower()
+    if name in {"", "gpt_profile_shadow"}:
+        return "full"
+    if name.startswith("gpt_"):
+        name = name[4:]
+    if name in {"strict", "profile_shadow"}:
+        return "full"
+    return name if name in GPT_SHADOW_LAYER_CONFIGS else "full"
+
+
+def gpt_shadow_model_name(layer_name: str) -> str:
+    layer_name = gpt_shadow_layer_from_model(layer_name)
+    return f"gpt_{layer_name}"
+
+
+def gpt_shadow_runtime(st: State, layer_name: str) -> GptShadowRuntime:
+    layer_name = gpt_shadow_layer_from_model(layer_name)
+    if layer_name not in st.gpt_shadow_layers:
+        st.gpt_shadow_layers[layer_name] = GptShadowRuntime()
+    return st.gpt_shadow_layers[layer_name]
+
+
+def gpt_shadow_used_margin(states: list[State], layer_name: str) -> float:
     total = 0.0
     for st in states:
-        if st.gpt_shadow_position is not None:
-            total += position_margin(st.spec, st.gpt_shadow_position.direction, st.gpt_shadow_position.qty)
+        rt = gpt_shadow_runtime(st, layer_name)
+        if rt.position is not None:
+            total += position_margin(st.spec, rt.position.direction, rt.position.qty)
     return total
 
 
@@ -2010,9 +2120,10 @@ def gpt_shadow_sizing(
     direction: Direction | str,
     side_fee: float,
     max_full_stop_rub: float,
+    layer_name: str,
 ) -> SizingDecision:
     initial_capital = float(getattr(args, "paper_capital", 200_000.0))
-    equity = initial_capital + sum(st.gpt_shadow_net for st in states)
+    equity = initial_capital + sum(gpt_shadow_runtime(st, layer_name).net for st in states)
     per_contract = spec.margin_buy if direction == "long" else spec.margin_sell
     if per_contract <= 0:
         per_contract = max(spec.margin_buy, spec.margin_sell, 0.0)
@@ -2020,7 +2131,7 @@ def gpt_shadow_sizing(
         margin_qty = 1
     else:
         max_total_margin = equity * float(getattr(args, "max_total_margin_pct", 0.80))
-        free_margin = max(0.0, max_total_margin - gpt_shadow_used_margin(states))
+        free_margin = max(0.0, max_total_margin - gpt_shadow_used_margin(states, layer_name))
         per_position_limit = equity * float(getattr(args, "max_position_margin_pct", 0.20))
         budget = min(free_margin, per_position_limit)
         margin_qty = max(0, int(budget // per_contract))
@@ -2035,7 +2146,7 @@ def gpt_shadow_sizing(
     qty = max(0, qty)
     full_stop_rub = qty * full_stop_per_contract
     reason = (
-        f"gpt_shadow_sizing margin_qty={margin_qty} risk_qty={risk_qty if risk_qty is not None else '-'} "
+        f"gpt_shadow_sizing layer={layer_name} margin_qty={margin_qty} risk_qty={risk_qty if risk_qty is not None else '-'} "
         f"full_stop_1lot={full_stop_per_contract:.2f} full_stop={full_stop_rub:.2f} "
         f"max_full_stop={max_full_stop_rub:.0f}"
     )
@@ -2051,13 +2162,14 @@ def gpt_shadow_sizing(
     )
 
 
-def append_gpt_shadow_event(path: Path, st: State, event_type: str, row: dict) -> None:
+def append_gpt_shadow_event(path: Path, st: State, layer_name: str, rt: GptShadowRuntime, event_type: str, row: dict) -> None:
     if not str(path):
         return
+    layer_name = gpt_shadow_layer_from_model(layer_name)
     base = {
         "event_time": now_str(),
         "event_type": event_type,
-        "model": "gpt_profile_shadow",
+        "model": gpt_shadow_model_name(layer_name),
         "contour": st.contour,
         "secid": st.spec.secid,
         "family": state_family(st),
@@ -2081,12 +2193,12 @@ def append_gpt_shadow_event(path: Path, st: State, event_type: str, row: dict) -
         "gross_rub": "",
         "fees_rub": "",
         "net_rub": "",
-        "closed_net_rub": round(st.gpt_shadow_net, 2),
+        "closed_net_rub": round(rt.net, 2),
         "full_stop_risk_rub": "",
-        "risk_mode": st.gpt_shadow_risk_mode,
-        "risk_reason": st.gpt_shadow_risk_reason,
-        "sizing_reason": st.gpt_shadow_entry_sizing_reason,
-        "signal_reason": st.gpt_shadow_entry_reason or st.gpt_shadow_last_reason,
+        "risk_mode": rt.risk_mode,
+        "risk_reason": rt.risk_reason,
+        "sizing_reason": rt.entry_sizing_reason,
+        "signal_reason": rt.entry_reason or rt.last_reason,
     }
     base.update(row)
     append_schema_stable_csv(path, {key: base.get(key) for key in GPT_SHADOW_COLUMNS})
@@ -2103,20 +2215,25 @@ def opened_minutes_ago(pos: Position) -> float:
 def close_gpt_shadow(
     st: State,
     args: argparse.Namespace,
+    layer_name: str,
     fill_price: float,
     fill_source: str,
     trigger_price: float,
     trigger_source: str,
 ) -> None:
-    pos = st.gpt_shadow_position
+    layer_name = gpt_shadow_layer_from_model(layer_name)
+    rt = gpt_shadow_runtime(st, layer_name)
+    pos = rt.position
     if pos is None:
         return
     ticks, gross, net = pnl_rub(pos, fill_price, st.spec, st.side_fee)
-    st.gpt_shadow_closed += 1
-    st.gpt_shadow_net += net
+    rt.closed += 1
+    rt.net += net
     append_gpt_shadow_event(
         Path(args.gpt_shadow_log),
         st,
+        layer_name,
+        rt,
         "close",
         {
             "direction": pos.direction,
@@ -2132,19 +2249,19 @@ def close_gpt_shadow(
             "gross_rub": round(gross, 2),
             "fees_rub": round(2 * st.side_fee * pos.qty, 2),
             "net_rub": round(net, 2),
-            "closed_net_rub": round(st.gpt_shadow_net, 2),
+            "closed_net_rub": round(rt.net, 2),
             "full_stop_risk_rub": round(full_stop_risk_rub(st.profile, st.spec, st.side_fee, pos.qty), 2),
         },
     )
     print(
-        f"{now_str()} GPT_SHADOW_CLOSE {st.spec.secid} {pos.direction} "
+        f"{now_str()} GPT_SHADOW_CLOSE layer={layer_name} {st.spec.secid} {pos.direction} "
         f"exit={fill_price:g} source={fill_source} ticks={ticks:.1f} "
-        f"net={net:.2f} total={st.gpt_shadow_net:.2f}",
+        f"net={net:.2f} total={rt.net:.2f}",
         flush=True,
     )
-    st.gpt_shadow_position = None
+    rt.position = None
     cooldown = max(0, int(st.profile.cooldown_minutes or 0)) * 60
-    st.gpt_shadow_cooldown_until = max(st.gpt_shadow_cooldown_until, time.monotonic() + max(60, cooldown))
+    rt.cooldown_until = max(rt.cooldown_until, time.monotonic() + max(60, cooldown))
 
 
 def process_gpt_shadow(
@@ -2161,131 +2278,137 @@ def process_gpt_shadow(
     if st.contour != str(getattr(args, "gpt_shadow_contour", "strict")):
         return
 
-    pos = st.gpt_shadow_position
-    if pos is not None:
-        exit_price, exit_source = executable_price(st, pos.direction, "exit")
-        if exit_price is None:
-            st.gpt_shadow_last_reason = "gpt_shadow book_filter no_executable_exit"
-            return
-        force_reason = None
-        max_hold = int(st.profile.max_hold_minutes or 0)
-        if force_close_due:
-            force_reason = "gpt_scheduled_force_close"
-        elif max_hold > 0 and opened_minutes_ago(pos) >= max_hold:
-            force_reason = "gpt_max_hold_exit"
+    for layer_name in gpt_shadow_layer_names(args):
+        layer = GPT_SHADOW_LAYER_CONFIGS[layer_name]
+        rt = gpt_shadow_runtime(st, layer_name)
+        pos = rt.position
+        if pos is not None:
+            exit_price, exit_source = executable_price(st, pos.direction, "exit")
+            if exit_price is None:
+                rt.last_reason = f"gpt_shadow {layer_name} book_filter no_executable_exit"
+                continue
+            force_reason = None
+            max_hold = int(st.profile.max_hold_minutes or 0)
+            if force_close_due:
+                force_reason = "gpt_scheduled_force_close"
+            elif max_hold > 0 and opened_minutes_ago(pos) >= max_hold:
+                force_reason = "gpt_max_hold_exit"
 
-        fee_t = fee_ticks(st.side_fee, st.spec)
-        if force_reason:
-            close_gpt_shadow(st, args, round_to_step(exit_price, st.spec.min_step), force_reason, exit_price, exit_source)
-            return
+            fee_t = fee_ticks(st.side_fee, st.spec)
+            if force_reason:
+                close_gpt_shadow(st, args, layer_name, round_to_step(exit_price, st.spec.min_step), force_reason, exit_price, exit_source)
+                continue
 
-        move_ticks = (
-            (exit_price - pos.entry_price) / st.spec.min_step
-            if pos.direction == "long"
-            else (pos.entry_price - exit_price) / st.spec.min_step
-        )
-        if move_ticks >= max(st.profile.trail_arm_ticks, fee_t + 1):
-            update_stop(pos, exit_price, st.profile.trail_ticks, st.spec)
-            min_net_stop = (
-                pos.entry_price + (fee_t + 0.5) * st.spec.min_step
+            move_ticks = (
+                (exit_price - pos.entry_price) / st.spec.min_step
                 if pos.direction == "long"
-                else pos.entry_price - (fee_t + 0.5) * st.spec.min_step
+                else (pos.entry_price - exit_price) / st.spec.min_step
             )
-            if pos.direction == "long":
-                pos.stop_price = max(pos.stop_price, round_to_step(min_net_stop, st.spec.min_step))
-            else:
-                pos.stop_price = min(pos.stop_price, round_to_step(min_net_stop, st.spec.min_step))
+            if move_ticks >= max(st.profile.trail_arm_ticks, fee_t + 1):
+                update_stop(pos, exit_price, st.profile.trail_ticks, st.spec)
+                min_net_stop = (
+                    pos.entry_price + (fee_t + 0.5) * st.spec.min_step
+                    if pos.direction == "long"
+                    else pos.entry_price - (fee_t + 0.5) * st.spec.min_step
+                )
+                if pos.direction == "long":
+                    pos.stop_price = max(pos.stop_price, round_to_step(min_net_stop, st.spec.min_step))
+                else:
+                    pos.stop_price = min(pos.stop_price, round_to_step(min_net_stop, st.spec.min_step))
 
-        fill_price, fill_source, _stop_qty, _overrun = stop_limit_fill_price(
-            st,
-            pos,
-            exit_price,
-            float(args.stop_limit_emergency_ticks),
+            fill_price, fill_source, _stop_qty, _overrun = stop_limit_fill_price(
+                st,
+                pos,
+                exit_price,
+                float(args.stop_limit_emergency_ticks),
+            )
+            if fill_price is not None:
+                close_gpt_shadow(st, args, layer_name, fill_price, fill_source, exit_price, exit_source)
+            continue
+
+        if not trading_enabled or force_close_due:
+            rt.last_reason = f"gpt_shadow {layer_name} time_gate"
+            continue
+        if not candle_closed:
+            continue
+        if rt.attempts >= st.profile.max_attempts:
+            rt.last_reason = f"gpt_shadow {layer_name} attempt_filter max_attempts_reached"
+            continue
+        if time.monotonic() < rt.cooldown_until:
+            rt.last_reason = f"gpt_shadow {layer_name} cooldown_filter wait_after_close"
+            continue
+        if rt.last_entry_candle_count == len(st.candles):
+            rt.last_reason = f"gpt_shadow {layer_name} candle_filter wait_new_candle"
+            continue
+        expiry_reason = expiry_new_entry_block_reason(st.spec, float(args.no_new_expiry_days))
+        if expiry_reason:
+            rt.last_reason = f"gpt_shadow {layer_name} {expiry_reason}"
+            continue
+
+        direction, reason = gpt_profile_signal(st, layer)
+        rt.last_reason = reason
+        if direction is None:
+            continue
+        entry_price, entry_source = executable_price(st, direction, "entry")
+        if entry_price is None:
+            rt.last_reason = f"gpt_shadow {layer_name} book_filter no_executable_entry"
+            continue
+        if (st.profile.entry_timing or "").lower() == "adverse_1tick":
+            entry_price += st.spec.min_step if direction == "long" else -st.spec.min_step
+            entry_price = round_to_step(entry_price, st.spec.min_step)
+
+        risk_decision = args.risk_governor.decide(st, float(args.max_full_stop_rub))
+        rt.risk_mode = risk_decision.mode
+        rt.risk_reason = risk_decision.reason
+        if not risk_decision.allowed:
+            rt.last_reason = f"gpt_shadow {layer_name} risk_governor {risk_decision.mode} {risk_decision.reason}"
+            continue
+        sizing = gpt_shadow_sizing(
+            args,
+            states,
+            st.spec,
+            st.profile,
+            direction,
+            st.side_fee,
+            risk_decision.max_full_stop_rub,
+            layer_name,
         )
-        if fill_price is not None:
-            close_gpt_shadow(st, args, fill_price, fill_source, exit_price, exit_source)
-        return
+        if sizing.qty < 1:
+            rt.last_reason = f"gpt_shadow {layer_name} risk_filter full_stop_gt_limit {sizing.reason}"
+            continue
 
-    if not trading_enabled or force_close_due:
-        st.gpt_shadow_last_reason = "gpt_shadow time_gate"
-        return
-    if not candle_closed:
-        return
-    if st.gpt_shadow_attempts >= st.profile.max_attempts:
-        st.gpt_shadow_last_reason = "gpt_shadow attempt_filter max_attempts_reached"
-        return
-    if time.monotonic() < st.gpt_shadow_cooldown_until:
-        st.gpt_shadow_last_reason = "gpt_shadow cooldown_filter wait_after_close"
-        return
-    if st.gpt_shadow_last_entry_candle_count == len(st.candles):
-        st.gpt_shadow_last_reason = "gpt_shadow candle_filter wait_new_candle"
-        return
-    expiry_reason = expiry_new_entry_block_reason(st.spec, float(args.no_new_expiry_days))
-    if expiry_reason:
-        st.gpt_shadow_last_reason = f"gpt_shadow {expiry_reason}"
-        return
-
-    direction, reason = gpt_profile_signal(st)
-    st.gpt_shadow_last_reason = reason
-    if direction is None:
-        return
-    entry_price, entry_source = executable_price(st, direction, "entry")
-    if entry_price is None:
-        st.gpt_shadow_last_reason = "gpt_shadow book_filter no_executable_entry"
-        return
-    if (st.profile.entry_timing or "").lower() == "adverse_1tick":
-        entry_price += st.spec.min_step if direction == "long" else -st.spec.min_step
-        entry_price = round_to_step(entry_price, st.spec.min_step)
-
-    risk_decision = args.risk_governor.decide(st, float(args.max_full_stop_rub))
-    st.gpt_shadow_risk_mode = risk_decision.mode
-    st.gpt_shadow_risk_reason = risk_decision.reason
-    if not risk_decision.allowed:
-        st.gpt_shadow_last_reason = f"gpt_shadow risk_governor {risk_decision.mode} {risk_decision.reason}"
-        return
-    sizing = gpt_shadow_sizing(
-        args,
-        states,
-        st.spec,
-        st.profile,
-        direction,
-        st.side_fee,
-        risk_decision.max_full_stop_rub,
-    )
-    if sizing.qty < 1:
-        st.gpt_shadow_last_reason = f"gpt_shadow risk_filter full_stop_gt_limit {sizing.reason}"
-        return
-
-    st.gpt_shadow_attempts += 1
-    st.gpt_shadow_entry_reason = reason
-    st.gpt_shadow_entry_sizing_reason = sizing.reason
-    st.gpt_shadow_position = open_position(direction, entry_price, sizing.qty, st.profile.stop_ticks, st.profile.trail_ticks, st.spec)
-    st.gpt_shadow_last_entry_candle_count = len(st.candles)
-    append_gpt_shadow_event(
-        Path(args.gpt_shadow_log),
-        st,
-        "open",
-        {
-            "event_time": st.gpt_shadow_position.opened_at,
-            "direction": direction,
-            "qty": sizing.qty,
-            "entry_price": entry_price,
-            "exit_source": entry_source,
-            "stop_price": st.gpt_shadow_position.stop_price,
-            "best_price": st.gpt_shadow_position.best_price,
-            "full_stop_risk_rub": round(sizing.full_stop_rub, 2),
-            "risk_mode": risk_decision.mode,
-            "risk_reason": risk_decision.reason,
-            "sizing_reason": sizing.reason,
-            "signal_reason": reason,
-        },
-    )
-    print(
-        f"{now_str()} GPT_SHADOW_OPEN {st.spec.secid} {direction} qty={sizing.qty} "
-        f"entry={entry_price:g} source={entry_source} stop={st.gpt_shadow_position.stop_price:g} "
-        f"risk={risk_decision.mode}/{risk_decision.max_full_stop_rub:.0f} {reason}",
-        flush=True,
-    )
+        rt.attempts += 1
+        rt.entry_reason = reason
+        rt.entry_sizing_reason = sizing.reason
+        rt.position = open_position(direction, entry_price, sizing.qty, st.profile.stop_ticks, st.profile.trail_ticks, st.spec)
+        rt.last_entry_candle_count = len(st.candles)
+        append_gpt_shadow_event(
+            Path(args.gpt_shadow_log),
+            st,
+            layer_name,
+            rt,
+            "open",
+            {
+                "event_time": rt.position.opened_at,
+                "direction": direction,
+                "qty": sizing.qty,
+                "entry_price": entry_price,
+                "exit_source": entry_source,
+                "stop_price": rt.position.stop_price,
+                "best_price": rt.position.best_price,
+                "full_stop_risk_rub": round(sizing.full_stop_rub, 2),
+                "risk_mode": risk_decision.mode,
+                "risk_reason": risk_decision.reason,
+                "sizing_reason": sizing.reason,
+                "signal_reason": reason,
+            },
+        )
+        print(
+            f"{now_str()} GPT_SHADOW_OPEN layer={layer_name} {st.spec.secid} {direction} qty={sizing.qty} "
+            f"entry={entry_price:g} source={entry_source} stop={rt.position.stop_price:g} "
+            f"risk={risk_decision.mode}/{risk_decision.max_full_stop_rub:.0f} {reason}",
+            flush=True,
+        )
 
 
 def poll_market_fallback(
@@ -2656,16 +2779,18 @@ def restore_gpt_shadow_from_log(path: Path, states: list[State]) -> int:
     if not path.exists() or path.stat().st_size == 0:
         return 0
     by_key = {(st.contour, st.spec.secid): st for st in states}
-    open_rows: dict[tuple[str, str], dict] = {}
-    restored_net: dict[tuple[str, str], float] = {}
-    restored_closed: dict[tuple[str, str], int] = {}
-    restored_attempts: dict[tuple[str, str], int] = {}
+    open_rows: dict[tuple[str, str, str], dict] = {}
+    restored_net: dict[tuple[str, str, str], float] = {}
+    restored_closed: dict[tuple[str, str, str], int] = {}
+    restored_attempts: dict[tuple[str, str, str], int] = {}
     try:
         with path.open(newline="", encoding="utf-8") as f:
             for row in csv.DictReader(f):
-                key = (str(row.get("contour") or ""), str(row.get("secid") or ""))
-                if key not in by_key:
+                state_key = (str(row.get("contour") or ""), str(row.get("secid") or ""))
+                if state_key not in by_key:
                     continue
+                layer_name = gpt_shadow_layer_from_model(str(row.get("model") or ""))
+                key = (state_key[0], state_key[1], layer_name)
                 event = str(row.get("event_type") or "").lower()
                 if event == "open":
                     open_rows[key] = row
@@ -2682,13 +2807,18 @@ def restore_gpt_shadow_from_log(path: Path, states: list[State]) -> int:
         return 0
 
     restored_open = 0
-    for key, st in by_key.items():
-        st.gpt_shadow_net += restored_net.get(key, 0.0)
-        st.gpt_shadow_closed += restored_closed.get(key, 0)
-        st.gpt_shadow_attempts += restored_attempts.get(key, 0)
-        row = open_rows.get(key)
-        if not row or st.gpt_shadow_position is not None:
+    for key, row in open_rows.items():
+        state_key = (key[0], key[1])
+        layer_name = key[2]
+        st = by_key.get(state_key)
+        if st is None:
             continue
+        rt = gpt_shadow_runtime(st, layer_name)
+        if rt.position is not None:
+            continue
+        rt.net += restored_net.get(key, 0.0)
+        rt.closed += restored_closed.get(key, 0)
+        rt.attempts += restored_attempts.get(key, 0)
         try:
             direction = str(row["direction"])
             entry = float(row["entry_price"])
@@ -2700,7 +2830,7 @@ def restore_gpt_shadow_from_log(path: Path, states: list[State]) -> int:
         except Exception as exc:
             print(f"{now_str()} GPT_SHADOW restore_skip_bad {key} error={exc}", flush=True)
             continue
-        st.gpt_shadow_position = Position(
+        rt.position = Position(
             direction=direction,
             entry_price=entry,
             qty=qty,
@@ -2708,12 +2838,23 @@ def restore_gpt_shadow_from_log(path: Path, states: list[State]) -> int:
             stop_price=stop,
             opened_at=opened_at,
         )
-        st.gpt_shadow_entry_reason = str(row.get("signal_reason") or "")
-        st.gpt_shadow_entry_sizing_reason = str(row.get("sizing_reason") or "")
-        st.gpt_shadow_risk_mode = str(row.get("risk_mode") or "")
-        st.gpt_shadow_risk_reason = str(row.get("risk_reason") or "")
-        st.gpt_shadow_last_reason = "gpt_shadow_restored_open_position"
+        rt.entry_reason = str(row.get("signal_reason") or "")
+        rt.entry_sizing_reason = str(row.get("sizing_reason") or "")
+        rt.risk_mode = str(row.get("risk_mode") or "")
+        rt.risk_reason = str(row.get("risk_reason") or "")
+        rt.last_reason = "gpt_shadow_restored_open_position"
         restored_open += 1
+
+    for key, net in restored_net.items():
+        if key in open_rows:
+            continue
+        st = by_key.get((key[0], key[1]))
+        if st is None:
+            continue
+        rt = gpt_shadow_runtime(st, key[2])
+        rt.net += net
+        rt.closed += restored_closed.get(key, 0)
+        rt.attempts += restored_attempts.get(key, 0)
     if restored_open or restored_closed:
         print(
             f"{now_str()} GPT_SHADOW restore open={restored_open} "
@@ -2792,6 +2933,7 @@ def main() -> None:
     parser.add_argument("--entry-audit-log", default=str(REPORTS / "paper_entry_audit.csv"))
     parser.add_argument("--enable-gpt-shadow", action="store_true")
     parser.add_argument("--gpt-shadow-contour", default="strict")
+    parser.add_argument("--gpt-shadow-layers", default="full,relaxed,loose")
     parser.add_argument("--gpt-shadow-params", default=str(REPORTS / "futures_scalp_profiles_v7_paper_20260525_gpt_shadow_params.csv"))
     parser.add_argument("--gpt-shadow-log", default=str(REPORTS / "paper_gpt_shadow_trades.csv"))
     parser.add_argument("--health-log", default=str(REPORTS / "paper_bot_health.json"))

@@ -287,6 +287,16 @@ def human_cell(value: object) -> object:
     return human_reason(text)
 
 
+def human_gpt_layer(value: object) -> str:
+    text = "" if value is None else str(value)
+    text = text.replace("gpt_profile_shadow", "gpt_full").replace("gpt_", "").strip().lower()
+    return {
+        "full": "строгий",
+        "relaxed": "средний",
+        "loose": "мягкий",
+    }.get(text, text or "строгий")
+
+
 def readiness_label(score: object, reason: object) -> str:
     try:
         value = int(score)
@@ -421,6 +431,10 @@ def normalize_gpt_shadow_trades(df: pd.DataFrame, portfolio: str) -> pd.DataFram
         out["fees_rub"] = pd.to_numeric(out["fees_rub"], errors="coerce")
     if "ticks" in out:
         out["ticks"] = pd.to_numeric(out["ticks"], errors="coerce")
+    if "model" not in out:
+        out["model"] = "gpt_full"
+    out["model"] = out["model"].fillna("gpt_full").astype(str).replace({"gpt_profile_shadow": "gpt_full"})
+    out["model_label"] = out["model"].map(human_gpt_layer)
     out["source"] = "gpt_shadow"
     out["portfolio"] = portfolio
     return out
@@ -577,11 +591,17 @@ def build_state(base_dir: Path) -> dict:
 
     gpt_shadow_overview = []
     if not gpt_shadow_trades.empty and "portfolio" in gpt_shadow_trades:
-        for portfolio, g in gpt_shadow_trades.groupby("portfolio", dropna=True):
+        group_cols = ["model", "portfolio"] if "model" in gpt_shadow_trades else ["portfolio"]
+        for keys, g in gpt_shadow_trades.groupby(group_cols, dropna=True):
+            if isinstance(keys, tuple):
+                model, portfolio = keys
+            else:
+                model, portfolio = "gpt_full", keys
             pnl = pd.to_numeric(g.get("net_pnl_rub", pd.Series(dtype=float)), errors="coerce").dropna()
             s = equity_stats(pnl)
             gpt_shadow_overview.append(
                 {
+                    "model": human_gpt_layer(model),
                     "portfolio": str(portfolio),
                     "net": s["net"],
                     "trades": int(len(pnl)),
@@ -595,6 +615,7 @@ def build_state(base_dir: Path) -> dict:
 
     gpt_shadow_recent_cols = [
         "time",
+        "model_label",
         "portfolio",
         "contour",
         "ticker",
@@ -989,7 +1010,7 @@ HTML = r"""<!doctype html>
         ["Контур","portfolio"], ["Старт ₽","capital",false,2], ["День ₽","day_net",true,2], ["Всего ₽","closed_net",true,2], ["Доход %","return_pct",true,3], ["ГО занято ₽","used_margin",false,2], ["Свободно ₽","free_capital",false,2], ["Позиций","open_positions"], ["Сделок","closed_trades"]
       ], data.portfolio_overview || []);
       table(document.getElementById('gptShadow'), [
-        ["Контур","portfolio"], ["Тень ₽","net",true,2], ["Сделок","trades"], ["Плюс","wins"], ["Минус","losses"], ["Плюс %","win_rate",false,1], ["Средняя ₽","avg_trade",true,2]
+        ["Слой","model"], ["Контур","portfolio"], ["Тень ₽","net",true,2], ["Сделок","trades"], ["Плюс","wins"], ["Минус","losses"], ["Плюс %","win_rate",false,1], ["Средняя ₽","avg_trade",true,2]
       ], data.gpt_shadow_overview || []);
       table(document.getElementById('tickers'), [
         ["Контур","portfolio"], ["Тикер","ticker"], ["Позиция","position"], ["Готовность","state",false,null,"state"], ["Риск","risk"], ["Last","last"], ["Bid","bid"], ["Ask","ask"], ["Спред","spread"], ["Стоп","stop_ticks"], ["Спред/стоп %","spread_to_stop_pct"], ["Стакан","book"], ["Комментарий","comment",false,null,"comment"]
@@ -1001,7 +1022,7 @@ HTML = r"""<!doctype html>
         ["Время","time"], ["Портфель","portfolio"], ["Контур","contour"], ["Тикер","ticker"], ["Напр.","direction"], ["Qty","qty"], ["Entry","entry_price"], ["Exit","exit_price"], ["Ticks","ticks",true,2], ["Fee","fees_rub",false,2], ["Net","net_pnl_rub",true,2], ["Статус","fill_status"], ["Причина","skip_reason"]
       ], data.recent_trades || []);
       table(document.getElementById('gptTrades'), [
-        ["Время","time"], ["Портфель","portfolio"], ["Сигнал","signal_family"], ["Тикер","ticker"], ["Напр.","direction"], ["Qty","qty"], ["Entry","entry_price"], ["Exit","exit_price"], ["Тики","ticks",true,2], ["Комиссия ₽","fees_rub",false,2], ["Результат ₽","net_pnl_rub",true,2], ["Выход","exit_source"]
+        ["Время","time"], ["Слой","model_label"], ["Портфель","portfolio"], ["Сигнал","signal_family"], ["Тикер","ticker"], ["Напр.","direction"], ["Qty","qty"], ["Entry","entry_price"], ["Exit","exit_price"], ["Тики","ticks",true,2], ["Комиссия ₽","fees_rub",false,2], ["Результат ₽","net_pnl_rub",true,2], ["Выход","exit_source"]
       ], data.gpt_shadow_recent || []);
       const positions = data.open_positions || [];
       const posEl = document.getElementById('positions');
