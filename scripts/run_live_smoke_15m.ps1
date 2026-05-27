@@ -53,7 +53,7 @@ if ($RealOrders) {
     if ($env:LIVE_SMOKE_ENABLE -ne "1") {
         throw "RealOrders blocked. Set LIVE_SMOKE_ENABLE=1 explicitly for this shell."
     }
-    $argsList += @("--real-orders", "--confirm-real-orders", "YES")
+    $argsList += @("--real-orders", "--confirm-real-orders", "YES", "--confirm-margin-trade")
 }
 
 $argString = ($argsList | ForEach-Object { Quote-Arg $_ }) -join " "

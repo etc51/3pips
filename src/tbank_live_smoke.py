@@ -60,8 +60,7 @@ def price_to_quotation(price: float):
 
 
 def order_id(prefix: str, tag: str) -> str:
-    clean = "".join(ch for ch in prefix.lower() if ch.isalnum() or ch == "-")[:14]
-    return f"{clean}-{tag}-{uuid.uuid4().hex[:12]}"[:36]
+    return str(uuid.uuid4())
 
 
 def enum_name(value: object) -> str:
@@ -91,6 +90,17 @@ def select_account(client: object, requested: str) -> object:
         ids = [str(getattr(a, "id", "")) for a in open_accounts]
         raise RuntimeError(f"account_id_required open_accounts={ids}")
     return open_accounts[0]
+
+
+def portfolio_total_rub(client: object, account_id: str) -> tuple[float | None, str]:
+    try:
+        portfolio = client.operations.get_portfolio(account_id=account_id)
+        total = getattr(portfolio, "total_amount_portfolio", None)
+        if total is None:
+            return None, ""
+        return quotation_to_float(total), str(getattr(total, "currency", "") or "")
+    except Exception:
+        return None, ""
 
 
 def load_instrument(client: object, ticker: str) -> Instrument:
@@ -185,21 +195,35 @@ def post_market_order(
     client_id_prefix: str,
     tag: str,
     log_path: Path,
+    confirm_margin_trade: bool,
 ) -> tuple[str, str]:
     from t_tech.invest import OrderDirection, OrderType, PriceType
 
     order_direction = OrderDirection.ORDER_DIRECTION_BUY if direction == "long" else OrderDirection.ORDER_DIRECTION_SELL
     client_order_id = order_id(client_id_prefix, tag)
-    response = client.orders.post_order(
-        figi=instrument.figi,
-        instrument_id=instrument.uid,
-        quantity=int(qty),
-        direction=order_direction,
-        account_id=account_id,
-        order_type=OrderType.ORDER_TYPE_MARKET,
-        order_id=client_order_id,
-        price_type=PriceType.PRICE_TYPE_POINT,
-    )
+    try:
+        response = client.orders.post_order(
+            figi=instrument.figi,
+            instrument_id=instrument.uid,
+            quantity=int(qty),
+            direction=order_direction,
+            account_id=account_id,
+            order_type=OrderType.ORDER_TYPE_MARKET,
+            order_id=client_order_id,
+            price_type=PriceType.PRICE_TYPE_POINT,
+            confirm_margin_trade=confirm_margin_trade,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log_event(
+            log_path,
+            "post_market_order_error",
+            client_order_id=client_order_id,
+            direction=direction,
+            qty=qty,
+            confirm_margin_trade=confirm_margin_trade,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        raise
     broker_order_id = str(getattr(response, "order_id", "") or client_order_id)
     log_event(
         log_path,
@@ -232,6 +256,7 @@ def post_stop_limit(
     client_id_prefix: str,
     limit_offset_ticks: int,
     log_path: Path,
+    confirm_margin_trade: bool,
 ) -> str:
     from t_tech.invest import (
         ExchangeOrderType,
@@ -244,20 +269,35 @@ def post_stop_limit(
     stop_direction = StopOrderDirection.STOP_ORDER_DIRECTION_SELL if position.direction == "long" else StopOrderDirection.STOP_ORDER_DIRECTION_BUY
     stop_price, limit_price = protective_stop_prices(position, instrument, limit_offset_ticks)
     client_stop_id = order_id(client_id_prefix, "stop")
-    response = client.stop_orders.post_stop_order(
-        figi=instrument.figi,
-        instrument_id=instrument.uid,
-        quantity=int(position.qty),
-        price=price_to_quotation(limit_price),
-        stop_price=price_to_quotation(stop_price),
-        direction=stop_direction,
-        account_id=account_id,
-        expiration_type=StopOrderExpirationType.STOP_ORDER_EXPIRATION_TYPE_GOOD_TILL_CANCEL,
-        stop_order_type=StopOrderType.STOP_ORDER_TYPE_STOP_LIMIT,
-        exchange_order_type=ExchangeOrderType.EXCHANGE_ORDER_TYPE_LIMIT,
-        price_type=PriceType.PRICE_TYPE_POINT,
-        order_id=client_stop_id,
-    )
+    try:
+        response = client.stop_orders.post_stop_order(
+            figi=instrument.figi,
+            instrument_id=instrument.uid,
+            quantity=int(position.qty),
+            price=price_to_quotation(limit_price),
+            stop_price=price_to_quotation(stop_price),
+            direction=stop_direction,
+            account_id=account_id,
+            expiration_type=StopOrderExpirationType.STOP_ORDER_EXPIRATION_TYPE_GOOD_TILL_CANCEL,
+            stop_order_type=StopOrderType.STOP_ORDER_TYPE_STOP_LIMIT,
+            exchange_order_type=ExchangeOrderType.EXCHANGE_ORDER_TYPE_LIMIT,
+            price_type=PriceType.PRICE_TYPE_POINT,
+            order_id=client_stop_id,
+            confirm_margin_trade=confirm_margin_trade,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log_event(
+            log_path,
+            "post_stop_limit_error",
+            client_stop_id=client_stop_id,
+            position_direction=position.direction,
+            qty=position.qty,
+            stop_price=stop_price,
+            limit_price=limit_price,
+            confirm_margin_trade=confirm_margin_trade,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+        raise
     stop_order_id = str(getattr(response, "stop_order_id", ""))
     log_event(
         log_path,
@@ -346,14 +386,18 @@ def run(args: argparse.Namespace) -> int:
         account = select_account(client, args.account_id)
         account_id = str(getattr(account, "id", ""))
         instrument = load_instrument(client, args.ticker)
+        total_portfolio_rub, portfolio_currency = portfolio_total_rub(client, account_id)
         book = client.market_data.get_order_book(figi=instrument.figi, depth=int(args.orderbook_depth))
         levels = best_levels(book, instrument.min_step)
         log_event(
             log_path,
             "preflight",
             real_orders=bool(args.real_orders),
+            confirm_margin_trade=bool(args.confirm_margin_trade),
             account_id=account_id,
             account_name=str(getattr(account, "name", "")),
+            portfolio_total=total_portfolio_rub,
+            portfolio_currency=portfolio_currency,
             ticker=instrument.ticker,
             figi=instrument.figi,
             uid=instrument.uid,
@@ -361,6 +405,15 @@ def run(args: argparse.Namespace) -> int:
             step_price=instrument.step_price,
             **levels,
         )
+        if args.real_orders and (total_portfolio_rub is None or total_portfolio_rub <= 0):
+            log_event(
+                log_path,
+                "real_orders_blocked_no_portfolio_value",
+                account_id=account_id,
+                portfolio_total=total_portfolio_rub,
+                portfolio_currency=portfolio_currency,
+            )
+            raise RuntimeError(f"real_orders_blocked_no_portfolio_value account_id={account_id} total={total_portfolio_rub}")
         if not levels["bid"] or not levels["ask"]:
             raise RuntimeError("empty_orderbook")
         if levels["spread_ticks"] is not None and levels["spread_ticks"] > float(args.max_spread_ticks):
@@ -382,6 +435,7 @@ def run(args: argparse.Namespace) -> int:
             args.client_id_prefix,
             "entry",
             log_path,
+            bool(args.confirm_margin_trade),
         )
         lots, executed_price, status = wait_order_fill(client, account_id, broker_order_id, int(args.order_fill_timeout_sec), log_path)
         if lots <= 0:
@@ -403,7 +457,16 @@ def run(args: argparse.Namespace) -> int:
             stop_price=round_to_step(stop_price, instrument.min_step),
         )
         log_event(log_path, "entry_filled", direction=direction, qty=lots, entry_price=position.entry_price, initial_stop=position.stop_price)
-        post_stop_limit(client, account_id, instrument, position, args.client_id_prefix, int(args.stop_limit_offset_ticks), log_path)
+        post_stop_limit(
+            client,
+            account_id,
+            instrument,
+            position,
+            args.client_id_prefix,
+            int(args.stop_limit_offset_ticks),
+            log_path,
+            bool(args.confirm_margin_trade),
+        )
         audit_duplicates(client, account_id, instrument, log_path, fail_on_duplicate=True)
 
         start = time.monotonic()
@@ -437,7 +500,16 @@ def run(args: argparse.Namespace) -> int:
             if moved and time.monotonic() - last_replace >= float(args.min_stop_replace_interval_sec):
                 old_stop_id = position.stop_order_id
                 cancel_stop_if_any(client, account_id, old_stop_id, log_path, "trail_replace")
-                post_stop_limit(client, account_id, instrument, position, args.client_id_prefix, int(args.stop_limit_offset_ticks), log_path)
+                post_stop_limit(
+                    client,
+                    account_id,
+                    instrument,
+                    position,
+                    args.client_id_prefix,
+                    int(args.stop_limit_offset_ticks),
+                    log_path,
+                    bool(args.confirm_margin_trade),
+                )
                 audit_duplicates(client, account_id, instrument, log_path, fail_on_duplicate=True)
                 last_replace = time.monotonic()
             if emergency_stop_hit(position, instrument, float(mark), int(args.emergency_ticks)):
@@ -453,6 +525,7 @@ def run(args: argparse.Namespace) -> int:
                     args.client_id_prefix,
                     "emerg",
                     log_path,
+                    bool(args.confirm_margin_trade),
                 )
                 wait_order_fill(client, account_id, close_order_id, int(args.order_fill_timeout_sec), log_path)
                 audit_duplicates(client, account_id, instrument, log_path, fail_on_duplicate=False)
@@ -471,6 +544,7 @@ def run(args: argparse.Namespace) -> int:
             args.client_id_prefix,
             "exit",
             log_path,
+            bool(args.confirm_margin_trade),
         )
         wait_order_fill(client, account_id, close_order_id, int(args.order_fill_timeout_sec), log_path)
         audit_duplicates(client, account_id, instrument, log_path, fail_on_duplicate=False)
@@ -498,6 +572,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--client-id-prefix", default="3pips-smoke")
     parser.add_argument("--log", default=str(REPORTS / "runtime" / f"live_smoke_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"))
     parser.add_argument("--allow-existing-instrument-orders", action="store_true")
+    parser.add_argument("--confirm-margin-trade", action="store_true")
     parser.add_argument("--real-orders", action="store_true")
     parser.add_argument("--confirm-real-orders", default="")
     return parser
