@@ -62,7 +62,7 @@ function Start-Portfolio {
         "--risk-profit-guard-drawdown-min-rub", "1500",
         "--risk-stop-to-median-cap", "4",
         "--stop-limit-emergency-ticks", "2",
-        "--actual-exit-model", "candle_like",
+        "--actual-exit-model", "stream_stoplimit",
         "--stream-stale-sec", "15",
         "--fallback-poll-sec", "2",
         "--no-new-expiry-days", "5",

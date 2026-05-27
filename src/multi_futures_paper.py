@@ -929,9 +929,13 @@ def signal(state: State, aggressive: bool) -> tuple[Direction | None, str]:
         ask_qty = sum(int(getattr(x, "quantity", 0) or 0) for x in getattr(state.last_order_book, "asks", [])[:3])
     if bid_qty <= 0 or ask_qty <= 0:
         return None, f"book_filter empty_book bid={bid_qty} ask={ask_qty}"
+    levels = best_levels(state.last_order_book, spec)
+    spread_ticks = levels.get("spread_ticks")
+    max_general_spread = state.profile.stop_ticks * SPREAD_DOMINATES_RATIO
+    if spread_ticks is None or float(spread_ticks) > max_general_spread:
+        spread_txt = "-" if spread_ticks is None else f"{float(spread_ticks):.1f}t"
+        return None, f"spread_filter spread={spread_txt} stop={state.profile.stop_ticks}t max={max_general_spread:.1f}t"
     if br_small_stop_policy_applies(state.profile):
-        levels = best_levels(state.last_order_book, spec)
-        spread_ticks = levels.get("spread_ticks")
         max_spread = state.profile.stop_ticks * BR_POLICY_MAX_SPREAD_TO_STOP
         if spread_ticks is None or float(spread_ticks) > max_spread:
             spread_txt = "-" if spread_ticks is None else f"{float(spread_ticks):.1f}t"

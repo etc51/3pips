@@ -161,6 +161,8 @@ def human_reason(reason: object) -> str:
         return "риск: защита дневной прибыли"
     if text.startswith("brq6_spread_filter"):
         return "BR: спред слишком большой к стопу"
+    if text.startswith("spread_filter"):
+        return "фильтр: спред больше стопа"
     if text.startswith("brq6_loss_pause"):
         return "BR: пауза после серии стопов"
     if text == "restored_open_position":
