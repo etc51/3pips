@@ -89,6 +89,13 @@ class Supervisor:
         if pid is None or pid <= 0:
             return False
         try:
+            waited_pid, status = os.waitpid(pid, os.WNOHANG)
+            if waited_pid == pid:
+                self.log(f"child_exited pid={pid} status={status}")
+                return False
+        except ChildProcessError:
+            pass
+        try:
             os.kill(pid, 0)
             return True
         except ProcessLookupError:
