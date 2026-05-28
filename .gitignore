@@ -30,6 +30,8 @@ reports/**
 !reports/
 !reports/*.md
 !reports/futures_scalp*.csv
+!reports/stock_moex_scalp_results_review/
+!reports/stock_moex_scalp_results_review/stock_final_live_paper_profiles.json
 !reports/all_futures_instrument_specs.csv
 !reports/scalp_30_secids.txt
 !reports/new_candidates_excluding_running_keep.csv

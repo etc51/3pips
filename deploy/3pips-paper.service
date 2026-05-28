@@ -1,0 +1,19 @@
+[Unit]
+Description=3pips MOEX paper trading bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=3pips
+Group=3pips
+WorkingDirectory=/opt/3pips
+EnvironmentFile=-/etc/3pips/3pips.env
+ExecStart=/opt/3pips/.venv/bin/python /opt/3pips/scripts/ubuntu_paper_supervisor.py --project-root /opt/3pips --python /opt/3pips/.venv/bin/python --dashboard-port 8768
+Restart=always
+RestartSec=10
+TimeoutStopSec=35
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target
