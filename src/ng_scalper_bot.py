@@ -79,6 +79,22 @@ def round_to_step(value: float, step: float) -> float:
 
 def find_tbank_token() -> str:
     candidates: list[tuple[str, str]] = []
+    for raw_path in [
+        os.environ.get("TBANK_TOKEN_FILE"),
+        "/run/secrets/tbank_token",
+        str(ROOT / "secrets" / "tbank_token.txt"),
+    ]:
+        if not raw_path:
+            continue
+        path = Path(raw_path)
+        if not path.exists():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except Exception:
+            continue
+        for token in re.findall(r"(?i)(?:t\.[A-Za-z0-9_-]{20,}|[A-Za-z0-9_-]{40,})", text):
+            candidates.append((f"file:{path.name}", token.strip()))
     desktop = Path.home() / "Desktop"
     if desktop.exists():
         for path in sorted(desktop.glob("*.txt")):

@@ -19,6 +19,8 @@ dist/
 *.pem
 *token*.txt
 *secret*.txt
+secrets/*
+!secrets/.gitkeep
 
 # Large local research artifacts
 data/

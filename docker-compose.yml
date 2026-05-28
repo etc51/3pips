@@ -10,6 +10,9 @@ services:
       TBANK_TOKEN: ${TBANK_TOKEN:-}
       TBANK_TOKEN_READONLY: ${TBANK_TOKEN_READONLY:-}
       TINKOFF_TOKEN: ${TINKOFF_TOKEN:-}
+      TBANK_TOKEN_FILE: /run/secrets/tbank_token
+    secrets:
+      - tbank_token
     ports:
       - "127.0.0.1:8768:8768"
     volumes:
@@ -36,3 +39,6 @@ services:
       - ./reports/paper_runs:/app/reports/paper_runs
       - ./reports/archives:/app/reports/archives
 
+secrets:
+  tbank_token:
+    file: ./secrets/tbank_token.txt
