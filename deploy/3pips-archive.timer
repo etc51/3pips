@@ -1,0 +1,10 @@
+[Unit]
+Description=Run 3pips paper archive daily
+
+[Timer]
+OnCalendar=*-*-* 23:59:00
+Persistent=true
+Unit=3pips-archive.service
+
+[Install]
+WantedBy=timers.target

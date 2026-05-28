@@ -1,0 +1,10 @@
+[Unit]
+Description=3pips paper run daily archive
+
+[Service]
+Type=oneshot
+User=3pips
+Group=3pips
+WorkingDirectory=/opt/3pips
+EnvironmentFile=-/etc/3pips/3pips.env
+ExecStart=/opt/3pips/.venv/bin/python /opt/3pips/scripts/archive_paper_run.py --project-root /opt/3pips --keep-days 14

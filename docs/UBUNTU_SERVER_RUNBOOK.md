@@ -86,6 +86,20 @@ journalctl -u 3pips-paper -f
 tail -f /opt/3pips/reports/runtime/v7_paper_supervisor_20260525.log
 ```
 
+Ежедневный архив всей истории создается в:
+
+```bash
+/opt/3pips/reports/archives/
+```
+
+Проверить архиватор:
+
+```bash
+systemctl list-timers 3pips-archive.timer --no-pager
+sudo systemctl start 3pips-archive.service
+ls -lh /opt/3pips/reports/archives/
+```
+
 Проверить health всех контуров:
 
 ```bash
@@ -181,6 +195,7 @@ Supervisor держит живыми:
 ```text
 /opt/3pips/reports/runtime/
 /opt/3pips/reports/paper_runs/v7_live_20260525/
+/opt/3pips/reports/archives/
 ```
 
 Главные файлы:
@@ -192,6 +207,18 @@ Supervisor держит живыми:
 *_gpt_shadow_trades.csv
 *_entry_audit.csv
 *_live_orderbook_snapshots.csv
+```
+
+Забрать все архивы себе:
+
+```bash
+scp user@SERVER_IP:/opt/3pips/reports/archives/*.tar.gz .
+```
+
+Забрать всю рабочую историю без упаковки:
+
+```bash
+scp -r user@SERVER_IP:/opt/3pips/reports/paper_runs/v7_live_20260525 .
 ```
 
 ## 10. Важно перед реальным live

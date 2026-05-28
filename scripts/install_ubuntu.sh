@@ -16,7 +16,7 @@ if ! id "${BOT_USER}" >/dev/null 2>&1; then
 fi
 
 sudo chown -R "${BOT_USER}:${BOT_USER}" "${PROJECT_ROOT}"
-sudo -u "${BOT_USER}" mkdir -p reports/runtime reports/paper_runs/v7_live_20260525
+sudo -u "${BOT_USER}" mkdir -p reports/runtime reports/paper_runs/v7_live_20260525 reports/archives
 
 sudo -u "${BOT_USER}" python3 -m venv "${PROJECT_ROOT}/.venv"
 sudo -u "${BOT_USER}" "${PROJECT_ROOT}/.venv/bin/python" -m pip install --upgrade pip setuptools wheel
@@ -37,9 +37,13 @@ if [[ ! -f /etc/3pips/3pips.env ]]; then
 fi
 
 sudo cp "deploy/${SERVICE_NAME}.service" "/etc/systemd/system/${SERVICE_NAME}.service"
+sudo cp "deploy/3pips-archive.service" "/etc/systemd/system/3pips-archive.service"
+sudo cp "deploy/3pips-archive.timer" "/etc/systemd/system/3pips-archive.timer"
 sudo systemctl daemon-reload
 sudo systemctl enable "${SERVICE_NAME}"
+sudo systemctl enable 3pips-archive.timer
 
 echo "Installed ${SERVICE_NAME}."
 echo "Start:  sudo systemctl start ${SERVICE_NAME}"
 echo "Logs:   journalctl -u ${SERVICE_NAME} -f"
+echo "Daily archives: /opt/3pips/reports/archives/"
