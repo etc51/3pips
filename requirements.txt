@@ -4,7 +4,6 @@ requests
 scipy
 matplotlib
 xlrd
-tinkoff-investments
 t-tech-investments
 statsmodels
 pyarrow

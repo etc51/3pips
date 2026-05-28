@@ -1,7 +1,6 @@
 # 3pips: установка paper-бота на Ubuntu
 
-Эта инструкция для сервера друга на Ubuntu. Она не требует передавать токен в репозиторий.
-Бот сам ищет токен в переменных окружения `TBANK_TOKEN`, `TBANK_TOKEN_READONLY`, `TINKOFF_TOKEN`.
+Эта инструкция для сервера друга на Ubuntu.
 
 ## 1. Установка на сервере
 
@@ -10,6 +9,7 @@
 ```bash
 sudo apt update
 sudo apt install -y git python3 python3-venv python3-pip
+python3 --version
 
 sudo mkdir -p /opt
 cd /opt
@@ -27,31 +27,9 @@ sudo git pull
 bash scripts/install_ubuntu.sh
 ```
 
-## 2. Токен
+Если `python3 --version` ниже `3.11`, сначала поставить Python `3.11+`, затем повторить установку.
 
-Если токен уже настроен на сервере, этот шаг пропустить.
-
-Если нет, положить его в systemd environment file:
-
-```bash
-sudo nano /etc/3pips/3pips.env
-```
-
-Внутри:
-
-```bash
-TBANK_TOKEN=вставить_токен_сюда
-PYTHONUNBUFFERED=1
-TZ=Europe/Moscow
-```
-
-Права:
-
-```bash
-sudo chmod 600 /etc/3pips/3pips.env
-```
-
-## 3. Запуск, остановка, перезапуск
+## 2. Запуск, остановка, перезапуск
 
 ```bash
 sudo systemctl start 3pips-paper
@@ -72,7 +50,7 @@ sudo systemctl enable 3pips-paper
 sudo systemctl disable 3pips-paper
 ```
 
-## 4. Логи и проверка работы
+## 3. Логи и проверка работы
 
 Лог systemd:
 
@@ -126,7 +104,7 @@ done
 ls -lh /opt/3pips/reports/paper_runs/v7_live_20260525/*_multi_futures_paper_trades.csv
 ```
 
-## 5. Как владельцу смотреть dashboard
+## 4. Как владельцу смотреть dashboard
 
 Безопасный способ: SSH-туннель. На своем компьютере:
 
@@ -144,7 +122,7 @@ http://127.0.0.1:8768/
 
 Так dashboard не надо открывать наружу в интернет.
 
-## 6. Если хочется открыть dashboard наружу
+## 5. Если хочется открыть dashboard наружу
 
 Лучше не делать. Если все же нужно, открывать только на конкретный IP:
 
@@ -154,7 +132,7 @@ sudo ufw allow from YOUR_HOME_IP to any port 8768 proto tcp
 
 Но текущий dashboard слушает `127.0.0.1`, поэтому стандартный вариант контроля - SSH-туннель.
 
-## 7. Обновление бота
+## 6. Обновление бота
 
 ```bash
 cd /opt/3pips
@@ -171,7 +149,7 @@ sudo systemctl status 3pips-paper --no-pager
 journalctl -u 3pips-paper -n 100 --no-pager
 ```
 
-## 8. Что запускается
+## 7. Что запускается
 
 Сервис `3pips-paper` запускает Python-supervisor:
 
@@ -190,7 +168,7 @@ Supervisor держит живыми:
 
 Если контур упал, health устарел или dashboard перестал отвечать, supervisor перезапускает нужный процесс.
 
-## 9. Где лежат рабочие файлы
+## 8. Где лежат рабочие файлы
 
 ```text
 /opt/3pips/reports/runtime/
@@ -221,7 +199,7 @@ scp user@SERVER_IP:/opt/3pips/reports/archives/*.tar.gz .
 scp -r user@SERVER_IP:/opt/3pips/reports/paper_runs/v7_live_20260525 .
 ```
 
-## 10. Важно перед реальным live
+## 9. Важно перед реальным live
 
 Этот сервис запускает paper-бота. Перед real live надо отдельно включать и проверять live executor.
 Не менять paper на real без 15-минутного smoke-test с минимальным размером.

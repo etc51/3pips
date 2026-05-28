@@ -4,6 +4,7 @@ set -euo pipefail
 PROJECT_ROOT="${PROJECT_ROOT:-/opt/3pips}"
 SERVICE_NAME="${SERVICE_NAME:-3pips-paper}"
 BOT_USER="${BOT_USER:-3pips}"
+PYTHON_BIN="${PYTHON_BIN:-}"
 
 if [[ "$(pwd)" != "$PROJECT_ROOT" ]]; then
   echo "Run this script from $PROJECT_ROOT"
@@ -15,10 +16,33 @@ if ! id "${BOT_USER}" >/dev/null 2>&1; then
   sudo useradd --system --create-home --shell /bin/bash "${BOT_USER}"
 fi
 
+if [[ -z "${PYTHON_BIN}" ]]; then
+  for candidate in python3.12 python3.11 python3; do
+    if command -v "${candidate}" >/dev/null 2>&1; then
+      PYTHON_BIN="$(command -v "${candidate}")"
+      break
+    fi
+  done
+fi
+
+if [[ -z "${PYTHON_BIN}" ]]; then
+  echo "Python not found. Install Python 3.11+ first."
+  exit 1
+fi
+
+"${PYTHON_BIN}" - <<'PY'
+import sys
+if sys.version_info < (3, 11):
+    raise SystemExit(
+        f"Python 3.11+ required. Current: {sys.version.split()[0]}. "
+        "Install python3.11/python3.12 and rerun."
+    )
+PY
+
 sudo chown -R "${BOT_USER}:${BOT_USER}" "${PROJECT_ROOT}"
 sudo -u "${BOT_USER}" mkdir -p reports/runtime reports/paper_runs/v7_live_20260525 reports/archives
 
-sudo -u "${BOT_USER}" python3 -m venv "${PROJECT_ROOT}/.venv"
+sudo -u "${BOT_USER}" "${PYTHON_BIN}" -m venv "${PROJECT_ROOT}/.venv"
 sudo -u "${BOT_USER}" "${PROJECT_ROOT}/.venv/bin/python" -m pip install --upgrade pip setuptools wheel
 sudo -u "${BOT_USER}" "${PROJECT_ROOT}/.venv/bin/python" -m pip install -r requirements.txt
 
@@ -30,11 +54,6 @@ for name in classic_core gl_watch neo tail_research stock_watch; do
 done
 
 sudo mkdir -p /etc/3pips
-if [[ ! -f /etc/3pips/3pips.env ]]; then
-  sudo cp deploy/3pips.env.example /etc/3pips/3pips.env
-  sudo chmod 600 /etc/3pips/3pips.env
-  echo "Created /etc/3pips/3pips.env. Put the token there if it is not already configured."
-fi
 
 sudo cp "deploy/${SERVICE_NAME}.service" "/etc/systemd/system/${SERVICE_NAME}.service"
 sudo cp "deploy/3pips-archive.service" "/etc/systemd/system/3pips-archive.service"
