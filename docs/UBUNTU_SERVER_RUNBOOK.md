@@ -29,6 +29,12 @@ bash scripts/install_ubuntu.sh
 
 Если `python3 --version` ниже `3.11`, сначала поставить Python `3.11+`, затем повторить установку.
 
+T-Bank SDK ставится установщиком из package index Т-Банка:
+
+```text
+https://opensource.tbank.ru/api/v4/projects/238/packages/pypi/simple
+```
+
 ## 2. Запуск, остановка, перезапуск
 
 ```bash

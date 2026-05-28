@@ -45,6 +45,13 @@ sudo -u "${BOT_USER}" mkdir -p reports/runtime reports/paper_runs/v7_live_202605
 sudo -u "${BOT_USER}" "${PYTHON_BIN}" -m venv "${PROJECT_ROOT}/.venv"
 sudo -u "${BOT_USER}" "${PROJECT_ROOT}/.venv/bin/python" -m pip install --upgrade pip setuptools wheel
 sudo -u "${BOT_USER}" "${PROJECT_ROOT}/.venv/bin/python" -m pip install -r requirements.txt
+sudo -u "${BOT_USER}" "${PROJECT_ROOT}/.venv/bin/python" -m pip install \
+  --extra-index-url https://opensource.tbank.ru/api/v4/projects/238/packages/pypi/simple \
+  t-tech-investments
+sudo -u "${BOT_USER}" "${PROJECT_ROOT}/.venv/bin/python" - <<'PY'
+from t_tech.invest import Client
+print("t_tech.invest import ok")
+PY
 
 for name in classic_core gl_watch neo tail_research stock_watch; do
   path="reports/paper_runs/v7_live_20260525/${name}_paper_open_positions.json"
