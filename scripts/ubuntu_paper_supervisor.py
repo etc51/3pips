@@ -27,6 +27,7 @@ class Supervisor:
     def __init__(self, args: argparse.Namespace) -> None:
         self.root = Path(args.project_root).resolve()
         self.python = args.python
+        self.dashboard_host = args.dashboard_host
         self.dashboard_port = int(args.dashboard_port)
         self.loop_sec = int(args.loop_sec)
         self.stale_sec = int(args.stale_sec)
@@ -236,7 +237,12 @@ class Supervisor:
         pid_path = self.dashboard_pid_path()
         pid = self.read_pid(pid_path)
         self.stop_pid(pid, reason)
-        argv = ["src/paper_dashboard.py", "--port", str(self.dashboard_port), "--dir", f"reports/paper_runs/{RUN_NAME}"]
+        argv = [
+            "src/paper_dashboard.py",
+            "--host", self.dashboard_host,
+            "--port", str(self.dashboard_port),
+            "--dir", f"reports/paper_runs/{RUN_NAME}",
+        ]
         self.start_process("dashboard", argv, pid_path, reason)
 
     def file_age_sec(self, path: Path) -> int | None:
@@ -333,6 +339,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--project-root", default=str(Path(__file__).resolve().parents[1]))
     parser.add_argument("--python", default=sys.executable)
+    parser.add_argument("--dashboard-host", default="127.0.0.1")
     parser.add_argument("--dashboard-port", type=int, default=8768)
     parser.add_argument("--loop-sec", type=int, default=15)
     parser.add_argument("--stale-sec", type=int, default=90)

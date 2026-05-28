@@ -1,0 +1,38 @@
+services:
+  paper:
+    build: .
+    image: 3pips-paper:latest
+    container_name: 3pips-paper
+    restart: unless-stopped
+    environment:
+      TZ: Europe/Moscow
+      PYTHONUNBUFFERED: "1"
+      TBANK_TOKEN: ${TBANK_TOKEN:-}
+      TBANK_TOKEN_READONLY: ${TBANK_TOKEN_READONLY:-}
+      TINKOFF_TOKEN: ${TINKOFF_TOKEN:-}
+    ports:
+      - "127.0.0.1:8768:8768"
+    volumes:
+      - ./reports/runtime:/app/reports/runtime
+      - ./reports/paper_runs:/app/reports/paper_runs
+      - ./reports/archives:/app/reports/archives
+
+  archive:
+    image: 3pips-paper:latest
+    container_name: 3pips-archive
+    restart: unless-stopped
+    depends_on:
+      - paper
+    environment:
+      TZ: Europe/Moscow
+      PYTHONUNBUFFERED: "1"
+    command: >
+      sh -c "while true; do
+      python scripts/archive_paper_run.py --project-root /app --keep-days 14;
+      sleep 86400;
+      done"
+    volumes:
+      - ./reports/runtime:/app/reports/runtime
+      - ./reports/paper_runs:/app/reports/paper_runs
+      - ./reports/archives:/app/reports/archives
+
