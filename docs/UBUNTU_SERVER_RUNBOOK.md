@@ -76,12 +76,44 @@ tail -f /opt/3pips/reports/runtime/v7_paper_supervisor_20260525.log
 /opt/3pips/reports/archives/
 ```
 
+Отдельно каждый день собирается raw ZIP за прошедшую сессию. Если настроен SMTP, этот ZIP уходит на:
+
+```text
+etc00051@yandex.ru
+```
+
 Проверить архиватор:
 
 ```bash
 systemctl list-timers 3pips-archive.timer --no-pager
 sudo systemctl start 3pips-archive.service
 ls -lh /opt/3pips/reports/archives/
+```
+
+Однократная настройка почтовой отправки:
+
+```bash
+sudo mkdir -p /opt/3pips/secrets
+sudo nano /opt/3pips/secrets/archive_smtp_password.txt
+sudo chmod 600 /opt/3pips/secrets/archive_smtp_password.txt
+sudo chown 3pips:3pips /opt/3pips/secrets/archive_smtp_password.txt
+sudo nano /etc/3pips/3pips.env
+sudo systemctl restart 3pips-archive.timer
+```
+
+В `/etc/3pips/3pips.env` должны быть:
+
+```text
+ARCHIVE_EMAIL_ENABLED=1
+ARCHIVE_EMAIL_TO=etc00051@yandex.ru
+ARCHIVE_EMAIL_FROM=etc00051@yandex.ru
+ARCHIVE_SMTP_HOST=smtp.yandex.ru
+ARCHIVE_SMTP_PORT=465
+ARCHIVE_SMTP_USER=etc00051@yandex.ru
+ARCHIVE_SMTP_PASSWORD_FILE=/opt/3pips/secrets/archive_smtp_password.txt
+ARCHIVE_SMTP_USE_SSL=1
+ARCHIVE_SMTP_STARTTLS=0
+ARCHIVE_DAILY_TIME=23:59
 ```
 
 Проверить health всех контуров:
@@ -196,7 +228,7 @@ Supervisor держит живыми:
 Забрать все архивы себе:
 
 ```bash
-scp user@SERVER_IP:/opt/3pips/reports/archives/*.tar.gz .
+scp user@SERVER_IP:/opt/3pips/reports/archives/* .
 ```
 
 Забрать всю рабочую историю без упаковки:

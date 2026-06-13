@@ -42,7 +42,37 @@ git pull
 
 ```bash
 cd /opt/3pips
-sudo docker compose up -d --build
+sudo docker compose --env-file /etc/3pips/3pips.env up -d --build
+```
+
+Если нужен ежедневный raw ZIP на почту, заранее положить SMTP-пароль:
+
+```bash
+cd /opt/3pips
+mkdir -p secrets
+nano secrets/archive_smtp_password.txt
+chmod 600 secrets/archive_smtp_password.txt
+```
+
+И включить в окружении:
+
+```bash
+sudo nano /etc/3pips/3pips.env
+```
+
+Минимально:
+
+```text
+ARCHIVE_EMAIL_ENABLED=1
+ARCHIVE_EMAIL_TO=etc00051@yandex.ru
+ARCHIVE_EMAIL_FROM=etc00051@yandex.ru
+ARCHIVE_SMTP_HOST=smtp.yandex.ru
+ARCHIVE_SMTP_PORT=465
+ARCHIVE_SMTP_USER=etc00051@yandex.ru
+ARCHIVE_SMTP_PASSWORD_FILE=/opt/3pips/secrets/archive_smtp_password.txt
+ARCHIVE_SMTP_USE_SSL=1
+ARCHIVE_SMTP_STARTTLS=0
+ARCHIVE_DAILY_TIME=23:59
 ```
 
 ## 4. Проверить
@@ -56,23 +86,23 @@ sudo docker compose logs -f paper
 
 ```bash
 cd /opt/3pips
-sudo docker compose down
+sudo docker compose --env-file /etc/3pips/3pips.env down
 ```
 
 ## 6. Перезапустить
 
 ```bash
 cd /opt/3pips
-sudo docker compose restart paper
+sudo docker compose --env-file /etc/3pips/3pips.env restart paper
 ```
 
 ## 7. Обновить
 
 ```bash
 cd /opt/3pips
-sudo docker compose down
+sudo docker compose --env-file /etc/3pips/3pips.env down
 git pull
-sudo docker compose up -d --build
+sudo docker compose --env-file /etc/3pips/3pips.env up -d --build
 ```
 
 ## 7.1 Включить автообновление
@@ -146,14 +176,14 @@ http://127.0.0.1:8768/
 ## 10. Забрать архивы
 
 ```bash
-scp user@SERVER_IP:/opt/3pips/reports/archives/*.tar.gz .
+scp user@SERVER_IP:/opt/3pips/reports/archives/* .
 ```
 
 ## 11. Что запускается
 
 ```text
 paper      - сам бот, supervisor и dashboard
-archive    - ежедневная упаковка истории в reports/archives
+archive    - ежедневная упаковка истории в reports/archives и raw ZIP на почту
 ```
 
 Сейчас это paper-бот, не реальный live.

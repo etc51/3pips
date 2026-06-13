@@ -9,6 +9,7 @@ RUN_NAME="${AUTOUPDATE_RUN_NAME:-v7_live_20260525}"
 LOG_PATH="${AUTOUPDATE_LOG_PATH:-${PROJECT_ROOT}/reports/runtime/docker_autoupdate.log}"
 STATE_PATH="${AUTOUPDATE_STATE_PATH:-${PROJECT_ROOT}/reports/runtime/docker_autoupdate_state.json}"
 LOCK_PATH="${AUTOUPDATE_LOCK_PATH:-${PROJECT_ROOT}/reports/runtime/docker_autoupdate.lock}"
+DOCKER_ENV_FILE="${DOCKER_ENV_FILE:-/etc/3pips/3pips.env}"
 
 mkdir -p "$(dirname "$LOG_PATH")"
 mkdir -p "$(dirname "$STATE_PATH")"
@@ -77,9 +78,9 @@ if [[ "$REQUIRE_IDLE" == "1" ]]; then
   fi
 fi
 
-log "update_start current=$current_head remote=$remote_head"
+log "update_start current=$current_head remote=$remote_head env_file=$DOCKER_ENV_FILE"
 git pull --ff-only "$REMOTE_NAME" "$BRANCH_NAME"
-docker compose up -d --build
+docker compose --env-file "$DOCKER_ENV_FILE" up -d --build
 
 python3 - "$STATE_PATH" "$current_head" "$remote_head" <<'PY'
 from __future__ import annotations

@@ -29,12 +29,22 @@ services:
     environment:
       TZ: Europe/Moscow
       PYTHONUNBUFFERED: "1"
-    command: >
-      sh -c "while true; do
-      python scripts/archive_paper_run.py --project-root /app --keep-days 14;
-      sleep 86400;
-      done"
+      ARCHIVE_RUN_NAME: ${ARCHIVE_RUN_NAME:-v7_live_20260525}
+      ARCHIVE_KEEP_DAYS: ${ARCHIVE_KEEP_DAYS:-14}
+      ARCHIVE_DAILY_TIME: ${ARCHIVE_DAILY_TIME:-23:59}
+      ARCHIVE_LOOP_CHECK_SEC: ${ARCHIVE_LOOP_CHECK_SEC:-30}
+      ARCHIVE_EMAIL_ENABLED: ${ARCHIVE_EMAIL_ENABLED:-0}
+      ARCHIVE_EMAIL_TO: ${ARCHIVE_EMAIL_TO:-etc00051@yandex.ru}
+      ARCHIVE_EMAIL_FROM: ${ARCHIVE_EMAIL_FROM:-etc00051@yandex.ru}
+      ARCHIVE_SMTP_HOST: ${ARCHIVE_SMTP_HOST:-smtp.yandex.ru}
+      ARCHIVE_SMTP_PORT: ${ARCHIVE_SMTP_PORT:-465}
+      ARCHIVE_SMTP_USER: ${ARCHIVE_SMTP_USER:-etc00051@yandex.ru}
+      ARCHIVE_SMTP_USE_SSL: ${ARCHIVE_SMTP_USE_SSL:-1}
+      ARCHIVE_SMTP_STARTTLS: ${ARCHIVE_SMTP_STARTTLS:-0}
+      ARCHIVE_SMTP_PASSWORD_FILE: /opt/3pips/secrets/archive_smtp_password.txt
+    command: sh /app/scripts/docker_archive_loop.sh
     volumes:
+      - ./secrets:/opt/3pips/secrets:ro
       - ./reports/runtime:/app/reports/runtime
       - ./reports/paper_runs:/app/reports/paper_runs
       - ./reports/archives:/app/reports/archives
