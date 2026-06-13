@@ -75,6 +75,42 @@ git pull
 sudo docker compose up -d --build
 ```
 
+## 7.1 Включить автообновление
+
+Автообновление подтягивает только то, что уже запушено в GitHub.
+По умолчанию проверка идет каждые `10` минут и обновление пропускается, если есть открытые позиции.
+
+```bash
+cd /opt/3pips
+chmod +x scripts/docker_autoupdate.sh
+sudo mkdir -p /etc/3pips
+sudo cp deploy/3pips-docker-autoupdate.service /etc/systemd/system/
+sudo cp deploy/3pips-docker-autoupdate.timer /etc/systemd/system/
+sudo cp deploy/3pips.env.example /etc/3pips/3pips.env
+sudo systemctl daemon-reload
+sudo systemctl enable 3pips-docker-autoupdate.timer
+sudo systemctl start 3pips-docker-autoupdate.timer
+```
+
+Проверить таймер:
+
+```bash
+systemctl list-timers 3pips-docker-autoupdate.timer --no-pager
+```
+
+Запустить проверку вручную:
+
+```bash
+sudo systemctl start 3pips-docker-autoupdate.service
+```
+
+Посмотреть лог автообновления:
+
+```bash
+tail -f /opt/3pips/reports/runtime/docker_autoupdate.log
+cat /opt/3pips/reports/runtime/docker_autoupdate_state.json
+```
+
 ## 8. Dashboard
 
 С сервера dashboard доступен на:

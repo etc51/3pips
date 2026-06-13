@@ -1,0 +1,11 @@
+[Unit]
+Description=Run 3pips Docker auto-update every 10 minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=10min
+Persistent=true
+Unit=3pips-docker-autoupdate.service
+
+[Install]
+WantedBy=timers.target
