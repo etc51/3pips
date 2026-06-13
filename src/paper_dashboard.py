@@ -19,6 +19,29 @@ LOCAL_SPEC_CACHE: dict[str, tuple[float, float]] | None = None
 PORTFOLIO_CAPITAL_RUB = 200_000.0
 
 
+def expected_session_status(portfolio: str, now: datetime | None = None) -> tuple[str, str] | None:
+    current = now or datetime.now()
+    if current.weekday() >= 5:
+        return "рынок закрыт", "сегодня выходной, потока не будет"
+
+    minutes = current.hour * 60 + current.minute
+    portfolio_key = (portfolio or "").lower()
+
+    if "stock" in portfolio_key:
+        if minutes < 10 * 60 or minutes > (18 * 60 + 45):
+            return "вне сессии", "активная сессия акций сейчас закрыта"
+        return None
+
+    if portfolio_key == "neo":
+        if minutes > (23 * 60 + 50):
+            return "вне сессии", "торговое окно neo сейчас закрыто"
+        return None
+
+    if minutes < (9 * 60) or minutes > (23 * 60 + 50):
+        return "вне сессии", "активная фьючерсная сессия сейчас закрыта"
+    return None
+
+
 def load_local_specs() -> dict[str, tuple[float, float]]:
     global LOCAL_SPEC_CACHE
     if LOCAL_SPEC_CACHE is not None:
@@ -779,8 +802,12 @@ def build_state(base_dir: Path) -> dict:
             startup = startup_by_key.get(key, {})
             startup_reason = startup.get("reason") or ""
             startup_state = str(startup.get("status") or "")
+            session_hint = expected_session_status(portfolio)
             if startup_state == "skipped":
                 continue
+            elif session_hint is not None:
+                state, comment = session_hint
+                last = startup.get("last_price")
             elif startup_state == "loaded":
                 state = "нет потока"
                 comment = "подписан, ждём данные потока"
