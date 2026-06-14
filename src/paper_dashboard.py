@@ -225,6 +225,19 @@ def human_reason(reason: object) -> str:
     return out
 
 
+def human_email_status(status: object) -> str:
+    text = "" if status is None else str(status)
+    mapping = {
+        "sent": "отправлено",
+        "disabled_missing_smtp": "почта не настроена",
+        "skipped_already_sent": "уже отправляли",
+        "skipped_same_incident": "тот же инцидент",
+    }
+    if text.startswith("send_failed:"):
+        return f"ошибка отправки: {text.split(':', 1)[1]}"
+    return mapping.get(text, text or "-")
+
+
 def human_roll_status(status: object) -> str:
     text = "" if status is None else str(status)
     mapping = {
@@ -457,6 +470,8 @@ def build_state(base_dir: Path) -> dict:
             roll_state_by_portfolio[portfolio] = roll_state
     heartbeat = read_csv(base_dir / "paper_monitor_heartbeat.csv")
     summary = read_csv(base_dir / "paper_execution_summary.csv")
+    autonomy_manifest = read_json(REPORTS / "autonomy" / "latest" / "latest_manifest.json")
+    autonomy_email = read_json(REPORTS / "autonomy" / "latest" / "latest_email_status.json")
     open_positions = []
     for portfolio in portfolio_names:
         opened = read_json(portfolio_path(base_dir, portfolio, "paper_open_positions.json"))
@@ -756,6 +771,23 @@ def build_state(base_dir: Path) -> dict:
         row = summary.tail(1).iloc[0].to_dict()
         exec_summary = {k: (None if pd.isna(v) else v) for k, v in row.items()}
 
+    autonomy = {}
+    if isinstance(autonomy_manifest, dict):
+        autonomy = {
+            "trade_date": autonomy_manifest.get("trade_date"),
+            "generated_at": autonomy_manifest.get("generated_at"),
+            "overall": autonomy_manifest.get("overall") if isinstance(autonomy_manifest.get("overall"), dict) else {},
+            "open_positions": autonomy_manifest.get("open_positions") if isinstance(autonomy_manifest.get("open_positions"), dict) else {},
+            "recommendations": autonomy_manifest.get("recommendations") if isinstance(autonomy_manifest.get("recommendations"), list) else [],
+            "top_killer_tickers": autonomy_manifest.get("top_killer_tickers") if isinstance(autonomy_manifest.get("top_killer_tickers"), list) else [],
+            "top_killer_families": autonomy_manifest.get("top_killer_families") if isinstance(autonomy_manifest.get("top_killer_families"), list) else [],
+            "archive": autonomy_manifest.get("archive"),
+            "roll_watch": autonomy_manifest.get("roll_watch") if isinstance(autonomy_manifest.get("roll_watch"), list) else [],
+        }
+    if isinstance(autonomy_email, dict):
+        autonomy["email_status"] = human_email_status(autonomy_email.get("status"))
+        autonomy["email_sent"] = autonomy_email.get("sent")
+
     return {
         "base_dir": str(base_dir),
         "stats": stats,
@@ -770,6 +802,7 @@ def build_state(base_dir: Path) -> dict:
         "market_now": market_now,
         "heartbeat": heart,
         "execution_summary": exec_summary,
+        "autonomy": autonomy,
     }
 
 
@@ -851,6 +884,10 @@ HTML = r"""<!doctype html>
     .pill.block { background: rgba(255, 102, 112, 0.16); color: var(--bad); }
     .table-wrap { overflow-x: auto; }
     .empty { color: var(--muted); padding: 14px; font-size: 13px; }
+    .autonomy-box { padding: 14px; display: grid; gap: 10px; }
+    .autonomy-meta { display: flex; flex-wrap: wrap; gap: 14px; color: var(--muted); font-size: 13px; }
+    .autonomy-list { margin: 0; padding-left: 18px; }
+    .autonomy-list li { margin: 6px 0; line-height: 1.35; }
     @media (max-width: 1050px) {
       .cards { grid-template-columns: repeat(2, minmax(140px, 1fr)); }
       .two { grid-template-columns: 1fr; }
@@ -880,6 +917,10 @@ HTML = r"""<!doctype html>
     <section>
       <h2>Открытые позиции</h2>
       <div id="positions"></div>
+    </section>
+    <section>
+      <h2>Авторазбор дня</h2>
+      <div id="autonomySummary"></div>
     </section>
     <section>
       <h2>Переход контрактов</h2>
@@ -959,6 +1000,36 @@ HTML = r"""<!doctype html>
         table(document.getElementById('positionsTable'), [
           ["Контур","portfolio"], ["Режим","contour"], ["Тикер","ticker"], ["Напр.","direction"], ["Qty","qty"], ["ГО ₽","margin_rub",false,2], ["Стоп ₽","full_stop_risk_rub",false,2], ["Entry","entry_price"], ["Last","last_price"], ["Mark","mark_price"], ["Stop","stop_price"], ["Тики","unrealized_ticks",true,2], ["Грязными ₽","gross_pnl_rub",true,2], ["Комиссия ₽","fees_rub",false,2], ["Сейчас ₽","unrealized_net_rub",true,2], ["Открыта","opened_at"]
         ], positions);
+      }
+      const auto = data.autonomy || {};
+      const autoOverall = auto.overall || {};
+      const autoOpen = auto.open_positions || {};
+      const autoRecs = auto.recommendations || [];
+      const autoKillers = auto.top_killer_tickers || [];
+      const autoEl = document.getElementById('autonomySummary');
+      if (!auto.trade_date) {
+        autoEl.innerHTML = '<div class="empty">Авторазбор дня ещё не собран</div>';
+      } else {
+        const killerText = autoKillers.length
+          ? autoKillers.slice(0, 3).map(x => `${x.group}: ${fmt(x.net_rub, 2)} ₽`).join(' | ')
+          : 'нет';
+        const recHtml = autoRecs.length
+          ? `<ul class="autonomy-list">${autoRecs.map(x => `<li>${x}</li>`).join('')}</ul>`
+          : '<div class="empty">Рекомендаций пока нет</div>';
+        autoEl.innerHTML = `
+          <div class="autonomy-box">
+            <div class="autonomy-meta">
+              <span>Дата: ${auto.trade_date || '-'}</span>
+              <span>Net: ${fmt(autoOverall.net_rub, 2)} ₽</span>
+              <span>Сделок: ${autoOverall.trades ?? '-'}</span>
+              <span>Win rate: ${fmt(autoOverall.win_rate_pct, 2)}%</span>
+              <span>Открытых: ${autoOpen.count ?? '-'}</span>
+              <span>Открытый PnL: ${fmt(autoOpen.net_rub, 2)} ₽</span>
+              <span>Почта: ${auto.email_status || '-'}</span>
+            </div>
+            <div><strong>Главные killers:</strong> ${killerText}</div>
+            ${recHtml}
+          </div>`;
       }
       window.scrollTo(sx, sy);
       refreshing = false;
