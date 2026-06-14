@@ -26,6 +26,9 @@ def expected_session_status(portfolio: str, now: datetime | None = None) -> tupl
 
     minutes = current.hour * 60 + current.minute
     portfolio_key = (portfolio or "").lower()
+    futures_start = 10 * 60 + 15
+    futures_new_entry_stop = 17 * 60 + 45
+    futures_end = 23 * 60 + 50
 
     if "stock" in portfolio_key:
         if minutes < 10 * 60 or minutes > (18 * 60 + 45):
@@ -33,12 +36,14 @@ def expected_session_status(portfolio: str, now: datetime | None = None) -> tupl
         return None
 
     if portfolio_key == "neo":
-        if minutes > (23 * 60 + 50):
+        if minutes > futures_end:
             return "вне сессии", "торговое окно neo сейчас закрыто"
         return None
 
-    if minutes < (9 * 60) or minutes > (23 * 60 + 50):
+    if minutes < futures_start or minutes > futures_end:
         return "вне сессии", "активная фьючерсная сессия сейчас закрыта"
+    if minutes >= futures_new_entry_stop:
+        return "вне окна входа", "после 17:45 новые входы закрыты, открытые позиции только сопровождаются"
     return None
 
 

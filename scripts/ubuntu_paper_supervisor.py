@@ -210,8 +210,8 @@ class Supervisor:
             "--gpt-shadow-log", f"reports/paper_runs/{RUN_NAME}/{name}_gpt_shadow_trades.csv",
             "--health-log", f"reports/paper_runs/{RUN_NAME}/{name}_health.json",
         ]
-        if name == "classic_core":
-            args += ["--no-new-after", "17:45"]
+        if name != "neo":
+            args += ["--no-trade-before", "10:15", "--no-new-after", "17:45"]
         if name == "neo":
             args += ["--no-new-after", "19:00", "--force-close-at", "23:50"]
         return args
