@@ -176,6 +176,8 @@ def human_reason(reason: object) -> str:
         return "риск: пауза до завтра, защищаем дневной плюс"
     if text.startswith("risk_governor profit_guard_aggressive_off"):
         return "риск: после дневного плюса aggressive выключен"
+    if text.startswith("risk_governor observe"):
+        return "риск: новый контракт семьи, режим наблюдения и микро-размер"
     if text.startswith("daily_profit_guard_active"):
         return "риск: защита прибыли, только микро"
     if text.startswith("daily_profit_guard_floor"):
@@ -275,6 +277,7 @@ def human_reason(reason: object) -> str:
         "daily_profit_guard_floor": "защищённый дневной плюс",
         "daily_profit_guard_active": "защита прибыли",
         "daily_profit_guard_aggressive_off": "aggressive выключен защитой прибыли",
+        "observe": "наблюдение",
         "micro": "микро",
         "reduced": "уменьшен",
         "median_cap": "лимит по медианному плюсу",

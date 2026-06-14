@@ -61,8 +61,10 @@ function Start-Portfolio {
         "--risk-profit-guard-drawdown-pct", "0.35",
         "--risk-profit-guard-drawdown-min-rub", "1500",
         "--risk-stop-to-median-cap", "4",
+        "--risk-observe-trades", "5",
         "--stop-limit-emergency-ticks", "2",
         "--actual-exit-model", "stream_stoplimit",
+        "--primary-exit-model", "gpt",
         "--stream-stale-sec", "15",
         "--fallback-poll-sec", "2",
         "--no-new-expiry-days", "5",
@@ -84,6 +86,9 @@ function Start-Portfolio {
         "--gpt-shadow-log", "reports\paper_runs\v7_live_20260525\${Name}_gpt_shadow_trades.csv",
         "--health-log", "reports\paper_runs\v7_live_20260525\${Name}_health.json"
     )
+    if ($Name -eq "classic_core") {
+        $args += @("--no-new-after", "17:45")
+    }
     if ($Name -eq "neo") {
         $args += @("--no-new-after", "19:00", "--force-close-at", "23:50")
     }

@@ -185,8 +185,10 @@ class Supervisor:
             "--risk-profit-guard-drawdown-pct", "0.35",
             "--risk-profit-guard-drawdown-min-rub", "1500",
             "--risk-stop-to-median-cap", "4",
+            "--risk-observe-trades", "5",
             "--stop-limit-emergency-ticks", "2",
             "--actual-exit-model", "stream_stoplimit",
+            "--primary-exit-model", "gpt",
             "--stream-stale-sec", "15",
             "--fallback-poll-sec", "2",
             "--no-new-expiry-days", "5",
@@ -208,6 +210,8 @@ class Supervisor:
             "--gpt-shadow-log", f"reports/paper_runs/{RUN_NAME}/{name}_gpt_shadow_trades.csv",
             "--health-log", f"reports/paper_runs/{RUN_NAME}/{name}_health.json",
         ]
+        if name == "classic_core":
+            args += ["--no-new-after", "17:45"]
         if name == "neo":
             args += ["--no-new-after", "19:00", "--force-close-at", "23:50"]
         return args

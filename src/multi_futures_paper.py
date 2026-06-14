@@ -183,6 +183,7 @@ class State:
     profile: Profile
     contour: str
     side_fee: float
+    primary_exit_model: str = "profile"
     candles: deque[dict] = field(default_factory=lambda: deque(maxlen=180))
     position: Position | None = None
     attempts: int = 0
@@ -198,6 +199,10 @@ class State:
     risk_mode: str = "normal"
     risk_limit_rub: float = DEFAULT_MAX_FULL_STOP_RUB
     risk_reason: str = ""
+    active_stop_ticks: int = 0
+    active_trail_ticks: int = 0
+    active_trail_arm_ticks: int = 0
+    active_exit_mode: str = ""
     shadow_positions: dict[str, Position] = field(default_factory=dict)
     shadow_closed: dict[str, bool] = field(default_factory=dict)
     gpt_shadow_position: Position | None = None
@@ -342,6 +347,7 @@ class RiskGovernor:
         stop_to_median_reduced: float,
         stop_to_median_micro: float,
         stop_to_median_cap: float,
+        observe_trades: int,
         probation_trades: int,
     ) -> None:
         self.path = path
@@ -354,9 +360,11 @@ class RiskGovernor:
         self.stop_to_median_reduced = float(stop_to_median_reduced)
         self.stop_to_median_micro = float(stop_to_median_micro)
         self.stop_to_median_cap = float(stop_to_median_cap)
+        self.observe_trades = int(observe_trades)
         self.probation_trades = int(probation_trades)
         self.profile_stats: dict[str, dict] = {}
         self.family_stats: dict[str, dict] = {}
+        self.contract_stats: dict[str, dict] = {}
         self.global_stats: dict = self._empty_stats()
         self.family_days: dict[str, dict] = {}
         self.global_days: dict[str, dict] = {}
@@ -439,6 +447,10 @@ class RiskGovernor:
     def family_key(st: State) -> str:
         return state_family(st)
 
+    @staticmethod
+    def contract_key(st: State) -> str:
+        return f"{state_family(st)}|{st.spec.secid}"
+
     def _day_key(self, family: str, date_text: str | None = None) -> str:
         return f"{family}|{date_text or datetime.now().strftime('%Y-%m-%d')}"
 
@@ -517,10 +529,13 @@ class RiskGovernor:
         family = self.family_key(st)
         date_text = self._date_from_closed_at(closed_at)
         profile_key = self.profile_key(st)
+        contract_key = self.contract_key(st)
         profile_stats = self.profile_stats.setdefault(profile_key, self._empty_stats())
         family_stats = self.family_stats.setdefault(family, self._empty_stats())
+        contract_stats = self.contract_stats.setdefault(contract_key, self._empty_stats())
         self._record_stats(profile_stats, net, gross, fees)
         self._record_stats(family_stats, net, gross, fees)
+        self._record_stats(contract_stats, net, gross, fees)
         self._record_stats(self.global_stats, net, gross, fees)
         self._record_day(family, date_text, net)
         self._record_global_day(date_text, net)
@@ -529,6 +544,7 @@ class RiskGovernor:
     def rebuild_from_trade_log(self, path: Path, states: list[State]) -> None:
         self.profile_stats = {}
         self.family_stats = {}
+        self.contract_stats = {}
         self.global_stats = self._empty_stats()
         self.family_days = {}
         self.global_days = {}
@@ -599,6 +615,7 @@ class RiskGovernor:
 
         profile_stats = self.profile_stats.get(self.profile_key(st), self._empty_stats())
         family_stats = self.family_stats.get(family, self._empty_stats())
+        contract_stats = self.contract_stats.get(self.contract_key(st), self._empty_stats())
         profile_median, profile_positive_count = self._median_win_with_count(profile_stats)
         family_median, family_positive_count = self._median_win_with_count(family_stats)
         global_median, global_positive_count = self._median_win_with_count(self.global_stats)
@@ -618,6 +635,7 @@ class RiskGovernor:
 
         profile_trades = int(profile_stats.get("trades") or 0)
         family_trades = int(family_stats.get("trades") or 0)
+        contract_trades = int(contract_stats.get("trades") or 0)
         family_profit = float(family_stats.get("gross_profit") or 0.0)
         family_net = float(family_stats.get("net") or 0.0)
         family_losses = int(family_stats.get("losses") or 0)
@@ -628,9 +646,16 @@ class RiskGovernor:
         profile_worst_abs = abs(float(profile_stats.get("worst_loss") or 0.0))
         source = st.profile.source_secid or st.profile.secid
 
-        if source != st.spec.secid and profile_trades < self.probation_trades:
-            mode = "micro"
-            reasons.append(f"probation_new_contract trades={profile_trades}/{self.probation_trades}")
+        if source != st.spec.secid:
+            if contract_trades < self.observe_trades:
+                mode = "observe"
+                reasons.append(
+                    f"roll_observe new_contract={st.spec.secid} source={source} "
+                    f"trades={contract_trades}/{self.observe_trades}"
+                )
+            elif contract_trades < self.probation_trades:
+                mode = "micro"
+                reasons.append(f"probation_new_contract trades={contract_trades}/{self.probation_trades}")
         if global_guard_active:
             mode = "micro"
             reasons.append(
@@ -677,7 +702,7 @@ class RiskGovernor:
             mode = "micro"
             reasons.append("recent_losses=3")
 
-        if mode == "micro":
+        if mode in {"observe", "micro"}:
             limit = min(base_limit, self.micro_full_stop_rub)
         elif mode == "reduced":
             limit = min(base_limit, self.reduced_full_stop_rub)
@@ -723,9 +748,11 @@ class RiskGovernor:
             "stop_to_median_reduced": self.stop_to_median_reduced,
             "stop_to_median_micro": self.stop_to_median_micro,
             "stop_to_median_cap": self.stop_to_median_cap,
+            "observe_trades": self.observe_trades,
             "probation_trades": self.probation_trades,
             "profile_stats": self.profile_stats,
             "family_stats": self.family_stats,
+            "contract_stats": self.contract_stats,
             "global_stats": self.global_stats,
             "family_days": self.family_days,
             "global_days": self.global_days,
@@ -786,6 +813,8 @@ def paper_sizing(
     direction: Direction | str,
     side_fee: float,
     max_full_stop_rub: float,
+    stop_ticks: int | None = None,
+    exit_mode: str = "",
 ) -> SizingDecision:
     per_contract = spec.margin_buy if direction == "long" else spec.margin_sell
     if per_contract <= 0:
@@ -799,7 +828,8 @@ def paper_sizing(
         budget = min(free_margin, per_position_limit)
         margin_qty = max(0, int(budget // per_contract))
 
-    gross_stop_per_contract = max(0.0, profile.stop_ticks * spec.step_price)
+    resolved_stop_ticks = max(1, int(stop_ticks if stop_ticks is not None else profile.stop_ticks or 1))
+    gross_stop_per_contract = max(0.0, resolved_stop_ticks * spec.step_price)
     round_turn_fee_per_contract = max(0.0, 2 * side_fee)
     full_stop_per_contract = gross_stop_per_contract + round_turn_fee_per_contract
     risk_qty = None
@@ -812,7 +842,8 @@ def paper_sizing(
     qty = max(0, qty)
     full_stop_rub = qty * full_stop_per_contract
     reason = (
-        f"sizing margin_qty={margin_qty} risk_qty={risk_qty if risk_qty is not None else '-'} "
+        f"sizing exit={exit_mode or 'profile_ticks'} stop={resolved_stop_ticks}t "
+        f"margin_qty={margin_qty} risk_qty={risk_qty if risk_qty is not None else '-'} "
         f"full_stop_1lot={full_stop_per_contract:.2f} full_stop={full_stop_rub:.2f} "
         f"max_full_stop={max_full_stop_rub:.0f}"
     )
@@ -845,7 +876,7 @@ def percent_to_ticks(percent: float, reference_price: float, spec: Spec) -> int:
 def gpt_shadow_exit_ticks(profile: Profile, spec: Spec, reference_price: float | None = None) -> GptExitTicks:
     ref = float(reference_price or 0.0)
     if ref <= 0:
-        ref = float(spec.last_price or spec.last_rub or 0.0)
+        ref = float(spec.last_price or 0.0)
     mode = (profile.gpt_exit_mode or "").lower()
     if profile.gpt_exit_loaded and mode == "percent":
         return GptExitTicks(
@@ -869,6 +900,62 @@ def gpt_shadow_exit_ticks(profile: Profile, spec: Spec, reference_price: float |
     )
 
 
+def apply_exit_tick_policy(profile: Profile, exit_ticks: GptExitTicks) -> GptExitTicks:
+    stop_ticks = max(1, int(exit_ticks.stop_ticks or 1))
+    if br_small_stop_policy_applies(profile) and stop_ticks < BR_POLICY_MIN_STOP_TICKS:
+        stop_ticks = BR_POLICY_MIN_STOP_TICKS
+    return GptExitTicks(
+        stop_ticks=stop_ticks,
+        trail_ticks=max(1, int(exit_ticks.trail_ticks or 1)),
+        trail_arm_ticks=max(1, int(exit_ticks.trail_arm_ticks or 1)),
+        exit_mode=exit_ticks.exit_mode,
+    )
+
+
+def resolved_profile_exit_ticks(
+    profile: Profile,
+    spec: Spec,
+    reference_price: float | None = None,
+    prefer_gpt: bool = False,
+) -> GptExitTicks:
+    if prefer_gpt and profile.gpt_exit_loaded:
+        return apply_exit_tick_policy(profile, gpt_shadow_exit_ticks(profile, spec, reference_price))
+    return apply_exit_tick_policy(
+        profile,
+        GptExitTicks(
+            stop_ticks=max(1, int(profile.stop_ticks or 1)),
+            trail_ticks=max(1, int(profile.trail_ticks or 1)),
+            trail_arm_ticks=max(1, int(profile.trail_arm_ticks or 1)),
+            exit_mode="profile_ticks",
+        ),
+    )
+
+
+def state_primary_exit_ticks(state: State, reference_price: float | None = None) -> GptExitTicks:
+    return resolved_profile_exit_ticks(
+        state.profile,
+        state.spec,
+        reference_price=reference_price,
+        prefer_gpt=(state.primary_exit_model or "").lower() == "gpt",
+    )
+
+
+def state_active_exit_ticks(state: State) -> GptExitTicks:
+    if state.active_stop_ticks > 0 and state.active_trail_ticks > 0 and state.active_trail_arm_ticks > 0:
+        return GptExitTicks(
+            stop_ticks=max(1, int(state.active_stop_ticks)),
+            trail_ticks=max(1, int(state.active_trail_ticks)),
+            trail_arm_ticks=max(1, int(state.active_trail_arm_ticks)),
+            exit_mode=state.active_exit_mode or "profile_ticks",
+        )
+    reference_price = state.position.entry_price if state.position is not None else (state.last_price or state.spec.last_price)
+    return state_primary_exit_ticks(state, reference_price=reference_price)
+
+
+def state_full_stop_risk_rub(state: State, qty: int) -> float:
+    return full_stop_risk_rub_ticks(state_active_exit_ticks(state).stop_ticks, state.spec, state.side_fee, qty)
+
+
 def fee_ticks(side_fee: float, spec: Spec) -> float:
     return (2 * side_fee / spec.step_price) if spec.step_price else 999.0
 
@@ -886,12 +973,19 @@ def spread_to_stop_metrics(spread_ticks: float | None, stop_ticks: int) -> tuple
     return ratio, "SPREAD_OK", False
 
 
-def profile_can_trade(profile: Profile, side_fee: float, spec: Spec, max_fee_to_stop: float = 0.55) -> tuple[bool, str]:
+def profile_can_trade(
+    profile: Profile,
+    side_fee: float,
+    spec: Spec,
+    max_fee_to_stop: float = 0.55,
+    prefer_gpt_exit: bool = False,
+) -> tuple[bool, str]:
     round_fee_ticks = fee_ticks(side_fee, spec)
-    max_allowed = profile.stop_ticks * max_fee_to_stop
+    stop_ticks = resolved_profile_exit_ticks(profile, spec, spec.last_price or spec.last_rub, prefer_gpt=prefer_gpt_exit).stop_ticks
+    max_allowed = stop_ticks * max_fee_to_stop
     if round_fee_ticks > max_allowed:
-        return False, f"startup_fee_filter fee={round_fee_ticks:.1f}t stop={profile.stop_ticks}t max={max_allowed:.1f}t"
-    return True, f"fee_ok fee={round_fee_ticks:.1f}t stop={profile.stop_ticks}t"
+        return False, f"startup_fee_filter fee={round_fee_ticks:.1f}t stop={stop_ticks}t max={max_allowed:.1f}t"
+    return True, f"fee_ok fee={round_fee_ticks:.1f}t stop={stop_ticks}t"
 
 
 def apply_br_loss_pause(st: State, states: list[State], net: float) -> None:
@@ -1432,6 +1526,7 @@ def signal(state: State, aggressive: bool) -> tuple[Direction | None, str]:
     spread_ticks = levels.get("spread_ticks")
     fee_ticks = (2 * state.side_fee / spec.step_price) if spec.step_price else 999
     recent_range_ticks = max(float(r["high"]) - float(r["low"]) for r in rows[-5:]) / spec.min_step
+    primary_exit = state_primary_exit_ticks(state, state.last_price or last_close)
     state.last_signal_metrics = {
         "last_price": state.last_price,
         "last_close": last_close,
@@ -1451,19 +1546,23 @@ def signal(state: State, aggressive: bool) -> tuple[Direction | None, str]:
         "recent_low": low,
         "long_breakout_margin_ticks": (last_close - high) / spec.min_step,
         "short_breakout_margin_ticks": (low - last_close) / spec.min_step,
+        "stop_ticks": primary_exit.stop_ticks,
+        "trail_ticks": primary_exit.trail_ticks,
+        "trail_arm_ticks": primary_exit.trail_arm_ticks,
+        "exit_mode": primary_exit.exit_mode,
     }
-    max_general_spread = state.profile.stop_ticks * SPREAD_DOMINATES_RATIO
+    max_general_spread = primary_exit.stop_ticks * SPREAD_DOMINATES_RATIO
     if spread_ticks is None or float(spread_ticks) > max_general_spread:
         spread_txt = "-" if spread_ticks is None else f"{float(spread_ticks):.1f}t"
-        return None, f"spread_filter spread={spread_txt} stop={state.profile.stop_ticks}t max={max_general_spread:.1f}t"
+        return None, f"spread_filter spread={spread_txt} stop={primary_exit.stop_ticks}t max={max_general_spread:.1f}t"
     if br_small_stop_policy_applies(state.profile):
-        max_spread = state.profile.stop_ticks * BR_POLICY_MAX_SPREAD_TO_STOP
+        max_spread = primary_exit.stop_ticks * BR_POLICY_MAX_SPREAD_TO_STOP
         if spread_ticks is None or float(spread_ticks) > max_spread:
             spread_txt = "-" if spread_ticks is None else f"{float(spread_ticks):.1f}t"
-            return None, f"brq6_spread_filter spread={spread_txt} stop={state.profile.stop_ticks}t max={max_spread:.1f}t"
+            return None, f"brq6_spread_filter spread={spread_txt} stop={primary_exit.stop_ticks}t max={max_spread:.1f}t"
     vol_ok = avgv > 0 and last_vol >= avgv * vol_mult
-    if fee_ticks > state.profile.stop_ticks * max_fee_to_stop:
-        return None, f"fee_filter fee={fee_ticks:.1f}t stop={state.profile.stop_ticks}t"
+    if fee_ticks > primary_exit.stop_ticks * max_fee_to_stop:
+        return None, f"fee_filter fee={fee_ticks:.1f}t stop={primary_exit.stop_ticks}t"
     if recent_range_ticks < fee_ticks + 2:
         return None, f"range_filter fee={fee_ticks:.1f}t"
     long_book = bid_qty >= ask_qty * book_imbalance if ask_qty > 0 else True
@@ -1635,7 +1734,8 @@ def gpt_profile_signal(state: State, layer: GptShadowLayerConfig | None = None) 
 
 def entry_shadow_flags(st: State, direction: Direction) -> dict:
     metrics = st.last_signal_metrics or {}
-    stop_ticks = max(int(st.profile.stop_ticks or 0), 1)
+    reference_price = float(metrics.get("last_price") or metrics.get("last_close") or st.last_price or st.spec.last_price or 0.0)
+    stop_ticks = max(int(state_primary_exit_ticks(st, reference_price).stop_ticks or 0), 1)
     bid_qty = float(metrics.get("bid_qty") or 0)
     ask_qty = float(metrics.get("ask_qty") or 0)
     if direction == "long":
@@ -1718,6 +1818,7 @@ def write_entry_audit_open(
 ) -> None:
     metrics = st.last_signal_metrics or {}
     flags = entry_shadow_flags(st, direction)
+    exit_ticks = state_active_exit_ticks(st)
     opened_at = st.position.opened_at if st.position is not None else now_str()
     entry_id = f"{opened_at}|{st.contour}|{st.spec.secid}|{direction}|{entry_price:g}"
     append_entry_audit(
@@ -1751,9 +1852,9 @@ def write_entry_audit_open(
             "fee_to_stop_ratio": flags.get("fee_to_stop_ratio"),
             "recent_range_ticks": metrics.get("recent_range_ticks"),
             "breakout_margin_ticks": flags.get("breakout_margin_ticks"),
-            "stop_ticks": st.profile.stop_ticks,
-            "trail_ticks": st.profile.trail_ticks,
-            "trail_arm_ticks": st.profile.trail_arm_ticks,
+            "stop_ticks": exit_ticks.stop_ticks,
+            "trail_ticks": exit_ticks.trail_ticks,
+            "trail_arm_ticks": exit_ticks.trail_arm_ticks,
             "full_stop_risk_rub": sizing.full_stop_rub,
             "risk_mode": risk_decision.mode,
             "risk_reason": risk_decision.reason,
@@ -1770,6 +1871,7 @@ def write_entry_audit_open(
 def write_entry_audit_close(path: Path, st: State, fill_price: float, fill_source: str, ticks: float, net: float) -> None:
     if st.position is None:
         return
+    exit_ticks = state_active_exit_ticks(st)
     entry_id = f"{st.position.opened_at}|{st.contour}|{st.spec.secid}|{st.position.direction}|{st.position.entry_price:g}"
     append_entry_audit(
         path,
@@ -1787,9 +1889,9 @@ def write_entry_audit_close(path: Path, st: State, fill_price: float, fill_sourc
             "exit_source": fill_source,
             "net_rub": round(net, 2),
             "ticks": round(ticks, 3),
-            "stop_ticks": st.profile.stop_ticks,
-            "trail_ticks": st.profile.trail_ticks,
-            "trail_arm_ticks": st.profile.trail_arm_ticks,
+            "stop_ticks": exit_ticks.stop_ticks,
+            "trail_ticks": exit_ticks.trail_ticks,
+            "trail_arm_ticks": exit_ticks.trail_arm_ticks,
         },
     )
 
@@ -1995,6 +2097,7 @@ def update_shadow_models(
 ) -> None:
     if not state.shadow_positions:
         return
+    active_exit = state_active_exit_ticks(state)
     stream_pos = state.shadow_positions.get("stream_stoplimit")
     if stream_pos is not None and not state.shadow_closed.get("stream_stoplimit"):
         move_ticks = (
@@ -2003,8 +2106,8 @@ def update_shadow_models(
             else (stream_pos.entry_price - exit_price) / state.spec.min_step
         )
         fee_ticks = (2 * state.side_fee / state.spec.step_price) if state.spec.step_price else 999
-        if move_ticks >= max(state.profile.trail_arm_ticks, fee_ticks + 1):
-            update_stop(stream_pos, exit_price, state.profile.trail_ticks, state.spec)
+        if move_ticks >= max(active_exit.trail_arm_ticks, fee_ticks + 1):
+            update_stop(stream_pos, exit_price, active_exit.trail_ticks, state.spec)
             min_net_stop = stream_pos.entry_price + (fee_ticks + 0.5) * state.spec.min_step if stream_pos.direction == "long" else stream_pos.entry_price - (fee_ticks + 0.5) * state.spec.min_step
             if stream_pos.direction == "long":
                 stream_pos.stop_price = max(stream_pos.stop_price, round_to_step(min_net_stop, state.spec.min_step))
@@ -2023,8 +2126,8 @@ def update_shadow_models(
             else (candle_pos.entry_price - candle_exit) / state.spec.min_step
         )
         fee_ticks = (2 * state.side_fee / state.spec.step_price) if state.spec.step_price else 999
-        if move_ticks >= max(state.profile.trail_arm_ticks, fee_ticks + 1):
-            update_stop(candle_pos, candle_exit, state.profile.trail_ticks, state.spec)
+        if move_ticks >= max(active_exit.trail_arm_ticks, fee_ticks + 1):
+            update_stop(candle_pos, candle_exit, active_exit.trail_ticks, state.spec)
             min_net_stop = candle_pos.entry_price + (fee_ticks + 0.5) * state.spec.min_step if candle_pos.direction == "long" else candle_pos.entry_price - (fee_ticks + 0.5) * state.spec.min_step
             if candle_pos.direction == "long":
                 candle_pos.stop_price = max(candle_pos.stop_price, round_to_step(min_net_stop, state.spec.min_step))
@@ -2061,6 +2164,10 @@ def process_open_state_exit(
             if all_shadow_models_closed(st):
                 st.shadow_positions = {}
                 st.shadow_closed = {}
+                st.active_stop_ticks = 0
+                st.active_trail_ticks = 0
+                st.active_trail_arm_ticks = 0
+                st.active_exit_mode = ""
         return
 
     pos = st.position
@@ -2083,6 +2190,7 @@ def process_open_state_exit(
     actual_trigger_price = actual_trigger_override if actual_trigger_override is not None else exit_price
     actual_trigger_source = actual_trigger_source_override or exit_source
     fee_ticks = (2 * st.side_fee / st.spec.step_price) if st.spec.step_price else 999
+    active_exit = state_active_exit_ticks(st)
     expiry_close_days = float(getattr(args, "expiry_force_close_days", 0.0))
     dte = days_to_expiration(st.spec)
     if force_exit_reason:
@@ -2103,8 +2211,8 @@ def process_open_state_exit(
                 if pos.direction == "long"
                 else (pos.entry_price - actual_trigger_price) / st.spec.min_step
             )
-            if move_ticks >= max(st.profile.trail_arm_ticks, fee_ticks + 1):
-                update_stop(pos, actual_trigger_price, st.profile.trail_ticks, st.spec)
+            if move_ticks >= max(active_exit.trail_arm_ticks, fee_ticks + 1):
+                update_stop(pos, actual_trigger_price, active_exit.trail_ticks, st.spec)
                 min_net_stop = pos.entry_price + (fee_ticks + 0.5) * st.spec.min_step if pos.direction == "long" else pos.entry_price - (fee_ticks + 0.5) * st.spec.min_step
                 if pos.direction == "long":
                     pos.stop_price = max(pos.stop_price, round_to_step(min_net_stop, st.spec.min_step))
@@ -2119,8 +2227,8 @@ def process_open_state_exit(
             if pos.direction == "long"
             else (pos.entry_price - exit_price) / st.spec.min_step
         )
-        if move_ticks >= max(st.profile.trail_arm_ticks, fee_ticks + 1):
-            update_stop(pos, exit_price, st.profile.trail_ticks, st.spec)
+        if move_ticks >= max(active_exit.trail_arm_ticks, fee_ticks + 1):
+            update_stop(pos, exit_price, active_exit.trail_ticks, st.spec)
             min_net_stop = pos.entry_price + (fee_ticks + 0.5) * st.spec.min_step if pos.direction == "long" else pos.entry_price - (fee_ticks + 0.5) * st.spec.min_step
             if pos.direction == "long":
                 pos.stop_price = max(pos.stop_price, round_to_step(min_net_stop, st.spec.min_step))
@@ -2195,6 +2303,10 @@ def process_open_state_exit(
     if all_shadow_models_closed(st):
         st.shadow_positions = {}
         st.shadow_closed = {}
+        st.active_stop_ticks = 0
+        st.active_trail_ticks = 0
+        st.active_trail_arm_ticks = 0
+        st.active_exit_mode = ""
     st.cooldown_until = max(st.cooldown_until, time.monotonic() + 90)
     write_open_positions(Path(args.open_positions_log), states)
 
@@ -2687,12 +2799,13 @@ def write_microstructure_snapshot(
     for st in states:
         if st.contour != "aggressive":
             continue
+        exit_ticks = state_primary_exit_ticks(st, st.last_price or st.spec.last_price)
         levels = best_levels(st.last_order_book, st.spec)
         spread_ratio, spread_class, spread_review = spread_to_stop_metrics(
             levels["spread_ticks"],
-            st.profile.stop_ticks,
+            exit_ticks.stop_ticks,
         )
-        fee_to_stop = fee_ticks(st.side_fee, st.spec) / st.profile.stop_ticks if st.profile.stop_ticks > 0 else None
+        fee_to_stop = fee_ticks(st.side_fee, st.spec) / exit_ticks.stop_ticks if exit_ticks.stop_ticks > 0 else None
         risk_decision = risk.decide(st, base_max_full_stop_rub) if risk is not None else None
         if risk_decision is not None:
             st.risk_mode = risk_decision.mode
@@ -2708,9 +2821,9 @@ def write_microstructure_snapshot(
                 "bid_size_target": levels["bid_size"],
                 "ask_size_target": levels["ask_size"],
                 "spread_ticks_target": levels["spread_ticks"],
-                "stop_ticks": st.profile.stop_ticks,
-                "trail_ticks": st.profile.trail_ticks,
-                "trail_arm_ticks": st.profile.trail_arm_ticks,
+                "stop_ticks": exit_ticks.stop_ticks,
+                "trail_ticks": exit_ticks.trail_ticks,
+                "trail_arm_ticks": exit_ticks.trail_arm_ticks,
                 "spread_to_stop_ratio": round(spread_ratio, 4) if spread_ratio is not None else None,
                 "spread_class": spread_class,
                 "spread_review_flag": spread_review,
@@ -2745,7 +2858,7 @@ def write_microstructure_snapshot(
                     "bid_size": levels["bid_size"],
                     "ask_size": levels["ask_size"],
                     "spread_ticks": levels["spread_ticks"],
-                    "stop_ticks": st.profile.stop_ticks,
+                    "stop_ticks": exit_ticks.stop_ticks,
                     "spread_to_stop_ratio": round(spread_ratio, 4) if spread_ratio is not None else None,
                     "spread_class": spread_class,
                     "last_reason": st.last_reason,
@@ -2856,8 +2969,12 @@ def write_open_positions(path: Path, states: list[State]) -> None:
                 "mark_price": mark_price,
                 "mark_source": mark_source,
                 "stop_price": st.position.stop_price,
-                "full_stop_risk_rub": round(full_stop_risk_rub(st.profile, st.spec, st.side_fee, st.position.qty), 2),
-                "full_stop_gross_rub": round(st.profile.stop_ticks * st.spec.step_price * st.position.qty, 2),
+                "stop_ticks": state_active_exit_ticks(st).stop_ticks,
+                "trail_ticks": state_active_exit_ticks(st).trail_ticks,
+                "trail_arm_ticks": state_active_exit_ticks(st).trail_arm_ticks,
+                "exit_mode": state_active_exit_ticks(st).exit_mode,
+                "full_stop_risk_rub": round(state_full_stop_risk_rub(st, st.position.qty), 2),
+                "full_stop_gross_rub": round(state_active_exit_ticks(st).stop_ticks * st.spec.step_price * st.position.qty, 2),
                 "margin_rub": round(position_margin(st.spec, st.position.direction, st.position.qty), 2),
                 "risk_mode": st.risk_mode,
                 "risk_limit_rub": round(st.risk_limit_rub, 2),
@@ -2895,6 +3012,10 @@ def restore_open_positions(path: Path, states: list[State]) -> int:
             best_raw = row.get("best_price")
             best = float(best_raw) if best_raw not in (None, "") else entry
             opened_at = str(row.get("opened_at") or now_str())
+            stop_ticks = int(float(row.get("stop_ticks") or 0))
+            trail_ticks = int(float(row.get("trail_ticks") or 0))
+            trail_arm_ticks = int(float(row.get("trail_arm_ticks") or 0))
+            exit_mode = str(row.get("exit_mode") or "")
         except Exception as exc:
             print(f"{now_str()} RESTORE skip_bad_position {key} error={exc}", flush=True)
             continue
@@ -2908,6 +3029,10 @@ def restore_open_positions(path: Path, states: list[State]) -> int:
         )
         st.attempts = max(st.attempts, 1)
         st.last_reason = "restored_open_position"
+        st.active_stop_ticks = stop_ticks or state_primary_exit_ticks(st, entry).stop_ticks
+        st.active_trail_ticks = trail_ticks or state_primary_exit_ticks(st, entry).trail_ticks
+        st.active_trail_arm_ticks = trail_arm_ticks or state_primary_exit_ticks(st, entry).trail_arm_ticks
+        st.active_exit_mode = exit_mode or state_primary_exit_ticks(st, entry).exit_mode
         restored += 1
     if restored:
         print(f"{now_str()} RESTORE open_positions count={restored} source={path}", flush=True)
@@ -3132,9 +3257,11 @@ def main() -> None:
     parser.add_argument("--risk-stop-to-median-reduced", type=float, default=7.0)
     parser.add_argument("--risk-stop-to-median-micro", type=float, default=10.0)
     parser.add_argument("--risk-stop-to-median-cap", type=float, default=4.0)
+    parser.add_argument("--risk-observe-trades", type=int, default=5)
     parser.add_argument("--risk-probation-trades", type=int, default=30)
     parser.add_argument("--stop-limit-emergency-ticks", type=float, default=2.0)
     parser.add_argument("--actual-exit-model", choices=["stream_stoplimit", "candle_like"], default="stream_stoplimit")
+    parser.add_argument("--primary-exit-model", choices=["profile", "gpt"], default="gpt")
     parser.add_argument("--stream-stale-sec", type=float, default=15.0)
     parser.add_argument("--fallback-poll-sec", type=float, default=2.0)
     parser.add_argument("--no-new-expiry-days", type=float, default=5.0)
@@ -3191,7 +3318,12 @@ def main() -> None:
                 return None
             spec = spec_from_tbank(client, secid, future, info)
             side_fee = commission_side_rub(spec, 1, 0.00025, None)
-            can_trade, fee_reason = profile_can_trade(profile, side_fee, spec)
+            can_trade, fee_reason = profile_can_trade(
+                profile,
+                side_fee,
+                spec,
+                prefer_gpt_exit=(str(getattr(args, "primary_exit_model", "profile")).lower() == "gpt"),
+            )
             if not can_trade:
                 startup_status.append(
                     {
@@ -3248,6 +3380,7 @@ def main() -> None:
                         profile=profile,
                         contour=contour,
                         side_fee=side_fee,
+                        primary_exit_model=str(args.primary_exit_model or "profile"),
                         candles=deque(seeded, maxlen=180),
                         last_price=spec.last_price,
                     )
@@ -3306,6 +3439,7 @@ def main() -> None:
             f"max_total_margin_pct={portfolio.max_total_margin_pct:.2f} "
             f"max_position_margin_pct={portfolio.max_position_margin_pct:.2f} "
             f"max_full_stop_rub={float(args.max_full_stop_rub):.0f} "
+            f"primary_exit_model={args.primary_exit_model} "
             f"no_new_after={args.no_new_after or '-'} force_close_at={args.force_close_at or '-'}"
         )
         started = time.monotonic()
@@ -3329,6 +3463,7 @@ def main() -> None:
             stop_to_median_reduced=float(args.risk_stop_to_median_reduced),
             stop_to_median_micro=float(args.risk_stop_to_median_micro),
             stop_to_median_cap=float(args.risk_stop_to_median_cap),
+            observe_trades=int(args.risk_observe_trades),
             probation_trades=int(args.risk_probation_trades),
         )
         setattr(args, "risk_governor", risk_governor)
@@ -3454,6 +3589,7 @@ def main() -> None:
                             if not risk_decision.allowed:
                                 st.last_reason = f"risk_governor {risk_decision.mode} {risk_decision.reason}"
                                 continue
+                            primary_exit = state_primary_exit_ticks(st, entry_price)
                             sizing = paper_sizing(
                                 portfolio,
                                 states,
@@ -3462,6 +3598,8 @@ def main() -> None:
                                 direction,
                                 st.side_fee,
                                 risk_decision.max_full_stop_rub,
+                                stop_ticks=primary_exit.stop_ticks,
+                                exit_mode=primary_exit.exit_mode,
                             )
                             qty = sizing.qty
                             if qty < 1:
@@ -3471,7 +3609,11 @@ def main() -> None:
                                     st.last_reason = f"risk_filter full_stop_gt_limit {sizing.reason}"
                                 continue
                             st.attempts += 1
-                            st.position = open_position(direction, entry_price, qty, st.profile.stop_ticks, st.profile.trail_ticks, spec)
+                            st.active_stop_ticks = primary_exit.stop_ticks
+                            st.active_trail_ticks = primary_exit.trail_ticks
+                            st.active_trail_arm_ticks = primary_exit.trail_arm_ticks
+                            st.active_exit_mode = primary_exit.exit_mode
+                            st.position = open_position(direction, entry_price, qty, primary_exit.stop_ticks, primary_exit.trail_ticks, spec)
                             st.shadow_positions = {
                                 "stream_stoplimit": clone_position(st.position),
                                 "candle_like": clone_position(st.position),
@@ -3491,6 +3633,7 @@ def main() -> None:
                             print(
                                 f"{now_str()} OPEN {contour} {spec.secid} {direction} qty={qty} "
                                 f"entry={entry_price:g} source={entry_source} stop={st.position.stop_price:g} "
+                                f"exit={primary_exit.exit_mode} {primary_exit.stop_ticks}/{primary_exit.trail_ticks}/{primary_exit.trail_arm_ticks}t "
                                 f"margin={position_margin(spec, direction, qty):.2f} "
                                 f"full_stop_risk={sizing.full_stop_rub:.2f} "
                                 f"risk={risk_decision.mode}/{risk_decision.max_full_stop_rub:.0f} "
