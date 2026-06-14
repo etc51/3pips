@@ -778,6 +778,9 @@ def build_state(base_dir: Path) -> dict:
             "generated_at": autonomy_manifest.get("generated_at"),
             "overall": autonomy_manifest.get("overall") if isinstance(autonomy_manifest.get("overall"), dict) else {},
             "open_positions": autonomy_manifest.get("open_positions") if isinstance(autonomy_manifest.get("open_positions"), dict) else {},
+            "margin_mode": autonomy_manifest.get("margin_mode"),
+            "fee_model": autonomy_manifest.get("fee_model") if isinstance(autonomy_manifest.get("fee_model"), dict) else {},
+            "portfolio_margin_day": autonomy_manifest.get("portfolio_margin_day") if isinstance(autonomy_manifest.get("portfolio_margin_day"), list) else [],
             "recommendations": autonomy_manifest.get("recommendations") if isinstance(autonomy_manifest.get("recommendations"), list) else [],
             "top_killer_tickers": autonomy_manifest.get("top_killer_tickers") if isinstance(autonomy_manifest.get("top_killer_tickers"), list) else [],
             "top_killer_families": autonomy_manifest.get("top_killer_families") if isinstance(autonomy_manifest.get("top_killer_families"), list) else [],
@@ -1010,6 +1013,8 @@ HTML = r"""<!doctype html>
       const auto = data.autonomy || {};
       const autoOverall = auto.overall || {};
       const autoOpen = auto.open_positions || {};
+      const autoFee = auto.fee_model || {};
+      const autoMargin = auto.portfolio_margin_day || [];
       const autoRecs = auto.recommendations || [];
       const autoKillers = auto.top_killer_tickers || [];
       const autoRecurring = auto.recurring_killer_tickers || [];
@@ -1028,6 +1033,12 @@ HTML = r"""<!doctype html>
         const consensusText = autoConsensus.scenario
           ? `${autoConsensus.scenario} (${autoConsensus.beat_base_days || 0}/${autoConsensus.days || 0}, Δ ${fmt(autoConsensus.delta_total_rub, 2)} ₽)`
           : 'нет';
+        const feeText = autoFee.futures_rate_per_side_pct !== undefined && autoFee.futures_rate_per_side_pct !== null
+          ? `Premium ${fmt(autoFee.futures_rate_per_side_pct, 3)}% за сторону`
+          : 'не задано';
+        const marginText = autoMargin.length
+          ? autoMargin.slice(0, 3).map(x => `${x.portfolio}: пик ГО ${fmt(x.peak_used_margin_rub, 0)} ₽, ROI ${fmt(x.return_on_peak_margin_pct, 3)}%`).join(' | ')
+          : 'нет';
         const recHtml = autoRecs.length
           ? `<ul class="autonomy-list">${autoRecs.map(x => `<li>${x}</li>`).join('')}</ul>`
           : '<div class="empty">Рекомендаций пока нет</div>';
@@ -1041,11 +1052,13 @@ HTML = r"""<!doctype html>
               <span>Открытых: ${autoOpen.count ?? '-'}</span>
               <span>Открытый PnL: ${fmt(autoOpen.net_rub, 2)} ₽</span>
               <span>Good/Bad/Killer: ${autoDayCounts.good_day ?? 0}/${autoDayCounts.bad_day ?? 0}/${autoDayCounts.killer_day ?? 0}</span>
+              <span>Комиссия: ${feeText}</span>
               <span>Почта: ${auto.email_status || '-'}</span>
             </div>
             <div><strong>Главные killers:</strong> ${killerText}</div>
             <div><strong>Повторяющиеся killers:</strong> ${recurringText}</div>
             <div><strong>Устойчивый overlay:</strong> ${consensusText}</div>
+            <div><strong>ГО за день:</strong> ${marginText}</div>
             ${recHtml}
           </div>`;
       }

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import shutil
 import sys
 from collections import defaultdict
@@ -29,6 +30,11 @@ from autonomy_common import (  # noqa: E402
 )
 
 
+PREMIUM_FUTURES_RATE = 0.00025
+PREMIUM_FUTURES_RATE_PCT = 0.025
+PREMIUM_FEE_NOTE = "Premium futures fee model: conservative 0.025% of contract notional per side for turnover up to 12M RUB/day; real fee can be lower at higher daily turnover."
+
+
 def trade_file_group(path: Path) -> str:
     name = path.stem
     suffix = "_multi_futures_paper_trades"
@@ -48,6 +54,32 @@ def shadow_file_group(path: Path) -> str:
 
 def load_profiles(path: Path) -> dict[str, dict]:
     return {row["ticker"]: row for row in read_csv_rows(path)}
+
+
+def load_portfolio_config(run_dir: Path) -> dict:
+    path = run_dir / "portfolio_config.json"
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def load_portfolio_capitals(run_dir: Path) -> dict[str, float]:
+    payload = load_portfolio_config(run_dir)
+    portfolios = payload.get("portfolios")
+    out: dict[str, float] = {}
+    if not isinstance(portfolios, dict):
+        return out
+    for name, config in portfolios.items():
+        if not isinstance(config, dict):
+            continue
+        capital = safe_float(config.get("capital"))
+        if capital > 0:
+            out[str(name)] = capital
+    return out
 
 
 def normalize_trade_row(row: dict) -> dict | None:
@@ -548,7 +580,11 @@ def markdown_top(title: str, rows: list[dict], columns: list[str], limit: int = 
     sep = "| " + " | ".join(["---"] * len(columns)) + " |"
     body = []
     for row in rows[:limit]:
-        body.append("| " + " | ".join(str(row.get(col, "")) for col in columns) + " |")
+        values = []
+        for col in columns:
+            value = row.get(col, "")
+            values.append("" if value is None else str(value))
+        body.append("| " + " | ".join(values) + " |")
     return "\n".join([f"## {title}", "", head, sep, *body, ""])
 
 
@@ -579,6 +615,105 @@ def summarize_open_positions(rows: list[dict]) -> dict:
         "count": len(rows),
         "net_rub": round(total_net, 2),
     }
+
+
+def parse_key_values(text: str) -> dict[str, str]:
+    return {key: value for key, value in re.findall(r"([A-Za-z_]+)=([^\s]+)", text)}
+
+
+def load_margin_timeline(run_dir: Path, trade_date: str) -> list[dict]:
+    capitals = load_portfolio_capitals(run_dir)
+    rows: list[dict] = []
+    for path in sorted(run_dir.glob("*_multi_paper.log")):
+        portfolio = path.stem.removesuffix("_multi_paper")
+        capital = capitals.get(portfolio, 0.0)
+        max_total_margin_pct = 0.80
+        with path.open("r", encoding="utf-8", errors="ignore") as handle:
+            for raw_line in handle:
+                line = raw_line.strip()
+                if "multi_paper start" in line:
+                    fields = parse_key_values(line)
+                    start_capital = safe_float(fields.get("paper_capital"))
+                    if start_capital > 0:
+                        capital = start_capital
+                    start_max_margin = safe_float(fields.get("max_total_margin_pct"))
+                    if start_max_margin > 0:
+                        max_total_margin_pct = start_max_margin
+                if not line.startswith(trade_date) or "PORTFOLIO " not in line:
+                    continue
+                fields = parse_key_values(line)
+                dt = parse_dt(line[:19])
+                equity = safe_float(fields.get("equity"), capital)
+                used_margin = safe_float(fields.get("used_margin"))
+                closed_net = safe_float(fields.get("closed_net"))
+                open_count = safe_int(fields.get("open"))
+                max_total_margin_rub = equity * max_total_margin_pct if equity > 0 and max_total_margin_pct > 0 else 0.0
+                free_headroom = max_total_margin_rub - used_margin if max_total_margin_rub > 0 else 0.0
+                rows.append(
+                    {
+                        "portfolio": portfolio,
+                        "timestamp": dt.isoformat(sep=" ") if dt else "",
+                        "capital_rub": round(capital, 2),
+                        "equity_rub": round(equity, 2),
+                        "closed_net_rub": round(closed_net, 2),
+                        "used_margin_rub": round(used_margin, 2),
+                        "open_positions": open_count,
+                        "max_total_margin_pct": round(max_total_margin_pct * 100.0, 2),
+                        "max_total_margin_rub": round(max_total_margin_rub, 2),
+                        "free_margin_headroom_rub": round(free_headroom, 2),
+                        "used_margin_pct_of_capital": round(used_margin / capital * 100.0, 2) if capital > 0 else None,
+                        "used_margin_pct_of_limit": round(used_margin / max_total_margin_rub * 100.0, 2) if max_total_margin_rub > 0 else None,
+                    }
+                )
+    return rows
+
+
+def summarize_margin_day(day_rows: list[dict], timeline_rows: list[dict], run_dir: Path) -> list[dict]:
+    capitals = load_portfolio_capitals(run_dir)
+    by_portfolio = grouped_metrics(day_rows, lambda row: str(row.get("portfolio_group") or ""))
+    trade_map = {str(row.get("group") or ""): row for row in by_portfolio}
+    grouped: dict[str, list[dict]] = defaultdict(list)
+    for row in timeline_rows:
+        grouped[str(row.get("portfolio") or "")].append(row)
+    portfolio_names = sorted(set(capitals) | set(trade_map) | set(grouped))
+    out: list[dict] = []
+    for portfolio in portfolio_names:
+        points = sorted(grouped.get(portfolio, []), key=lambda row: str(row.get("timestamp") or ""))
+        trade_row = trade_map.get(portfolio, {})
+        capital = safe_float(capitals.get(portfolio), 0.0)
+        used_values = [safe_float(row.get("used_margin_rub")) for row in points]
+        limit_pcts = [safe_float(row.get("used_margin_pct_of_limit")) for row in points if row.get("used_margin_pct_of_limit") not in (None, "")]
+        headroom_values = [safe_float(row.get("free_margin_headroom_rub")) for row in points]
+        equity_values = [safe_float(row.get("equity_rub")) for row in points]
+        peak_equity = equity_values[0] if equity_values else 0.0
+        worst_drawdown = 0.0
+        for value in equity_values:
+            peak_equity = max(peak_equity, value)
+            worst_drawdown = min(worst_drawdown, value - peak_equity)
+        peak_used = max(used_values) if used_values else 0.0
+        avg_used = sum(used_values) / len(used_values) if used_values else 0.0
+        day_net = safe_float(trade_row.get("net_rub"))
+        out.append(
+            {
+                "portfolio": portfolio,
+                "capital_rub": round(capital, 2) if capital > 0 else None,
+                "trades": safe_int(trade_row.get("trades")),
+                "net_rub": round(day_net, 2),
+                "peak_used_margin_rub": round(peak_used, 2),
+                "avg_used_margin_rub": round(avg_used, 2),
+                "peak_used_margin_pct_of_capital": round(peak_used / capital * 100.0, 2) if capital > 0 and peak_used > 0 else None,
+                "avg_used_margin_pct_of_capital": round(avg_used / capital * 100.0, 2) if capital > 0 and avg_used > 0 else None,
+                "peak_used_margin_pct_of_limit": round(max(limit_pcts), 2) if limit_pcts else None,
+                "avg_used_margin_pct_of_limit": round(sum(limit_pcts) / len(limit_pcts), 2) if limit_pcts else None,
+                "min_free_margin_headroom_rub": round(min(headroom_values), 2) if headroom_values else None,
+                "realized_intraday_drawdown_rub": round(abs(worst_drawdown), 2) if equity_values else None,
+                "return_on_peak_margin_pct": round(day_net / peak_used * 100.0, 3) if peak_used > 0 else None,
+                "return_on_avg_margin_pct": round(day_net / avg_used * 100.0, 3) if avg_used > 0 else None,
+                "samples": len(points),
+            }
+        )
+    out.sort(key=lambda row: (safe_float(row.get("return_on_peak_margin_pct")), safe_float(row.get("net_rub"))), reverse=True)
+    return out
 
 
 def load_roll_watch(run_dir: Path) -> list[dict]:
@@ -627,6 +762,7 @@ def build_recommendations(
     research_day: list[dict],
     research_consensus: list[dict],
     day_history: list[dict],
+    margin_summary: list[dict],
 ) -> list[str]:
     notes: list[str] = []
     if overall.get("trades", 0) <= 0:
@@ -678,6 +814,27 @@ def build_recommendations(
                 f"Самый устойчивый overlay по всей серии: {best_consensus['scenario']} "
                 f"(beat_base_days={best_consensus['beat_base_days']}/{best_consensus['days']}, delta_total={best_consensus['delta_total_rub']} ₽)."
             )
+    if margin_summary:
+        stressed = sorted(
+            [row for row in margin_summary if safe_float(row.get("peak_used_margin_pct_of_limit")) > 50.0],
+            key=lambda row: safe_float(row.get("peak_used_margin_pct_of_limit")),
+            reverse=True,
+        )
+        if stressed:
+            top = stressed[0]
+            notes.append(
+                f"Контур {top['portfolio']} нагружал до {top['peak_used_margin_pct_of_limit']}% допустимого лимита ГО; "
+                f"дневная отдача на пик ГО {top.get('return_on_peak_margin_pct')}%."
+            )
+        weak_margin = sorted(
+            [row for row in margin_summary if safe_float(row.get("peak_used_margin_rub")) > 0],
+            key=lambda row: safe_float(row.get("return_on_peak_margin_pct")),
+        )
+        if weak_margin and safe_float(weak_margin[0].get("return_on_peak_margin_pct")) < 0:
+            worst = weak_margin[0]
+            notes.append(
+                f"Контур {worst['portfolio']} использовал ГО неэффективно: return_on_peak_margin={worst.get('return_on_peak_margin_pct')}%."
+            )
     return notes[:6]
 
 
@@ -686,6 +843,7 @@ def build_summary_markdown(
     overall: dict,
     open_summary: dict,
     by_group: list[dict],
+    by_portfolio: list[dict],
     by_ticker: list[dict],
     by_family: list[dict],
     by_hour: list[dict],
@@ -697,6 +855,7 @@ def build_summary_markdown(
     day_history: list[dict],
     recurring_tickers: list[dict],
     recurring_families: list[dict],
+    margin_summary: list[dict],
     recommendations: list[str],
     best_research_day: list[dict],
     best_research_all: list[dict],
@@ -714,6 +873,8 @@ def build_summary_markdown(
         f"- avg_win_rub: {overall['avg_win_rub']}",
         f"- avg_loss_rub: {overall['avg_loss_rub']}",
         f"- profit_factor: {overall['profit_factor']}",
+        f"- margin_mode: leveraged paper",
+        f"- fee_model: Premium futures conservative {PREMIUM_FUTURES_RATE_PCT:.3f}% per side",
         f"- open_positions_count: {open_summary.get('count')}",
         f"- open_positions_net_rub: {open_summary.get('net_rub')}",
         "",
@@ -723,6 +884,12 @@ def build_summary_markdown(
         for note in recommendations:
             lines.append(f"- {note}")
         lines.append("")
+    lines.append("## Комиссия и ГО\n")
+    lines.append(f"- {PREMIUM_FEE_NOTE}")
+    lines.append("- GO analysis uses actual paper portfolio logs: equity / used_margin / free headroom from runtime `PORTFOLIO` snapshots.")
+    lines.append("")
+    lines.append(markdown_top("By Portfolio", by_portfolio, ["group", "trades", "win_rate_pct", "net_rub", "expectancy_rub"], limit=10))
+    lines.append(markdown_top("Margin / GO by Portfolio", margin_summary, ["portfolio", "trades", "net_rub", "peak_used_margin_rub", "peak_used_margin_pct_of_limit", "min_free_margin_headroom_rub", "return_on_peak_margin_pct", "realized_intraday_drawdown_rub"], limit=10))
     lines.append(markdown_top("By Portfolio + Layer", by_group, ["group", "trades", "win_rate_pct", "net_rub", "expectancy_rub", "profit_factor"]))
     lines.append(markdown_top("Best Tickers", best_tickers, ["group", "trades", "win_rate_pct", "net_rub", "expectancy_rub"], limit=10))
     lines.append(markdown_top("Worst Tickers", worst_tickers, ["group", "trades", "win_rate_pct", "net_rub", "expectancy_rub"], limit=10))
@@ -806,6 +973,7 @@ def main() -> int:
 
     overall = metrics(day_rows)
     by_group = grouped_metrics(day_rows, lambda row: row["group_key"])
+    by_portfolio = grouped_metrics(day_rows, lambda row: str(row.get("portfolio_group") or ""))
     by_ticker = grouped_metrics(day_rows, lambda row: str(row.get("secid") or ""))
     by_family = grouped_metrics(day_rows, lambda row: row["family"])
     by_hour = grouped_metrics(day_rows, hour_bucket)
@@ -816,16 +984,19 @@ def main() -> int:
     open_positions = load_open_position_snapshot(run_dir)
     open_summary = summarize_open_positions(open_positions)
     roll_watch = load_roll_watch(run_dir)
+    margin_timeline = load_margin_timeline(run_dir, trade_date)
+    margin_summary = summarize_margin_day(day_rows, margin_timeline, run_dir)
 
     research_day = build_research_scenarios(all_rows, day_rows, profiles)
     research_all = build_research_scenarios(all_rows, all_rows, profiles)
-    recommendations = build_recommendations(overall, by_ticker, by_family, by_hour, research_day, scenario_consensus, day_history)
+    recommendations = build_recommendations(overall, by_ticker, by_family, by_hour, research_day, scenario_consensus, day_history, margin_summary)
 
     summary_md = build_summary_markdown(
         trade_date,
         overall,
         open_summary,
         by_group,
+        by_portfolio,
         by_ticker,
         by_family,
         by_hour,
@@ -837,6 +1008,7 @@ def main() -> int:
         day_history,
         recurring_tickers,
         recurring_families,
+        margin_summary,
         recommendations,
         research_day,
         research_all,
@@ -852,8 +1024,16 @@ def main() -> int:
             "open_positions": open_summary,
             "recommendations": recommendations,
             "best_consensus_scenario": pick_best_consensus_scenario(scenario_consensus),
+            "margin_mode": "leveraged_paper",
+            "fee_model": {
+                "tariff": "premium",
+                "futures_rate_per_side_pct": PREMIUM_FUTURES_RATE_PCT,
+                "futures_rate_per_side_fraction": PREMIUM_FUTURES_RATE,
+                "note": PREMIUM_FEE_NOTE,
+            },
         },
     )
+    write_csv_rows(analysis_dir / "by_portfolio.csv", by_portfolio)
     write_csv_rows(analysis_dir / "by_group.csv", by_group)
     write_csv_rows(analysis_dir / "by_ticker.csv", by_ticker)
     write_csv_rows(analysis_dir / "by_family.csv", by_family)
@@ -866,6 +1046,8 @@ def main() -> int:
     write_csv_rows(analysis_dir / "day_history.csv", day_history)
     write_csv_rows(analysis_dir / "recurring_killer_tickers.csv", recurring_tickers)
     write_csv_rows(analysis_dir / "recurring_killer_families.csv", recurring_families)
+    write_csv_rows(analysis_dir / "margin_timeline.csv", margin_timeline)
+    write_csv_rows(analysis_dir / "margin_summary.csv", margin_summary)
     write_text(analysis_dir / "recommendations.md", "\n".join(f"- {line}" for line in recommendations) + ("\n" if recommendations else ""))
 
     for row in research_day:
@@ -907,6 +1089,9 @@ def main() -> int:
     shutil.copy2(research_dir / "research_summary.md", bundle_dir / "research_summary.md")
     for path in [
         analysis_dir / "day_history.csv",
+        analysis_dir / "by_portfolio.csv",
+        analysis_dir / "margin_timeline.csv",
+        analysis_dir / "margin_summary.csv",
         analysis_dir / "recurring_killer_tickers.csv",
         analysis_dir / "recurring_killer_families.csv",
         analysis_dir / "worst_tickers.csv",
@@ -923,6 +1108,14 @@ def main() -> int:
         "generated_at": now_str(),
         "overall": overall,
         "open_positions": open_summary,
+        "margin_mode": "leveraged_paper",
+        "fee_model": {
+            "tariff": "premium",
+            "futures_rate_per_side_pct": PREMIUM_FUTURES_RATE_PCT,
+            "futures_rate_per_side_fraction": PREMIUM_FUTURES_RATE,
+            "note": PREMIUM_FEE_NOTE,
+        },
+        "portfolio_margin_day": margin_summary,
         "recommendations": recommendations,
         "best_latest_day_scenario": research_day[0] if research_day else {},
         "best_all_sample_scenario": research_all[0] if research_all else {},
