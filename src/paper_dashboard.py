@@ -17,6 +17,7 @@ REPORTS = ROOT / "reports"
 SPEC_CACHE: dict[str, tuple[float, float]] = {}
 LOCAL_SPEC_CACHE: dict[str, tuple[float, float]] | None = None
 PORTFOLIO_CAPITAL_RUB = 800_000.0
+REMOVED_PORTFOLIOS = {"stock_watch"}
 
 
 def expected_session_status(portfolio: str, now: datetime | None = None) -> tuple[str, str] | None:
@@ -110,7 +111,10 @@ def portfolio_from_name(name: str, suffix: str) -> str | None:
 
 def discover_portfolios(base_dir: Path) -> list[str]:
     config = read_portfolio_config(base_dir)
-    names = list(config)
+    if config:
+        return [name for name in config if name not in REMOVED_PORTFOLIOS]
+
+    names: list[str] = []
     seen = set(names)
     suffixes = [
         "multi_futures_paper_trades.csv",
@@ -121,7 +125,7 @@ def discover_portfolios(base_dir: Path) -> list[str]:
     for suffix in suffixes:
         for path in base_dir.glob(f"*{suffix}"):
             name = portfolio_from_name(path.name, suffix)
-            if name and name not in seen:
+            if name and name not in seen and name not in REMOVED_PORTFOLIOS:
                 names.append(name)
                 seen.add(name)
     if not names:

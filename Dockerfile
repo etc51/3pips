@@ -32,7 +32,6 @@ RUN mkdir -p reports/runtime reports/paper_runs/v7_live_20260525 reports/archive
         scripts/ubuntu_paper_supervisor.py \
         scripts/archive_paper_run.py \
         src/multi_futures_paper.py \
-        src/multi_stocks_paper.py \
         src/paper_dashboard.py
 
 EXPOSE 8768

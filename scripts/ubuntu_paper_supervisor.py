@@ -19,7 +19,6 @@ PORTFOLIOS = {
     "gl_watch": ["GLH7", "GLZ6", "GLM6"],
     "neo": ["AMDperpA", "COINperpA", "TSLAperpA"],
     "tail_research": ["BRN6", "PDM6", "MMH7", "SiH7", "MMZ6", "BMN6", "BMM6", "BMV6", "BMX6", "BMU6", "S1H7", "BRX6", "BMQ6", "S1Z6", "SVZ6"],
-    "stock_watch": ["EUTR", "FESH", "NVTK", "SMLT", "UGLD"],
 }
 
 
@@ -128,43 +127,6 @@ class Supervisor:
                 pass
 
     def bot_args(self, name: str, secids: list[str]) -> list[str]:
-        if name == "stock_watch":
-            return [
-                "src/multi_stocks_paper.py",
-                "--secids",
-                *secids,
-                "--runtime-sec", "86400",
-                "--report-sec", "600",
-                "--seed-minutes", "240",
-                "--orderbook-depth", "10",
-                "--profiles-json", "reports/stock_moex_scalp_results_review/stock_final_live_paper_profiles.json",
-                "--paper-capital", "800000",
-                "--max-total-margin-pct", "0.80",
-                "--max-position-margin-pct", "0.20",
-                "--max-full-stop-rub", "500",
-                "--risk-reduced-full-stop-rub", "250",
-                "--risk-micro-full-stop-rub", "100",
-                "--risk-profit-guard-min-rub", "1500",
-                "--risk-profit-guard-drawdown-pct", "0.35",
-                "--risk-profit-guard-drawdown-min-rub", "500",
-                "--risk-stop-to-median-cap", "4",
-                "--stop-limit-emergency-ticks", "2",
-                "--actual-exit-model", "stream_stoplimit",
-                "--stream-stale-sec", "15",
-                "--fallback-poll-sec", "2",
-                "--snapshot-sec", "10",
-                "--no-trade-before", "10:00",
-                "--no-new-after", "18:35",
-                "--force-close-at", "18:45",
-                "--risk-state-log", f"reports/paper_runs/{RUN_NAME}/{name}_risk_policy_state.json",
-                "--log", f"reports/paper_runs/{RUN_NAME}/{name}_multi_futures_paper_trades.csv",
-                "--snapshot-log", f"reports/paper_runs/{RUN_NAME}/{name}_live_orderbook_snapshots.csv",
-                "--open-positions-log", f"reports/paper_runs/{RUN_NAME}/{name}_paper_open_positions.json",
-                "--instrument-specs-log", f"reports/paper_runs/{RUN_NAME}/{name}_instrument_specs.csv",
-                "--startup-status-log", f"reports/paper_runs/{RUN_NAME}/{name}_startup_status.csv",
-                "--shadow-log", f"reports/paper_runs/{RUN_NAME}/{name}_shadow_exit_models.csv",
-                "--health-log", f"reports/paper_runs/{RUN_NAME}/{name}_health.json",
-            ]
         args = [
             "src/multi_futures_paper.py",
             "--secids",

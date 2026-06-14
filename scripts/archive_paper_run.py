@@ -49,7 +49,6 @@ TEXT_LOG_SUFFIXES = (".log", ".err.log", ".stdout.log", ".stderr.log", ".jsonl")
 STATIC_REFERENCE_PATHS = [
     Path("reports") / "futures_scalp_profiles_v7_paper_20260525.csv",
     Path("reports") / "futures_scalp_profiles_v7_paper_20260525_gpt_shadow_params.csv",
-    Path("reports") / "stock_moex_scalp_results_review" / "stock_final_live_paper_profiles.json",
 ]
 
 

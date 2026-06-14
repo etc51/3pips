@@ -53,7 +53,7 @@ from t_tech.invest import Client
 print("t_tech.invest import ok")
 PY
 
-for name in classic_core gl_watch neo tail_research stock_watch; do
+for name in classic_core gl_watch neo tail_research; do
   path="reports/paper_runs/v7_live_20260525/${name}_paper_open_positions.json"
   if [[ ! -f "$path" ]]; then
     sudo -u "${BOT_USER}" bash -c "printf '[]\n' > '$path'"

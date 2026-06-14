@@ -98,7 +98,7 @@ def strategy_context() -> dict[str, Any]:
         "current_live_question": "не дать нескольким большим стопам уничтожать серию маленьких плюсов",
         "existing_logic_already_present": [
             "система paper, реальные ордера основной бот не отправляет",
-            "разделение на портфели classic_core / gl_watch / neo / tail_research / stock_watch",
+            "разделение на портфели classic_core / gl_watch / neo / tail_research",
             "внутренние режимы strict и aggressive",
             "отдельные shadow-слои GPT full / relaxed / loose для сравнения",
             "счёт полного стопа в рублях",

@@ -19,7 +19,7 @@ from urllib.request import urlopen
 
 
 RUN_NAME_DEFAULT = "v7_live_20260525"
-CONTOURS = ("classic_core", "gl_watch", "neo", "tail_research", "stock_watch")
+CONTOURS = ("classic_core", "gl_watch", "neo", "tail_research")
 
 
 def env_bool(name: str, default: bool = False) -> bool:

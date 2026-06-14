@@ -201,7 +201,6 @@ Supervisor держит живыми:
 - `gl_watch`
 - `neo`
 - `tail_research`
-- `stock_watch`
 - dashboard на порту `8768`
 
 Если контур упал, health устарел или dashboard перестал отвечать, supervisor перезапускает нужный процесс.
