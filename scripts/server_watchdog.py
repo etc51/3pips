@@ -380,19 +380,45 @@ class Watchdog:
         if not kinds or self.no_remediate:
             return []
         actions: list[dict[str, Any]] = []
-        if "paper_container_down" in kinds or "archive_container_down" in kinds:
+        if "paper_container_down" in kinds and "archive_container_down" in kinds:
             actions.append(
                 {
-                    "name": "compose_up",
+                    "name": "compose_up_all",
                     "argv": ["up", "-d", "--build", "paper", "archive"],
                 }
             )
+            return actions
+        if "paper_container_down" in kinds:
+            actions.append(
+                {
+                    "name": "compose_up_paper",
+                    "argv": ["up", "-d", "--build", "paper"],
+                }
+            )
+            return actions
+        if "archive_container_down" in kinds:
+            actions.append(
+                {
+                    "name": "compose_up_archive",
+                    "argv": ["up", "-d", "archive"],
+                }
+            )
+            return actions
+        if "dashboard_down" in kinds:
+            actions.append({"name": "restart_paper", "argv": ["restart", "paper"]})
+            actions.append(
+                {
+                    "name": "compose_up_paper_refresh",
+                    "argv": ["up", "-d", "--build", "paper"],
+                }
+            )
+            return actions
         elif kinds & {"dashboard_down", "run_dir_missing", "health_missing", "health_stale", "snapshot_stale"}:
             actions.append({"name": "restart_paper", "argv": ["restart", "paper"]})
             actions.append(
                 {
-                    "name": "compose_up_refresh",
-                    "argv": ["up", "-d", "--build", "paper", "archive"],
+                    "name": "compose_up_paper_refresh",
+                    "argv": ["up", "-d", "--build", "paper"],
                 }
             )
         return actions
