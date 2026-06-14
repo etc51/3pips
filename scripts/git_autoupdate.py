@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -70,6 +71,27 @@ def main() -> int:
 
     pip_install = run([args.venv_python, "-m", "pip", "install", "-r", "requirements.txt"], project_root)
     log(log_path, f"pip rc={pip_install.returncode} stdout_len={len(pip_install.stdout)} stderr_len={len(pip_install.stderr)}")
+
+    deploy_dir = project_root / "deploy"
+    unit_names = [
+        "3pips-paper-a26.service",
+        "3pips-watchdog.service",
+        "3pips-watchdog.timer",
+        "3pips-daily-autonomy.service",
+        "3pips-daily-autonomy.timer",
+        "3pips-git-autoupdate.service",
+        "3pips-git-autoupdate.timer",
+    ]
+    units_installed = 0
+    for name in unit_names:
+        src = deploy_dir / name
+        dst = Path("/etc/systemd/system") / name
+        if src.exists():
+            shutil.copy2(src, dst)
+            units_installed += 1
+    if units_installed:
+        daemon_reload = run(["systemctl", "daemon-reload"], project_root)
+        log(log_path, f"daemon_reload rc={daemon_reload.returncode} units_installed={units_installed}")
 
     restart = run(["systemctl", "restart", args.service_name], project_root)
     if restart.returncode != 0:
