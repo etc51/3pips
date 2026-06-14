@@ -175,7 +175,7 @@ def human_reason(reason: object) -> str:
     if text.startswith("risk_governor paused_today"):
         return "риск: пауза до завтра, защищаем дневной плюс"
     if text.startswith("risk_governor profit_guard_aggressive_off"):
-        return "риск: после дневного плюса aggressive выключен"
+        return "риск: после дневного плюса агрессивный режим выключен"
     if text.startswith("risk_governor observe"):
         return "риск: новый контракт семьи, режим наблюдения и микро-размер"
     if text.startswith("daily_profit_guard_active"):
@@ -183,7 +183,7 @@ def human_reason(reason: object) -> str:
     if text.startswith("daily_profit_guard_floor"):
         return "риск: защищённый дневной плюс, новые входы стоп"
     if text.startswith("daily_profit_guard_aggressive_off"):
-        return "риск: после дневного плюса aggressive выключен"
+        return "риск: после дневного плюса агрессивный режим выключен"
     if text.startswith("risk_governor micro"):
         return "риск: только микро-размер"
     if text.startswith("risk_governor reduced"):
@@ -281,10 +281,10 @@ def human_reason(reason: object) -> str:
         "filter": "фильтр",
         "risk_governor": "риск",
         "paused_today": "пауза до завтра",
-        "profit_guard_aggressive_off": "aggressive выключен защитой прибыли",
+        "profit_guard_aggressive_off": "агрессивный выключен защитой прибыли",
         "daily_profit_guard_floor": "защищённый дневной плюс",
         "daily_profit_guard_active": "защита прибыли",
-        "daily_profit_guard_aggressive_off": "aggressive выключен защитой прибыли",
+        "daily_profit_guard_aggressive_off": "агрессивный выключен защитой прибыли",
         "observe": "наблюдение",
         "micro": "микро",
         "reduced": "уменьшен",
@@ -406,6 +406,7 @@ def human_load_reason(value: object) -> str:
     return {
         "configured": "основной список",
         "auto_roll": "автоперенос",
+        "probation_auto_roll": "автоперенос на испытании",
         "stock_watchlist": "акции",
     }.get(text, text or "-")
 
@@ -419,6 +420,7 @@ def human_roll_status(value: object) -> str:
         "not_near_roll": "ещё рано",
         "missing_profile": "нет профиля",
         "already_loaded": "уже загружен",
+        "perpetual_or_far_expiration": "perp / дальняя экспирация",
     }.get(text, text or "-")
 
 
@@ -432,6 +434,15 @@ def human_system_status(value: object) -> str:
         "missing": "нет данных",
         "warning": "внимание",
         "stale": "устарело",
+    }.get(text, text or "-")
+
+
+def human_service_name(value: object) -> str:
+    text = "" if value is None else str(value).strip().lower()
+    return {
+        "watchdog": "автоконтроль",
+        "auto-update": "автообновление",
+        "supervisor": "супервизор",
     }.get(text, text or "-")
 
 
@@ -707,7 +718,7 @@ def build_state(base_dir: Path) -> dict:
     if isinstance(watchdog_state, dict):
         system_overview.append(
             {
-                "service": "watchdog",
+                "service": human_service_name("watchdog"),
                 "status": human_system_status(watchdog_state.get("status") or "missing"),
                 "updated": watchdog_state.get("last_change") or "-",
                 "detail": watchdog_state.get("last_summary") or "-",
@@ -715,14 +726,14 @@ def build_state(base_dir: Path) -> dict:
         )
     else:
         system_overview.append(
-            {"service": "watchdog", "status": "нет данных", "updated": "-", "detail": "state-файл не найден"}
+            {"service": human_service_name("watchdog"), "status": "нет данных", "updated": "-", "detail": "state-файл не найден"}
         )
 
     autoupdate_state = read_json(runtime_dir / "docker_autoupdate_state.json")
     if isinstance(autoupdate_state, dict):
         system_overview.append(
             {
-                "service": "auto-update",
+                "service": human_service_name("auto-update"),
                 "status": "ok",
                 "updated": autoupdate_state.get("updated_at") or "-",
                 "detail": f"{autoupdate_state.get('previous_head', '-')[:7]} -> {autoupdate_state.get('current_head', '-')[:7]}",
@@ -730,17 +741,17 @@ def build_state(base_dir: Path) -> dict:
         )
     else:
         system_overview.append(
-            {"service": "auto-update", "status": "нет данных", "updated": "-", "detail": "обновлений пока не было"}
+            {"service": human_service_name("auto-update"), "status": "нет данных", "updated": "-", "detail": "обновлений пока не было"}
         )
 
     supervisor_log = runtime_dir / "v7_paper_supervisor_20260525.log"
     supervisor_age = file_age_sec(supervisor_log)
     system_overview.append(
         {
-            "service": "supervisor",
+            "service": human_service_name("supervisor"),
             "status": "ok" if supervisor_age is not None and supervisor_age <= 90 else "внимание",
             "updated": latest_mtime([supervisor_log]) or "-",
-            "detail": f"последняя запись {supervisor_age}s назад" if supervisor_age is not None else "лог не найден",
+            "detail": f"последняя запись {supervisor_age} сек назад" if supervisor_age is not None else "лог не найден",
         }
     )
 
@@ -775,7 +786,7 @@ def build_state(base_dir: Path) -> dict:
             ]
         )
     stats["last_update"] = latest_mtime(watched_paths)
-    stats["watchdog_status"] = next((item["status"] for item in system_overview if item["service"] == "watchdog"), "-")
+    stats["watchdog_status"] = next((item["status"] for item in system_overview if item["service"] == human_service_name("watchdog")), "-")
     stats["system_incidents"] = int(sum(1 for item in system_overview if item["status"] not in {"ok", "нет данных", "выкл"}))
 
     by_ticker = []
@@ -1384,7 +1395,7 @@ HTML = r"""<!doctype html>
         ["Сервис","service"], ["Статус","status",false,null,"badge"], ["Обновлено","updated"], ["Детали","detail",false,null,"comment"]
       ], data.system_overview || []);
       table(document.getElementById('health'), [
-        ["Контур","portfolio"], ["Статус","status",false,null,"badge"], ["Health","updated"], ["Возраст health, сек","health_age_sec"], ["Uptime, сек","uptime_sec",false,1], ["Поток, сек","stream_age_sec",false,1], ["Reconnect","reconnect_count"], ["Открыто","open_positions"], ["Закрыто","closed_trades"], ["Net ₽","closed_net",true,2], ["Контуры","contours",false,null,"comment"]
+        ["Контур","portfolio"], ["Статус","status",false,null,"badge"], ["Обновление health","updated"], ["Возраст health, сек","health_age_sec"], ["Аптайм, сек","uptime_sec",false,1], ["Возраст потока, сек","stream_age_sec",false,1], ["Переподключения","reconnect_count"], ["Открыто","open_positions"], ["Закрыто","closed_trades"], ["Реализовано ₽","closed_net",true,2], ["Контуры","contours",false,null,"comment"]
       ], data.portfolio_health || []);
       table(document.getElementById('rolls'), [
         ["Контур","portfolio"], ["Тикер","ticker"], ["Семья","family"], ["DTE","days_to_expiration",false,1], ["Статус","status",false,null,"badge"], ["Выбран","selected"], ["Источник профиля","profile_source"], ["Кандидаты","candidates",false,null,"comment"], ["Комментарий","comment",false,null,"comment"]
@@ -1399,16 +1410,16 @@ HTML = r"""<!doctype html>
         ["Слой","model"], ["Контур","portfolio"], ["Тень ₽","net",true,2], ["Сделок","trades"], ["Плюс","wins"], ["Минус","losses"], ["Плюс %","win_rate",false,1], ["Средняя ₽","avg_trade",true,2]
       ], data.gpt_shadow_overview || []);
       table(document.getElementById('tickers'), [
-        ["Контур","portfolio"], ["Тикер","ticker"], ["Позиция","position"], ["Готовность","state",false,null,"state"], ["Режим риска","risk"], ["Лимит риска ₽","risk_limit_rub",false,2], ["Политика","policy",false,null,"comment"], ["Last","last"], ["Bid","bid"], ["Ask","ask"], ["Спред","spread"], ["Стоп","stop_ticks"], ["Спред/стоп %","spread_to_stop_pct"], ["Стакан","book"], ["Комментарий","comment",false,null,"comment"]
+        ["Контур","portfolio"], ["Тикер","ticker"], ["Позиция","position"], ["Готовность","state",false,null,"state"], ["Режим риска","risk"], ["Лимит риска ₽","risk_limit_rub",false,2], ["Политика","policy",false,null,"comment"], ["Последняя","last"], ["Bid","bid"], ["Ask","ask"], ["Спред","spread"], ["Стоп","stop_ticks"], ["Спред/стоп %","spread_to_stop_pct"], ["Стакан","book"], ["Комментарий","comment",false,null,"comment"]
       ], data.ticker_overview || []);
       table(document.getElementById('wideSpread'), [
-        ["Контур","portfolio"], ["Тикер","ticker"], ["Last","last"], ["Спред","spread"], ["Стоп","stop_ticks"], ["Спред/стоп %","spread_to_stop_pct"], ["Класс","spread_class"], ["Стакан","book"], ["Комментарий","comment",false,null,"comment"]
+        ["Контур","portfolio"], ["Тикер","ticker"], ["Последняя","last"], ["Спред","spread"], ["Стоп","stop_ticks"], ["Спред/стоп %","spread_to_stop_pct"], ["Класс","spread_class"], ["Стакан","book"], ["Комментарий","comment",false,null,"comment"]
       ], data.wide_spread_watchlist || []);
       table(document.getElementById('trades'), [
-        ["Закрыта","time"], ["Открыта","opened_at"], ["Контур","portfolio"], ["Режим","contour"], ["Тикер","ticker"], ["Напр.","direction"], ["Qty","qty"], ["Entry","entry_price"], ["Trigger","trigger_price"], ["Exit","exit_price"], ["Выход","exit_source",false,null,"comment"], ["Лимит qty","stop_limit_qty"], ["Перелёт тиков","stop_overrun_ticks",true,2], ["Тики","ticks",true,2], ["Комиссия ₽","fees_rub",false,2], ["Net ₽","net_pnl_rub",true,2], ["Статус","fill_status"], ["Причина","skip_reason",false,null,"comment"]
+        ["Закрыта","time"], ["Открыта","opened_at"], ["Контур","portfolio"], ["Режим","contour"], ["Тикер","ticker"], ["Напр.","direction"], ["Qty","qty"], ["Вход","entry_price"], ["Триггер","trigger_price"], ["Выход цена","exit_price"], ["Выход","exit_source",false,null,"comment"], ["Лимит qty","stop_limit_qty"], ["Перелёт тиков","stop_overrun_ticks",true,2], ["Тики","ticks",true,2], ["Комиссия ₽","fees_rub",false,2], ["Результат ₽","net_pnl_rub",true,2], ["Статус","fill_status"], ["Причина","skip_reason",false,null,"comment"]
       ], data.recent_trades || []);
       table(document.getElementById('gptTrades'), [
-        ["Время","time"], ["Слой","model_label"], ["Контур","portfolio"], ["Режим","contour"], ["Сигнал","signal_family"], ["Тикер","ticker"], ["Напр.","direction"], ["Qty","qty"], ["Entry","entry_price"], ["Trigger","trigger_price"], ["Exit","exit_price"], ["Тики","ticks",true,2], ["Комиссия ₽","fees_rub",false,2], ["Результат ₽","net_pnl_rub",true,2], ["Выход","exit_source",false,null,"comment"]
+        ["Время","time"], ["Слой","model_label"], ["Контур","portfolio"], ["Режим","contour"], ["Сигнал","signal_family"], ["Тикер","ticker"], ["Напр.","direction"], ["Qty","qty"], ["Вход","entry_price"], ["Триггер","trigger_price"], ["Выход цена","exit_price"], ["Тики","ticks",true,2], ["Комиссия ₽","fees_rub",false,2], ["Результат ₽","net_pnl_rub",true,2], ["Выход","exit_source",false,null,"comment"]
       ], data.gpt_shadow_recent || []);
       const positions = data.open_positions || [];
       const posEl = document.getElementById('positions');
@@ -1416,7 +1427,7 @@ HTML = r"""<!doctype html>
       else {
         posEl.innerHTML = '<div class="table-wrap"><table id="positionsTable"></table></div>';
         table(document.getElementById('positionsTable'), [
-          ["Контур","portfolio"], ["Режим","contour"], ["Риск","risk_mode"], ["Политика","risk_reason_text",false,null,"comment"], ["Тикер","ticker"], ["Напр.","direction"], ["Qty","qty"], ["ГО ₽","margin_rub",false,2], ["Стоп ₽","full_stop_risk_rub",false,2], ["Exit-модель","exit_mode_label"], ["Entry","entry_price"], ["Last","last_price"], ["Mark","mark_price"], ["Источник mark","mark_source_label",false,null,"comment"], ["Stop","stop_price"], ["Тики","unrealized_ticks",true,2], ["Грязными ₽","gross_pnl_rub",true,2], ["Комиссия ₽","fees_rub",false,2], ["Сейчас ₽","unrealized_net_rub",true,2], ["Открыта","opened_at"]
+          ["Контур","portfolio"], ["Режим","contour"], ["Риск","risk_mode"], ["Политика","risk_reason_text",false,null,"comment"], ["Тикер","ticker"], ["Напр.","direction"], ["Qty","qty"], ["ГО ₽","margin_rub",false,2], ["Стоп ₽","full_stop_risk_rub",false,2], ["Модель выхода","exit_mode_label"], ["Вход","entry_price"], ["Последняя","last_price"], ["Mark","mark_price"], ["Источник mark","mark_source_label",false,null,"comment"], ["Стоп","stop_price"], ["Тики","unrealized_ticks",true,2], ["Грязными ₽","gross_pnl_rub",true,2], ["Комиссия ₽","fees_rub",false,2], ["Сейчас ₽","unrealized_net_rub",true,2], ["Открыта","opened_at"]
         ], positions);
       }
       window.scrollTo(sx, sy);
