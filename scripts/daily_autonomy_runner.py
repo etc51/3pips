@@ -50,12 +50,31 @@ def load_profiles(path: Path) -> dict[str, dict]:
     return {row["ticker"]: row for row in read_csv_rows(path)}
 
 
+def normalize_trade_row(row: dict) -> dict | None:
+    item = dict(row)
+    item.pop(None, None)
+    if item.get("net_rub") in (None, "") and item.get("closed_net_rub") not in (None, ""):
+        item["net_rub"] = item.get("closed_net_rub")
+    if not parse_dt(str(item.get("closed_at") or "")):
+        return None
+    contour = str(item.get("contour") or "")
+    if contour not in {"strict", "aggressive"}:
+        return None
+    if not str(item.get("secid") or ""):
+        return None
+    if safe_int(item.get("qty"), -1) <= 0:
+        return None
+    return item
+
+
 def load_primary_trades(run_dir: Path) -> list[dict]:
     rows: list[dict] = []
     for path in sorted(run_dir.glob("*_multi_futures_paper_trades.csv")):
         group = trade_file_group(path)
         for row in read_csv_rows(path):
-            item = dict(row)
+            item = normalize_trade_row(row)
+            if item is None:
+                continue
             item.setdefault("portfolio_group", group)
             item["_source_file"] = path.name
             rows.append(item)
@@ -69,6 +88,7 @@ def load_shadow_trades(run_dir: Path) -> list[dict]:
             group = shadow_file_group(path)
             for row in read_csv_rows(path):
                 item = dict(row)
+                item.pop(None, None)
                 item.setdefault("portfolio_group", group)
                 item["_source_file"] = path.name
                 rows.append(item)
