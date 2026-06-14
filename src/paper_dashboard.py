@@ -225,6 +225,60 @@ def human_reason(reason: object) -> str:
     return out
 
 
+def human_roll_status(status: object) -> str:
+    text = "" if status is None else str(status)
+    mapping = {
+        "queued_roll_contract": "следующий загружен",
+        "roll_ready": "готов к переносу",
+        "selected": "следующий выбран",
+        "selected_no_live_book": "выбран вне сессии",
+        "selected_already_loaded": "следующий уже загружен",
+        "selected_will_load_later": "следующий есть в запуске",
+        "searching_next": "ищем следующий",
+        "not_near_roll": "пока далеко",
+        "blocked_no_candidate": "нет подходящего следующего",
+        "blocked": "заблокировано",
+        "no_expiration": "нет даты экспирации",
+        "perpetual_or_far_expiration": "бессрочный или дальний",
+    }
+    return mapping.get(text, text or "-")
+
+
+def human_roll_reason(reason: object) -> str:
+    text = "" if reason is None else str(reason)
+    if not text:
+        return "наблюдаем"
+    if "queued for auto load" in text:
+        text = text.replace("queued for auto load", "следующий контракт поставлен в очередь")
+    if "selected already loaded" in text:
+        text = text.replace("selected already loaded", "следующий контракт уже загружен")
+    if "selected is configured later in this run" in text:
+        text = text.replace("selected is configured later in this run", "следующий контракт уже есть в этом запуске")
+    if "candidate_ok_no_live_book" in text:
+        text = text.replace("candidate_ok_no_live_book", "следующий выбран вне сессии")
+    if "candidate_ok" in text:
+        text = text.replace("candidate_ok", "следующий выбран")
+    if "dte_above_observe_window" in text:
+        text = text.replace("dte_above_observe_window", "далеко до окна переноса")
+    if "candidate_too_close_to_expiry" in text:
+        text = text.replace("candidate_too_close_to_expiry", "следующий тоже слишком близко к экспирации")
+    if "no viable next contract found" in text:
+        text = text.replace("no viable next contract found", "подходящий следующий контракт не найден")
+    if "no_live_book_startup" in text:
+        text = text.replace("no_live_book_startup", "живого стакана пока нет, но контракт уже выбран")
+    if "book_error" in text:
+        text = text.replace("book_error", "ошибка чтения стакана")
+    if "fee_ok" in text:
+        text = text.replace("fee_ok", "комиссия в норме")
+    text = text.replace("current_dte=", "до экспирации ")
+    text = text.replace("d ", " д ")
+    text = text.replace("fee=", "комиссия=")
+    text = text.replace("stop=", "стоп=")
+    text = text.replace(">", " > ")
+    text = text.replace(";", "; ")
+    return human_reason(text)
+
+
 def human_cell(value: object) -> object:
     if value is None:
         return None
@@ -396,6 +450,11 @@ def build_state(base_dir: Path) -> dict:
             part["portfolio"] = portfolio
         startup_parts.append(part)
     startup_status = pd.concat(startup_parts, ignore_index=True, sort=False)
+    roll_state_by_portfolio = {}
+    for portfolio in portfolio_names:
+        roll_state = read_json(portfolio_path(base_dir, portfolio, "roll_state.json"))
+        if isinstance(roll_state, dict):
+            roll_state_by_portfolio[portfolio] = roll_state
     heartbeat = read_csv(base_dir / "paper_monitor_heartbeat.csv")
     summary = read_csv(base_dir / "paper_execution_summary.csv")
     open_positions = []
@@ -424,6 +483,7 @@ def build_state(base_dir: Path) -> dict:
                 portfolio_path(base_dir, portfolio, "live_orderbook_snapshots.csv"),
                 portfolio_path(base_dir, portfolio, "paper_open_positions.json"),
                 portfolio_path(base_dir, portfolio, "startup_status.csv"),
+                portfolio_path(base_dir, portfolio, "roll_state.json"),
             ]
         )
     stats["last_update"] = latest_mtime(watched_paths)
@@ -562,6 +622,53 @@ def build_state(base_dir: Path) -> dict:
             )
     wide_spread_watchlist.sort(key=lambda x: float(x.get("spread_to_stop_pct") or -1), reverse=True)
 
+    roll_watch = []
+    for portfolio, payload in roll_state_by_portfolio.items():
+        observe_days = float(payload.get("roll_observe_days") or 0.0)
+        loaded = {}
+        for item in payload.get("loaded_contracts") or []:
+            if not isinstance(item, dict):
+                continue
+            loaded[str(item.get("ticker") or "")] = item
+        for event in payload.get("roll_events") or []:
+            if not isinstance(event, dict):
+                continue
+            ticker = str(event.get("ticker") or "")
+            loaded_row = loaded.get(ticker, {})
+            dte = event.get("days_to_expiration")
+            try:
+                dte_value = float(dte)
+            except Exception:
+                dte_value = None
+            status = str(event.get("status") or "")
+            selected = str(event.get("selected") or "")
+            should_show = bool(
+                selected
+                or status not in {"not_near_roll", "perpetual_or_far_expiration", "no_expiration"}
+                or (dte_value is not None and dte_value <= observe_days + 0.001)
+            )
+            if not should_show:
+                continue
+            roll_watch.append(
+                {
+                    "portfolio": portfolio,
+                    "family": event.get("family") or loaded_row.get("family") or "",
+                    "ticker": ticker,
+                    "days_to_expiration": number(dte_value, 1) if dte_value is not None else None,
+                    "selected": selected or "-",
+                    "status": human_roll_status(status),
+                    "comment": human_roll_reason(event.get("reason")),
+                    "expiration": event.get("expiration") or loaded_row.get("expiration") or "",
+                }
+            )
+    roll_watch.sort(
+        key=lambda x: (
+            float(x.get("days_to_expiration")) if x.get("days_to_expiration") is not None else 1e9,
+            str(x.get("portfolio") or ""),
+            str(x.get("ticker") or ""),
+        )
+    )
+
     positions_by_ticker: dict[tuple[str, str], list[str]] = {}
     for item in open_positions:
         if not isinstance(item, dict):
@@ -654,6 +761,7 @@ def build_state(base_dir: Path) -> dict:
         "stats": stats,
         "by_ticker": by_ticker,
         "portfolio_overview": portfolio_overview,
+        "roll_watch": roll_watch,
         "ticker_overview": ticker_overview,
         "wide_spread_watchlist": wide_spread_watchlist,
         "open_positions": open_positions,
@@ -774,6 +882,10 @@ HTML = r"""<!doctype html>
       <div id="positions"></div>
     </section>
     <section>
+      <h2>Переход контрактов</h2>
+      <div class="table-wrap"><table id="rollWatch"></table></div>
+    </section>
+    <section>
       <h2>Тикеры</h2>
       <div class="table-wrap"><table id="tickers"></table></div>
     </section>
@@ -827,6 +939,9 @@ HTML = r"""<!doctype html>
       table(document.getElementById('portfolios'), [
         ["Контур","portfolio"], ["Старт ₽","capital",false,2], ["Реальный доход ₽","closed_net",true,2], ["Доход %","return_pct",true,3], ["ГО занято ₽","used_margin",false,2], ["Свободно ₽","free_capital",false,2], ["Позиций","open_positions"], ["Сделок","closed_trades"]
       ], data.portfolio_overview || []);
+      table(document.getElementById('rollWatch'), [
+        ["Контур","portfolio"], ["Семейство","family"], ["Текущий","ticker"], ["До экспир., дн","days_to_expiration"], ["Следующий","selected"], ["Статус","status"], ["Комментарий","comment",false,null,"comment"]
+      ], data.roll_watch || []);
       table(document.getElementById('tickers'), [
         ["Контур","portfolio"], ["Тикер","ticker"], ["Позиция","position"], ["Готовность","state",false,null,"state"], ["Last","last"], ["Bid","bid"], ["Ask","ask"], ["Спред","spread"], ["Стоп","stop_ticks"], ["Спред/стоп %","spread_to_stop_pct"], ["Стакан","book"], ["Комментарий","comment",false,null,"comment"]
       ], data.ticker_overview || []);
