@@ -781,6 +781,12 @@ def build_state(base_dir: Path) -> dict:
             "recommendations": autonomy_manifest.get("recommendations") if isinstance(autonomy_manifest.get("recommendations"), list) else [],
             "top_killer_tickers": autonomy_manifest.get("top_killer_tickers") if isinstance(autonomy_manifest.get("top_killer_tickers"), list) else [],
             "top_killer_families": autonomy_manifest.get("top_killer_families") if isinstance(autonomy_manifest.get("top_killer_families"), list) else [],
+            "recurring_killer_tickers": autonomy_manifest.get("recurring_killer_tickers") if isinstance(autonomy_manifest.get("recurring_killer_tickers"), list) else [],
+            "recurring_killer_families": autonomy_manifest.get("recurring_killer_families") if isinstance(autonomy_manifest.get("recurring_killer_families"), list) else [],
+            "best_consensus_scenario": autonomy_manifest.get("best_consensus_scenario") if isinstance(autonomy_manifest.get("best_consensus_scenario"), dict) else {},
+            "day_class_counts": autonomy_manifest.get("day_class_counts") if isinstance(autonomy_manifest.get("day_class_counts"), dict) else {},
+            "day_history_tail": autonomy_manifest.get("day_history_tail") if isinstance(autonomy_manifest.get("day_history_tail"), list) else [],
+            "research_consensus_top": autonomy_manifest.get("research_consensus_top") if isinstance(autonomy_manifest.get("research_consensus_top"), list) else [],
             "archive": autonomy_manifest.get("archive"),
             "roll_watch": autonomy_manifest.get("roll_watch") if isinstance(autonomy_manifest.get("roll_watch"), list) else [],
         }
@@ -1006,12 +1012,21 @@ HTML = r"""<!doctype html>
       const autoOpen = auto.open_positions || {};
       const autoRecs = auto.recommendations || [];
       const autoKillers = auto.top_killer_tickers || [];
+      const autoRecurring = auto.recurring_killer_tickers || [];
+      const autoConsensus = auto.best_consensus_scenario || {};
+      const autoDayCounts = auto.day_class_counts || {};
       const autoEl = document.getElementById('autonomySummary');
       if (!auto.trade_date) {
         autoEl.innerHTML = '<div class="empty">Авторазбор дня ещё не собран</div>';
       } else {
         const killerText = autoKillers.length
           ? autoKillers.slice(0, 3).map(x => `${x.group}: ${fmt(x.net_rub, 2)} ₽`).join(' | ')
+          : 'нет';
+        const recurringText = autoRecurring.length
+          ? autoRecurring.slice(0, 3).map(x => `${x.group}: killer-дней ${x.killer_days}/${x.days}, net ${fmt(x.total_bucket_net_rub, 2)} ₽`).join(' | ')
+          : 'нет';
+        const consensusText = autoConsensus.scenario
+          ? `${autoConsensus.scenario} (${autoConsensus.beat_base_days || 0}/${autoConsensus.days || 0}, Δ ${fmt(autoConsensus.delta_total_rub, 2)} ₽)`
           : 'нет';
         const recHtml = autoRecs.length
           ? `<ul class="autonomy-list">${autoRecs.map(x => `<li>${x}</li>`).join('')}</ul>`
@@ -1025,9 +1040,12 @@ HTML = r"""<!doctype html>
               <span>Win rate: ${fmt(autoOverall.win_rate_pct, 2)}%</span>
               <span>Открытых: ${autoOpen.count ?? '-'}</span>
               <span>Открытый PnL: ${fmt(autoOpen.net_rub, 2)} ₽</span>
+              <span>Good/Bad/Killer: ${autoDayCounts.good_day ?? 0}/${autoDayCounts.bad_day ?? 0}/${autoDayCounts.killer_day ?? 0}</span>
               <span>Почта: ${auto.email_status || '-'}</span>
             </div>
             <div><strong>Главные killers:</strong> ${killerText}</div>
+            <div><strong>Повторяющиеся killers:</strong> ${recurringText}</div>
+            <div><strong>Устойчивый overlay:</strong> ${consensusText}</div>
             ${recHtml}
           </div>`;
       }

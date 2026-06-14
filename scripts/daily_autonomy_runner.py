@@ -172,6 +172,10 @@ def hour_bucket(row: dict) -> str:
     return f"{dt.hour:02d}:00" if dt else "unknown"
 
 
+def trade_date_value(row: dict) -> str:
+    return str(row.get("closed_at") or "")[:10]
+
+
 def scenario_adjusted_net(row: dict, cap_rub: int | None, profiles: dict[str, dict]) -> float:
     net = parse_trade_net(row)
     qty = max(1, safe_int(row.get("qty"), 1))
@@ -358,6 +362,185 @@ def build_research_scenarios(all_rows: list[dict], sample_rows: list[dict], prof
     return scenarios
 
 
+def classify_day(trade_date: str, rows: list[dict], profiles: dict[str, dict]) -> dict:
+    overall = metrics(rows)
+    nets = [parse_trade_net(row) for row in rows]
+    wins = [value for value in nets if value > 0]
+    losses = sorted([value for value in nets if value < 0])
+    gross_win = round(sum(wins), 2)
+    gross_loss = round(abs(sum(losses)), 2)
+    top1_loss = round(abs(losses[0]), 2) if losses else 0.0
+    top3_loss = round(abs(sum(losses[:3])), 2) if losses else 0.0
+    late_rows = []
+    for row in rows:
+        dt = entry_dt(row)
+        if dt and dt.hour >= 17:
+            late_rows.append(row)
+    late_net = round(sum(parse_trade_net(row) for row in late_rows), 2)
+    by_ticker = grouped_metrics(rows, lambda row: str(row.get("secid") or ""))
+    by_family = grouped_metrics(rows, lambda row: family_for_row(row, profiles))
+    worst_ticker = ranked_tail([row for row in by_ticker if safe_float(row.get("net_rub")) < 0], limit=1, reverse=False)
+    worst_family = ranked_tail([row for row in by_family if safe_float(row.get("net_rub")) < 0], limit=1, reverse=False)
+    killer_condition = top3_loss >= max(1500.0, gross_win * 0.9) or top1_loss >= max(1000.0, gross_win * 0.6)
+    if overall["net_rub"] > 0 and not killer_condition:
+        day_class = "good_day"
+        class_reason = "день в плюсе без доминирующего хвостового убытка"
+    elif killer_condition:
+        day_class = "killer_day"
+        class_reason = "1-3 крупных убытка съедают дневную структуру"
+    else:
+        day_class = "bad_day"
+        class_reason = "день в минусе без одного явного разрушителя"
+    return {
+        "trade_date": trade_date,
+        "trades": overall["trades"],
+        "wins": overall["wins"],
+        "losses": overall["losses"],
+        "win_rate_pct": overall["win_rate_pct"],
+        "net_rub": overall["net_rub"],
+        "expectancy_rub": overall["expectancy_rub"],
+        "gross_win_rub": gross_win,
+        "gross_loss_rub": gross_loss,
+        "top1_loss_rub": top1_loss,
+        "top3_loss_rub": top3_loss,
+        "late_net_rub": late_net,
+        "worst_ticker": worst_ticker[0]["group"] if worst_ticker else "",
+        "worst_ticker_net_rub": worst_ticker[0]["net_rub"] if worst_ticker else 0.0,
+        "worst_family": worst_family[0]["group"] if worst_family else "",
+        "worst_family_net_rub": worst_family[0]["net_rub"] if worst_family else 0.0,
+        "day_class": day_class,
+        "class_reason": class_reason,
+    }
+
+
+def build_day_history(all_rows: list[dict], profiles: dict[str, dict]) -> list[dict]:
+    out: list[dict] = []
+    dates = sorted({trade_date_value(row) for row in all_rows if trade_date_value(row)})
+    for trade_date in dates:
+        day_rows = filter_trade_date(all_rows, trade_date)
+        if not day_rows:
+            continue
+        out.append(classify_day(trade_date, day_rows, profiles))
+    return out
+
+
+def build_recurring_killers(day_history: list[dict], field: str) -> list[dict]:
+    groups: dict[str, list[dict]] = defaultdict(list)
+    net_field = f"{field}_net_rub"
+    for row in day_history:
+        key = str(row.get(field) or "")
+        if key:
+            groups[key].append(row)
+    out = []
+    for key, items in groups.items():
+        bucket_nets = [safe_float(item.get(net_field)) for item in items]
+        out.append(
+            {
+                "group": key,
+                "days": len(items),
+                "killer_days": sum(1 for item in items if item.get("day_class") == "killer_day"),
+                "bad_days": sum(1 for item in items if item.get("day_class") == "bad_day"),
+                "good_days": sum(1 for item in items if item.get("day_class") == "good_day"),
+                "total_bucket_net_rub": round(sum(bucket_nets), 2),
+                "avg_bucket_net_rub": round(sum(bucket_nets) / len(bucket_nets), 2) if bucket_nets else 0.0,
+                "worst_bucket_rub": round(min(bucket_nets), 2) if bucket_nets else 0.0,
+                "latest_trade_date": items[-1].get("trade_date"),
+            }
+        )
+    out.sort(key=lambda row: (safe_int(row.get("killer_days"), 0), safe_float(row.get("total_bucket_net_rub"))), reverse=True)
+    return out
+
+
+def build_scenario_history(all_rows: list[dict], profiles: dict[str, dict]) -> list[dict]:
+    dates = sorted({trade_date_value(row) for row in all_rows if trade_date_value(row)})
+    out: list[dict] = []
+    for trade_date in dates:
+        history_rows = [row for row in all_rows if trade_date_value(row) <= trade_date]
+        day_rows = filter_trade_date(all_rows, trade_date)
+        scenarios = build_research_scenarios(history_rows, day_rows, profiles)
+        for idx, scenario in enumerate(scenarios, start=1):
+            item = dict(scenario)
+            item["trade_date"] = trade_date
+            item["rank"] = idx
+            out.append(item)
+    return out
+
+
+def summarize_scenario_history(rows: list[dict]) -> list[dict]:
+    base_by_date = {
+        str(row.get("trade_date") or ""): row
+        for row in rows
+        if str(row.get("scenario") or "") == "base" and str(row.get("trade_date") or "")
+    }
+    groups: dict[str, list[dict]] = defaultdict(list)
+    for row in rows:
+        groups[str(row.get("scenario") or "")].append(row)
+    out: list[dict] = []
+    for scenario, items in groups.items():
+        nets = [safe_float(item.get("net_rub")) for item in items]
+        deltas = []
+        beat_base_days = 0
+        latest_day_delta = None
+        for item in items:
+            trade_date = str(item.get("trade_date") or "")
+            base = base_by_date.get(trade_date)
+            if not base:
+                continue
+            delta = safe_float(item.get("net_rub")) - safe_float(base.get("net_rub"))
+            deltas.append(delta)
+            if delta > 0:
+                beat_base_days += 1
+            latest_day_delta = delta
+        note = next((str(item.get("note") or "") for item in items if item.get("note")), "")
+        out.append(
+            {
+                "scenario": scenario,
+                "note": note,
+                "days": len(items),
+                "positive_days": sum(1 for value in nets if value > 0),
+                "negative_days": sum(1 for value in nets if value < 0),
+                "total_net_rub": round(sum(nets), 2),
+                "avg_daily_net_rub": round(sum(nets) / len(nets), 2) if nets else 0.0,
+                "median_daily_net_rub": round(median(nets), 2) if nets else 0.0,
+                "worst_day_rub": round(min(nets), 2) if nets else 0.0,
+                "best_day_rub": round(max(nets), 2) if nets else 0.0,
+                "latest_day_rub": round(nets[-1], 2) if nets else 0.0,
+                "beat_base_days": beat_base_days,
+                "beat_base_pct": round((beat_base_days / len(items) * 100.0), 2) if items else 0.0,
+                "delta_total_rub": round(sum(deltas), 2),
+                "latest_day_delta_rub": round(latest_day_delta, 2) if latest_day_delta is not None else 0.0,
+            }
+        )
+    out.sort(
+        key=lambda row: (
+            safe_int(row.get("beat_base_days"), 0),
+            safe_float(row.get("delta_total_rub")),
+            safe_float(row.get("median_daily_net_rub")),
+            safe_float(row.get("worst_day_rub")),
+            safe_float(row.get("total_net_rub")),
+        ),
+        reverse=True,
+    )
+    return out
+
+
+def pick_best_consensus_scenario(rows: list[dict]) -> dict:
+    if not rows:
+        return {}
+    base = next((row for row in rows if row.get("scenario") == "base"), rows[0])
+    qualified = []
+    for row in rows:
+        if row.get("scenario") == "base":
+            continue
+        days = max(1, safe_int(row.get("days"), 0))
+        if safe_int(row.get("beat_base_days"), 0) < math.ceil(days * 0.5):
+            continue
+        if safe_float(row.get("delta_total_rub")) <= 0:
+            continue
+        qualified.append(row)
+    return qualified[0] if qualified else base
+
+
 def markdown_top(title: str, rows: list[dict], columns: list[str], limit: int = 10) -> str:
     if not rows:
         return f"## {title}\n\nНет данных.\n"
@@ -442,6 +625,8 @@ def build_recommendations(
     by_family: list[dict],
     by_hour: list[dict],
     research_day: list[dict],
+    research_consensus: list[dict],
+    day_history: list[dict],
 ) -> list[str]:
     notes: list[str] = []
     if overall.get("trades", 0) <= 0:
@@ -482,6 +667,17 @@ def build_recommendations(
             )
         else:
             notes.append("На дневном срезе нет overlay, который убедительно лучше base без натяжки.")
+    if day_history:
+        killer_days = sum(1 for row in day_history if row.get("day_class") == "killer_day")
+        if killer_days:
+            notes.append(f"По накопленной серии killer-дней: {killer_days} из {len(day_history)}. Значит, хвостовая проблема повторяется, а не случайна.")
+    if research_consensus:
+        best_consensus = pick_best_consensus_scenario(research_consensus)
+        if best_consensus and best_consensus.get("scenario") != "base":
+            notes.append(
+                f"Самый устойчивый overlay по всей серии: {best_consensus['scenario']} "
+                f"(beat_base_days={best_consensus['beat_base_days']}/{best_consensus['days']}, delta_total={best_consensus['delta_total_rub']} ₽)."
+            )
     return notes[:6]
 
 
@@ -498,9 +694,13 @@ def build_summary_markdown(
     worst_tickers: list[dict],
     worst_families: list[dict],
     roll_watch: list[dict],
+    day_history: list[dict],
+    recurring_tickers: list[dict],
+    recurring_families: list[dict],
     recommendations: list[str],
     best_research_day: list[dict],
     best_research_all: list[dict],
+    best_research_consensus: list[dict],
 ) -> str:
     lines = [
         f"# 3pips daily autonomy summary: {trade_date}",
@@ -531,9 +731,13 @@ def build_summary_markdown(
     lines.append(markdown_top("By Family", by_family, ["group", "trades", "win_rate_pct", "net_rub", "expectancy_rub"], limit=15))
     lines.append(markdown_top("By Hour", by_hour, ["group", "trades", "win_rate_pct", "net_rub", "expectancy_rub"], limit=12))
     lines.append(markdown_top("Rollover Watch", roll_watch, ["portfolio_group", "family", "ticker", "days_to_expiration", "selected", "status"], limit=12))
+    lines.append(markdown_top("Day History", day_history, ["trade_date", "day_class", "trades", "net_rub", "top1_loss_rub", "top3_loss_rub", "late_net_rub", "worst_ticker"], limit=15))
+    lines.append(markdown_top("Recurring Killer Tickers", recurring_tickers, ["group", "days", "killer_days", "total_bucket_net_rub", "worst_bucket_rub"], limit=10))
+    lines.append(markdown_top("Recurring Killer Families", recurring_families, ["group", "days", "killer_days", "total_bucket_net_rub", "worst_bucket_rub"], limit=10))
     lines.append(markdown_top("Worst Trades", worst_trades, ["closed_at", "portfolio_group", "contour", "secid", "direction", "qty", "net_rub", "ticks"], limit=10))
     lines.append(markdown_top("Research Top: Latest Day", best_research_day, ["scenario", "trades", "win_rate_pct", "net_rub", "expectancy_rub", "note"], limit=10))
     lines.append(markdown_top("Research Top: All Sample", best_research_all, ["scenario", "trades", "win_rate_pct", "net_rub", "expectancy_rub", "note"], limit=10))
+    lines.append(markdown_top("Research Top: Consensus", best_research_consensus, ["scenario", "days", "beat_base_days", "delta_total_rub", "median_daily_net_rub", "worst_day_rub", "note"], limit=10))
     return "\n".join(lines)
 
 
@@ -585,6 +789,12 @@ def main() -> int:
         row["family"] = family_for_row(row, profiles)
         row["group_key"] = f"{row.get('portfolio_group','')}/{row.get('contour','')}"
 
+    day_history = build_day_history(all_rows, profiles)
+    recurring_tickers = build_recurring_killers(day_history, "worst_ticker")
+    recurring_families = build_recurring_killers(day_history, "worst_family")
+    scenario_history = build_scenario_history(all_rows, profiles)
+    scenario_consensus = summarize_scenario_history(scenario_history)
+
     analysis_dir = analysis_root / trade_date
     research_dir = research_root / trade_date
     bundle_dir = archive_root / f"bundle_{trade_date}"
@@ -609,7 +819,7 @@ def main() -> int:
 
     research_day = build_research_scenarios(all_rows, day_rows, profiles)
     research_all = build_research_scenarios(all_rows, all_rows, profiles)
-    recommendations = build_recommendations(overall, by_ticker, by_family, by_hour, research_day)
+    recommendations = build_recommendations(overall, by_ticker, by_family, by_hour, research_day, scenario_consensus, day_history)
 
     summary_md = build_summary_markdown(
         trade_date,
@@ -624,9 +834,13 @@ def main() -> int:
         worst_tickers,
         worst_families,
         roll_watch,
+        day_history,
+        recurring_tickers,
+        recurring_families,
         recommendations,
         research_day,
         research_all,
+        scenario_consensus,
     )
     write_text(analysis_dir / "daily_summary.md", summary_md)
     write_json(
@@ -637,6 +851,7 @@ def main() -> int:
             "overall": overall,
             "open_positions": open_summary,
             "recommendations": recommendations,
+            "best_consensus_scenario": pick_best_consensus_scenario(scenario_consensus),
         },
     )
     write_csv_rows(analysis_dir / "by_group.csv", by_group)
@@ -648,6 +863,9 @@ def main() -> int:
     write_csv_rows(analysis_dir / "worst_tickers.csv", worst_tickers)
     write_csv_rows(analysis_dir / "worst_families.csv", worst_families)
     write_csv_rows(analysis_dir / "roll_watch.csv", roll_watch)
+    write_csv_rows(analysis_dir / "day_history.csv", day_history)
+    write_csv_rows(analysis_dir / "recurring_killer_tickers.csv", recurring_tickers)
+    write_csv_rows(analysis_dir / "recurring_killer_families.csv", recurring_families)
     write_text(analysis_dir / "recommendations.md", "\n".join(f"- {line}" for line in recommendations) + ("\n" if recommendations else ""))
 
     for row in research_day:
@@ -656,11 +874,15 @@ def main() -> int:
         row["sample"] = "all_sample"
     write_csv_rows(research_dir / "policy_sweep_latest_day.csv", research_day)
     write_csv_rows(research_dir / "policy_sweep_all_sample.csv", research_all)
+    write_csv_rows(research_dir / "policy_sweep_daily_history.csv", scenario_history)
+    write_csv_rows(research_dir / "policy_sweep_consensus.csv", scenario_consensus)
     write_text(
         research_dir / "research_summary.md",
         markdown_top("Research Top: Latest Day", research_day, ["scenario", "trades", "win_rate_pct", "net_rub", "expectancy_rub", "note"], limit=15)
         + "\n"
-        + markdown_top("Research Top: All Sample", research_all, ["scenario", "trades", "win_rate_pct", "net_rub", "expectancy_rub", "note"], limit=15),
+        + markdown_top("Research Top: All Sample", research_all, ["scenario", "trades", "win_rate_pct", "net_rub", "expectancy_rub", "note"], limit=15)
+        + "\n"
+        + markdown_top("Research Top: Consensus", scenario_consensus, ["scenario", "days", "beat_base_days", "delta_total_rub", "median_daily_net_rub", "worst_day_rub", "note"], limit=15),
     )
 
     raw_dir = bundle_dir / "raw"
@@ -683,6 +905,19 @@ def main() -> int:
 
     shutil.copy2(analysis_dir / "daily_summary.md", bundle_dir / "daily_summary.md")
     shutil.copy2(research_dir / "research_summary.md", bundle_dir / "research_summary.md")
+    for path in [
+        analysis_dir / "day_history.csv",
+        analysis_dir / "recurring_killer_tickers.csv",
+        analysis_dir / "recurring_killer_families.csv",
+        analysis_dir / "worst_tickers.csv",
+        analysis_dir / "worst_families.csv",
+        research_dir / "policy_sweep_latest_day.csv",
+        research_dir / "policy_sweep_all_sample.csv",
+        research_dir / "policy_sweep_daily_history.csv",
+        research_dir / "policy_sweep_consensus.csv",
+    ]:
+        if path.exists():
+            shutil.copy2(path, bundle_dir / path.name)
     manifest_payload = {
         "trade_date": trade_date,
         "generated_at": now_str(),
@@ -691,8 +926,18 @@ def main() -> int:
         "recommendations": recommendations,
         "best_latest_day_scenario": research_day[0] if research_day else {},
         "best_all_sample_scenario": research_all[0] if research_all else {},
+        "best_consensus_scenario": pick_best_consensus_scenario(scenario_consensus),
+        "day_history_tail": day_history[-10:],
+        "day_class_counts": {
+            "good_day": sum(1 for row in day_history if row.get("day_class") == "good_day"),
+            "bad_day": sum(1 for row in day_history if row.get("day_class") == "bad_day"),
+            "killer_day": sum(1 for row in day_history if row.get("day_class") == "killer_day"),
+        },
         "top_killer_tickers": worst_tickers[:3],
         "top_killer_families": worst_families[:3],
+        "recurring_killer_tickers": recurring_tickers[:5],
+        "recurring_killer_families": recurring_families[:5],
+        "research_consensus_top": scenario_consensus[:10],
         "roll_watch": roll_watch[:12],
     }
     write_json(bundle_dir / "manifest.json", manifest_payload)
