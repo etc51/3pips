@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parents[1]
 REPORTS = ROOT / "reports"
 SPEC_CACHE: dict[str, tuple[float, float]] = {}
 LOCAL_SPEC_CACHE: dict[str, tuple[float, float]] | None = None
-PORTFOLIO_CAPITAL_RUB = 200_000.0
+PORTFOLIO_CAPITAL_RUB = 800_000.0
 
 
 def expected_session_status(portfolio: str, now: datetime | None = None) -> tuple[str, str] | None:
@@ -196,6 +196,8 @@ def human_reason(reason: object) -> str:
         return "BR: спред слишком большой к стопу"
     if text.startswith("spread_filter"):
         return "фильтр: спред больше стопа"
+    if text.startswith("stock_spread_filter"):
+        return "акции: спред слишком большой для входа"
     if text.startswith("brq6_loss_pause"):
         return "BR: пауза после серии стопов"
     if text == "restored_open_position":
@@ -206,6 +208,12 @@ def human_reason(reason: object) -> str:
         return "фильтр: близко экспирация, новые входы запрещены"
     if text.startswith("roll_family_filter"):
         return "фильтр: уже есть позиция в этом семействе на переносе"
+    if text.startswith("roll_observe"):
+        return "новый контракт семьи: режим наблюдения до набора статистики"
+    if text.startswith("dte_above_observe_window"):
+        return "до окна автопереноса ещё далеко"
+    if "queued for auto load" in text:
+        return "контракт поставлен в очередь на автоперенос"
     if text.startswith("direction_filter"):
         return "фильтр: сигнал против направления профиля"
     if text.startswith("entry_signal long"):
@@ -323,6 +331,110 @@ def human_gpt_layer(value: object) -> str:
     }.get(text, text or "строгий")
 
 
+def human_direction(value: object) -> str:
+    text = "" if value is None else str(value).strip().lower()
+    return {
+        "long": "лонг",
+        "short": "шорт",
+        "both": "оба",
+    }.get(text, text or "-")
+
+
+def human_contour(value: object) -> str:
+    text = "" if value is None else str(value).strip().lower()
+    return {
+        "strict": "строгий",
+        "aggressive": "агрессивный",
+        "reduced": "уменьшенный",
+        "micro": "микро",
+        "observe": "наблюдение",
+    }.get(text, text or "-")
+
+
+def human_risk_mode(value: object) -> str:
+    text = "" if value is None else str(value).strip().lower()
+    return {
+        "normal": "норма",
+        "observe": "наблюдение",
+        "micro": "микро",
+        "reduced": "уменьшен",
+        "median_cap": "лимит по медиане",
+        "paused": "пауза",
+    }.get(text, text or "-")
+
+
+def human_exit_source(value: object) -> str:
+    text = "" if value is None else str(value).strip()
+    mapping = {
+        "broker_stop_limit_fill": "лимитный стоп исполнен",
+        "stop_limit_touched_waiting_fill": "стоп сработал, лимит ждёт исполнения",
+        "stop_limit_waiting": "лимитный стоп ещё не исполнен",
+        "emergency_market_after_missed_limit": "маркет после несработавшей лимитки",
+        "candle_like_stop_fill": "свечной стоп",
+        "closed_1m_candle": "выход по закрытой минутной свече",
+        "bid_exit": "выход по bid",
+        "ask_exit": "выход по ask",
+        "scheduled_force_close": "плановое закрытие",
+        "gpt_scheduled_force_close": "GPT: плановое закрытие",
+        "gpt_max_hold_exit": "GPT: выход по max hold",
+    }
+    return mapping.get(text, human_reason(text))
+
+
+def human_exit_mode(value: object) -> str:
+    text = "" if value is None else str(value).strip().lower()
+    return {
+        "direct_ticks": "тики профиля",
+        "profile_ticks": "тики профиля",
+        "percent": "процентный",
+        "stream_stoplimit": "стрим + stop-limit",
+        "candle_like": "мягкий свечной",
+    }.get(text, text or "-")
+
+
+def human_startup_status(value: object) -> str:
+    text = "" if value is None else str(value).strip().lower()
+    return {
+        "loaded": "загружен",
+        "skipped": "пропущен",
+        "error": "ошибка",
+    }.get(text, text or "-")
+
+
+def human_load_reason(value: object) -> str:
+    text = "" if value is None else str(value).strip().lower()
+    return {
+        "configured": "основной список",
+        "auto_roll": "автоперенос",
+        "stock_watchlist": "акции",
+    }.get(text, text or "-")
+
+
+def human_roll_status(value: object) -> str:
+    text = "" if value is None else str(value).strip().lower()
+    return {
+        "queued_roll_contract": "в очереди на автоперенос",
+        "selected": "выбран",
+        "blocked": "заблокирован",
+        "not_near_roll": "ещё рано",
+        "missing_profile": "нет профиля",
+        "already_loaded": "уже загружен",
+    }.get(text, text or "-")
+
+
+def human_system_status(value: object) -> str:
+    text = "" if value is None else str(value).strip().lower()
+    return {
+        "healthy": "ok",
+        "ok": "ok",
+        "incident": "ошибка",
+        "disabled": "выкл",
+        "missing": "нет данных",
+        "warning": "внимание",
+        "stale": "устарело",
+    }.get(text, text or "-")
+
+
 def readiness_label(score: object, reason: object) -> str:
     try:
         value = int(score)
@@ -401,6 +513,12 @@ def latest_mtime(paths: list[Path]) -> str:
     if not existing:
         return ""
     return datetime.fromtimestamp(max(existing)).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def file_age_sec(path: Path) -> int | None:
+    if not path.exists():
+        return None
+    return int((datetime.now().timestamp()) - path.stat().st_mtime)
 
 
 def normalize_multi_trades(df: pd.DataFrame, portfolio: str) -> pd.DataFrame:
@@ -484,6 +602,7 @@ def equity_stats(pnl: pd.Series) -> dict:
 def build_state(base_dir: Path) -> dict:
     config = read_portfolio_config(base_dir)
     portfolio_names = discover_portfolios(base_dir)
+    runtime_dir = base_dir.parent.parent / "runtime"
     trade_parts = []
     for portfolio in portfolio_names:
         trade_parts.append(
@@ -536,6 +655,95 @@ def build_state(base_dir: Path) -> dict:
                 open_positions.append(item)
     open_positions = [enrich_position_pnl(item) if isinstance(item, dict) else item for item in open_positions]
 
+    portfolio_health = []
+    for portfolio in portfolio_names:
+        health_path = portfolio_path(base_dir, portfolio, "health.json")
+        payload = read_json(health_path)
+        payload = payload if isinstance(payload, dict) else {}
+        health_age = file_age_sec(health_path)
+        stream_age = number(payload.get("last_stream_age_sec"), 1)
+        reconnect_count = payload.get("reconnect_count")
+        health_status = "нет данных"
+        if not payload:
+            health_status = "нет данных"
+        elif health_age is not None and health_age > 180:
+            health_status = "устарело"
+        elif str(payload.get("status") or "").lower() != "running":
+            health_status = "ошибка"
+        elif stream_age is not None and stream_age > 20:
+            health_status = "внимание"
+        else:
+            health_status = "ok"
+        contour_stats = payload.get("contours") if isinstance(payload.get("contours"), dict) else {}
+        contour_parts = []
+        for contour_name, contour_payload in contour_stats.items():
+            if not isinstance(contour_payload, dict):
+                continue
+            contour_parts.append(
+                f"{human_contour(contour_name)}: "
+                f"{int(contour_payload.get('open_positions') or 0)} поз / "
+                f"{int(contour_payload.get('closed') or 0)} закр"
+            )
+        portfolio_health.append(
+            {
+                "portfolio": portfolio,
+                "status": health_status,
+                "updated": payload.get("timestamp") or latest_mtime([health_path]) or "-",
+                "health_age_sec": health_age,
+                "uptime_sec": number(payload.get("uptime_sec"), 1),
+                "stream_age_sec": stream_age,
+                "reconnect_count": reconnect_count,
+                "open_positions": payload.get("open_positions"),
+                "closed_trades": payload.get("closed_trades"),
+                "closed_net": number(payload.get("closed_net")),
+                "used_margin": number(payload.get("used_margin")),
+                "last_stream_error": payload.get("last_stream_error") or "",
+                "contours": "; ".join(contour_parts) or "-",
+            }
+        )
+
+    system_overview = []
+    watchdog_state = read_json(runtime_dir / "server_watchdog_state.json")
+    if isinstance(watchdog_state, dict):
+        system_overview.append(
+            {
+                "service": "watchdog",
+                "status": human_system_status(watchdog_state.get("status") or "missing"),
+                "updated": watchdog_state.get("last_change") or "-",
+                "detail": watchdog_state.get("last_summary") or "-",
+            }
+        )
+    else:
+        system_overview.append(
+            {"service": "watchdog", "status": "нет данных", "updated": "-", "detail": "state-файл не найден"}
+        )
+
+    autoupdate_state = read_json(runtime_dir / "docker_autoupdate_state.json")
+    if isinstance(autoupdate_state, dict):
+        system_overview.append(
+            {
+                "service": "auto-update",
+                "status": "ok",
+                "updated": autoupdate_state.get("updated_at") or "-",
+                "detail": f"{autoupdate_state.get('previous_head', '-')[:7]} -> {autoupdate_state.get('current_head', '-')[:7]}",
+            }
+        )
+    else:
+        system_overview.append(
+            {"service": "auto-update", "status": "нет данных", "updated": "-", "detail": "обновлений пока не было"}
+        )
+
+    supervisor_log = runtime_dir / "v7_paper_supervisor_20260525.log"
+    supervisor_age = file_age_sec(supervisor_log)
+    system_overview.append(
+        {
+            "service": "supervisor",
+            "status": "ok" if supervisor_age is not None and supervisor_age <= 90 else "внимание",
+            "updated": latest_mtime([supervisor_log]) or "-",
+            "detail": f"последняя запись {supervisor_age}s назад" if supervisor_age is not None else "лог не найден",
+        }
+    )
+
     closed = trades[pd.to_numeric(trades.get("net_pnl_rub"), errors="coerce").notna()].copy() if not trades.empty else pd.DataFrame()
     if not closed.empty and "time" in closed:
         closed["_day"] = pd.to_datetime(closed["time"], errors="coerce").dt.strftime("%Y-%m-%d")
@@ -567,6 +775,8 @@ def build_state(base_dir: Path) -> dict:
             ]
         )
     stats["last_update"] = latest_mtime(watched_paths)
+    stats["watchdog_status"] = next((item["status"] for item in system_overview if item["service"] == "watchdog"), "-")
+    stats["system_incidents"] = int(sum(1 for item in system_overview if item["status"] not in {"ok", "нет данных", "выкл"}))
 
     by_ticker = []
     if not closed.empty and "ticker" in closed:
@@ -612,6 +822,7 @@ def build_state(base_dir: Path) -> dict:
                 "free_capital": number(capital + total - margin),
                 "open_positions": len(open_part),
                 "closed_trades": int(len(closed_part)),
+                "risk_modes": ", ".join(sorted({human_risk_mode(p.get("risk_mode")) for p in open_part if p.get("risk_mode")})) or "-",
             }
         )
 
@@ -651,6 +862,7 @@ def build_state(base_dir: Path) -> dict:
         "qty",
         "entry_price",
         "exit_price",
+        "trigger_price",
         "ticks",
         "fees_rub",
         "net_pnl_rub",
@@ -659,13 +871,17 @@ def build_state(base_dir: Path) -> dict:
     gpt_shadow_recent = []
     if not gpt_shadow_trades.empty:
         view = gpt_shadow_trades[[c for c in gpt_shadow_recent_cols if c in gpt_shadow_trades.columns]].tail(50)
-        for col in ("exit_source",):
-            if col in view:
-                view[col] = view[col].map(human_cell)
+        if "direction" in view:
+            view["direction"] = view["direction"].map(human_direction)
+        if "contour" in view:
+            view["contour"] = view["contour"].map(human_contour)
+        if "exit_source" in view:
+            view["exit_source"] = view["exit_source"].map(human_exit_source)
         gpt_shadow_recent = json.loads(view.where(pd.notna(view), None).to_json(orient="records"))
 
     recent_trades_cols = [
         "time",
+        "opened_at",
         "portfolio",
         "contour",
         "ticker",
@@ -673,6 +889,10 @@ def build_state(base_dir: Path) -> dict:
         "qty",
         "entry_price",
         "exit_price",
+        "trigger_price",
+        "exit_source",
+        "stop_limit_qty",
+        "stop_overrun_ticks",
         "ticks",
         "fees_rub",
         "net_pnl_rub",
@@ -683,6 +903,12 @@ def build_state(base_dir: Path) -> dict:
     recent_trades = []
     if not trades.empty:
         view = trades[[c for c in recent_trades_cols if c in trades.columns]].tail(50)
+        if "direction" in view:
+            view["direction"] = view["direction"].map(human_direction)
+        if "contour" in view:
+            view["contour"] = view["contour"].map(human_contour)
+        if "exit_source" in view:
+            view["exit_source"] = view["exit_source"].map(human_exit_source)
         for col in ("fill_status", "skip_reason", "source"):
             if col in view:
                 view[col] = view[col].map(human_cell)
@@ -764,6 +990,67 @@ def build_state(base_dir: Path) -> dict:
         stop = item.get("stop_price")
         positions_by_ticker.setdefault(key, []).append(f"{side} {entry} / стоп {stop}")
 
+    roll_overview = []
+    for portfolio in portfolio_names:
+        roll_payload = read_json(portfolio_path(base_dir, portfolio, "roll_state.json"))
+        if not isinstance(roll_payload, dict):
+            continue
+        observe_days = number(roll_payload.get("roll_observe_days"), 1)
+        for item in roll_payload.get("roll_events", []):
+            if not isinstance(item, dict):
+                continue
+            dte = number(item.get("days_to_expiration"), 1)
+            status_raw = str(item.get("status") or "")
+            if status_raw == "not_near_roll" and (dte is None or (observe_days is not None and dte > observe_days)):
+                continue
+            candidates = item.get("candidates") if isinstance(item.get("candidates"), list) else []
+            candidate_summary = "; ".join(
+                f"{c.get('ticker')}: {human_roll_status(c.get('status'))}"
+                for c in candidates[:4]
+                if isinstance(c, dict)
+            )
+            roll_overview.append(
+                {
+                    "portfolio": portfolio,
+                    "ticker": item.get("ticker"),
+                    "family": item.get("family"),
+                    "days_to_expiration": dte,
+                    "status": human_roll_status(status_raw),
+                    "selected": item.get("selected") or "-",
+                    "profile_source": item.get("selected_profile_source") or "-",
+                    "candidates": candidate_summary or "-",
+                    "comment": human_reason(item.get("reason")) if item.get("reason") else "-",
+                }
+            )
+    roll_overview.sort(key=lambda x: (999999 if x.get("days_to_expiration") is None else float(x["days_to_expiration"]), str(x.get("portfolio") or ""), str(x.get("ticker") or "")))
+
+    startup_overview = []
+    if not startup_status.empty and {"portfolio", "ticker"}.issubset(startup_status.columns):
+        latest_startup = startup_status.groupby(["portfolio", "ticker"], dropna=True).tail(1).copy()
+        for _, row in latest_startup.iterrows():
+            rec = clean_record(row.to_dict())
+            startup_overview.append(
+                {
+                    "portfolio": rec.get("portfolio"),
+                    "ticker": rec.get("ticker"),
+                    "family": rec.get("family"),
+                    "status": human_startup_status(rec.get("status")),
+                    "load_reason": human_load_reason(rec.get("load_reason")),
+                    "profile_source": rec.get("profile_source") or "-",
+                    "days_to_expiration": number(rec.get("days_to_expiration"), 1),
+                    "go_buy": number(rec.get("go_buy")),
+                    "go_sell": number(rec.get("go_sell")),
+                    "comment": human_reason(rec.get("reason")) if rec.get("reason") else "-",
+                }
+            )
+    startup_overview.sort(
+        key=lambda x: (
+            0 if x.get("status") == "пропущен" else 1 if x.get("load_reason") == "автоперенос" else 2,
+            str(x.get("portfolio") or ""),
+            str(x.get("ticker") or ""),
+        )
+    )
+
     ticker_overview = []
     seen_tickers = set()
     startup_by_key = {}
@@ -782,7 +1069,9 @@ def build_state(base_dir: Path) -> dict:
             "ticker": key[1],
             "position": "; ".join(positions_by_ticker.get(key, [])) or "-",
             "state": rec.get("state_label"),
-            "risk": rec.get("risk_mode") or "-",
+            "risk": human_risk_mode(rec.get("risk_mode")),
+            "risk_limit_rub": number(rec.get("risk_limit_rub")),
+            "policy": human_reason(rec.get("risk_reason")) if rec.get("risk_reason") and str(rec.get("risk_reason")) != "risk_ok" else "-",
             "last": rec.get("last_price_target"),
             "bid": rec.get("bid_target"),
             "ask": rec.get("ask_target"),
@@ -826,6 +1115,8 @@ def build_state(base_dir: Path) -> dict:
                     "position": "; ".join(positions_by_ticker.get(key, [])) or "-",
                     "state": state,
                     "risk": "-",
+                    "risk_limit_rub": None,
+                    "policy": human_reason(startup_reason) if startup_reason else "-",
                     "last": last,
                     "bid": None,
                     "ask": None,
@@ -847,16 +1138,36 @@ def build_state(base_dir: Path) -> dict:
         row = summary.tail(1).iloc[0].to_dict()
         exec_summary = {k: (None if pd.isna(v) else v) for k, v in row.items()}
 
+    open_positions_view = []
+    for item in open_positions:
+        if not isinstance(item, dict):
+            continue
+        open_positions_view.append(
+            {
+                **item,
+                "contour": human_contour(item.get("contour")),
+                "direction": human_direction(item.get("direction")),
+                "risk_mode": human_risk_mode(item.get("risk_mode")),
+                "risk_reason_text": human_reason(item.get("risk_reason")) if item.get("risk_reason") and str(item.get("risk_reason")) != "risk_ok" else "-",
+                "exit_mode_label": human_exit_mode(item.get("exit_mode")) if item.get("exit_mode") else "-",
+                "mark_source_label": human_exit_source(item.get("mark_source")) if item.get("mark_source") else "-",
+            }
+        )
+
     return {
         "base_dir": str(base_dir),
         "stats": stats,
         "by_ticker": by_ticker,
+        "system_overview": system_overview,
+        "portfolio_health": portfolio_health,
+        "roll_overview": roll_overview,
+        "startup_overview": startup_overview,
         "portfolio_overview": portfolio_overview,
         "ticker_overview": ticker_overview,
         "wide_spread_watchlist": wide_spread_watchlist,
         "gpt_shadow_overview": gpt_shadow_overview,
         "gpt_shadow_recent": gpt_shadow_recent,
-        "open_positions": open_positions,
+        "open_positions": open_positions_view,
         "recent_trades": recent_trades,
         "micro": micro,
         "market_now": market_now,
@@ -908,7 +1219,7 @@ HTML = r"""<!doctype html>
     .status { color: var(--muted); font-size: 13px; text-align: right; }
     main { padding: 18px 22px 30px; max-width: 1480px; margin: 0 auto; }
     .grid { display: grid; gap: 14px; }
-    .cards { grid-template-columns: repeat(5, minmax(140px, 1fr)); }
+    .cards { grid-template-columns: repeat(7, minmax(130px, 1fr)); }
     .two { grid-template-columns: 1.2fr 0.8fr; align-items: start; }
     .card, section {
       background: var(--panel);
@@ -960,12 +1271,30 @@ HTML = r"""<!doctype html>
   </header>
   <main>
     <div class="grid cards">
-      <div class="card"><div class="label">Итого день ₽</div><div id="dayNet" class="value">0</div></div>
-      <div class="card"><div class="label">Итого всего ₽</div><div id="net" class="value">0</div></div>
+      <div class="card"><div class="label">Реализовано день ₽</div><div id="dayNet" class="value">0</div></div>
+      <div class="card"><div class="label">Реализовано всего ₽</div><div id="net" class="value">0</div></div>
+      <div class="card"><div class="label">Плавающее сейчас ₽</div><div id="openNet" class="value">0</div></div>
+      <div class="card"><div class="label">Всего с позициями ₽</div><div id="totalNet" class="value">0</div></div>
       <div class="card"><div class="label">Открыто позиций</div><div id="open" class="value">0</div></div>
       <div class="card"><div class="label">Сделок сегодня</div><div id="closed" class="value">0</div></div>
-      <div class="card"><div class="label">W / L день</div><div id="wl" class="value">0 / 0</div></div>
+      <div class="card"><div class="label">Автовосстановление</div><div id="watchdog" class="value">-</div></div>
     </div>
+    <section>
+      <h2>Система и восстановление</h2>
+      <div class="table-wrap"><table id="system"></table></div>
+    </section>
+    <section>
+      <h2>Здоровье контуров</h2>
+      <div class="table-wrap"><table id="health"></table></div>
+    </section>
+    <section>
+      <h2>Автоперенос контрактов</h2>
+      <div class="table-wrap"><table id="rolls"></table></div>
+    </section>
+    <section>
+      <h2>Загрузка контрактов</h2>
+      <div class="table-wrap"><table id="startup"></table></div>
+    </section>
     <section>
       <h2>Капитал контуров</h2>
       <div class="table-wrap"><table id="portfolios"></table></div>
@@ -998,10 +1327,17 @@ HTML = r"""<!doctype html>
   <script>
     const fmt = (n, d = 2) => n === null || n === undefined || Number.isNaN(Number(n)) ? "-" : Number(n).toLocaleString("ru-RU", {maximumFractionDigits: d});
     const cls = n => Number(n) > 0 ? "good" : Number(n) < 0 ? "bad" : "";
-    const stateClass = s => s === "близко" ? "ready" : s === "наблюдаем" ? "watch" : s === "прогрев" ? "wait" : s === "фильтр" ? "block" : "";
+    const badgeClass = s => {
+      const v = String(s ?? "").toLowerCase();
+      if (["близко","ok","загружен","выбран"].includes(v)) return "ready";
+      if (["наблюдаем","наблюдать","в очереди на автоперенос","основной список","автоперенос"].includes(v)) return "watch";
+      if (["прогрев","внимание","широкий","ещё рано"].includes(v)) return "wait";
+      if (["фильтр","пропущен","ошибка","доминирует","устарело","нет данных","заблокирован"].includes(v)) return "block";
+      return "";
+    };
     const cell = (r, c) => {
       const value = c[3] ? fmt(r[c[1]], c[3]) : (r[c[1]] ?? "-");
-      if (c[4] === "state") return `<td><span class="pill ${stateClass(value)}">${value}</span></td>`;
+      if (c[4] === "state" || c[4] === "badge") return `<td><span class="pill ${badgeClass(value)}">${value}</span></td>`;
       if (c[4] === "comment") return `<td class="comment">${value}</td>`;
       return `<td class="${c[2] ? cls(r[c[1]]) : ""}">${value}</td>`;
     };
@@ -1033,26 +1369,46 @@ HTML = r"""<!doctype html>
       const netEl = document.getElementById('net');
       netEl.textContent = fmt(s.net);
       netEl.className = "value " + cls(s.net);
+      const openNetEl = document.getElementById('openNet');
+      openNetEl.textContent = fmt(s.open_net);
+      openNetEl.className = "value " + cls(s.open_net);
+      const totalNetEl = document.getElementById('totalNet');
+      totalNetEl.textContent = fmt(s.total_net);
+      totalNetEl.className = "value " + cls(s.total_net);
       document.getElementById('closed').textContent = s.day_closed_trades || 0;
       document.getElementById('open').textContent = s.open_positions || 0;
-      document.getElementById('wl').textContent = `${s.day_wins || 0} / ${s.day_losses || 0}`;
+      const watchdogEl = document.getElementById('watchdog');
+      watchdogEl.textContent = s.watchdog_status || "-";
+      watchdogEl.className = "value " + (String(s.watchdog_status || "").toLowerCase() === "ok" ? "good" : String(s.watchdog_status || "").toLowerCase() === "ошибка" ? "bad" : "warn");
+      table(document.getElementById('system'), [
+        ["Сервис","service"], ["Статус","status",false,null,"badge"], ["Обновлено","updated"], ["Детали","detail",false,null,"comment"]
+      ], data.system_overview || []);
+      table(document.getElementById('health'), [
+        ["Контур","portfolio"], ["Статус","status",false,null,"badge"], ["Health","updated"], ["Возраст health, сек","health_age_sec"], ["Uptime, сек","uptime_sec",false,1], ["Поток, сек","stream_age_sec",false,1], ["Reconnect","reconnect_count"], ["Открыто","open_positions"], ["Закрыто","closed_trades"], ["Net ₽","closed_net",true,2], ["Контуры","contours",false,null,"comment"]
+      ], data.portfolio_health || []);
+      table(document.getElementById('rolls'), [
+        ["Контур","portfolio"], ["Тикер","ticker"], ["Семья","family"], ["DTE","days_to_expiration",false,1], ["Статус","status",false,null,"badge"], ["Выбран","selected"], ["Источник профиля","profile_source"], ["Кандидаты","candidates",false,null,"comment"], ["Комментарий","comment",false,null,"comment"]
+      ], data.roll_overview || []);
+      table(document.getElementById('startup'), [
+        ["Контур","portfolio"], ["Тикер","ticker"], ["Семья","family"], ["Статус","status",false,null,"badge"], ["Откуда","load_reason",false,null,"badge"], ["Профиль","profile_source"], ["DTE","days_to_expiration",false,1], ["ГО buy","go_buy",false,2], ["ГО sell","go_sell",false,2], ["Комментарий","comment",false,null,"comment"]
+      ], data.startup_overview || []);
       table(document.getElementById('portfolios'), [
-        ["Контур","portfolio"], ["Старт ₽","capital",false,2], ["День ₽","day_net",true,2], ["Всего ₽","closed_net",true,2], ["Доход %","return_pct",true,3], ["ГО занято ₽","used_margin",false,2], ["Свободно ₽","free_capital",false,2], ["Позиций","open_positions"], ["Сделок","closed_trades"]
+        ["Контур","portfolio"], ["Старт ₽","capital",false,2], ["Реал. день ₽","day_net",true,2], ["Реал. всего ₽","closed_net",true,2], ["Плавающее ₽","open_net",true,2], ["Итого ₽","total_net",true,2], ["Доход %","return_pct",true,3], ["ГО занято ₽","used_margin",false,2], ["Свободно ₽","free_capital",false,2], ["Режимы риска","risk_modes"], ["Позиций","open_positions"], ["Сделок","closed_trades"]
       ], data.portfolio_overview || []);
       table(document.getElementById('gptShadow'), [
         ["Слой","model"], ["Контур","portfolio"], ["Тень ₽","net",true,2], ["Сделок","trades"], ["Плюс","wins"], ["Минус","losses"], ["Плюс %","win_rate",false,1], ["Средняя ₽","avg_trade",true,2]
       ], data.gpt_shadow_overview || []);
       table(document.getElementById('tickers'), [
-        ["Контур","portfolio"], ["Тикер","ticker"], ["Позиция","position"], ["Готовность","state",false,null,"state"], ["Риск","risk"], ["Last","last"], ["Bid","bid"], ["Ask","ask"], ["Спред","spread"], ["Стоп","stop_ticks"], ["Спред/стоп %","spread_to_stop_pct"], ["Стакан","book"], ["Комментарий","comment",false,null,"comment"]
+        ["Контур","portfolio"], ["Тикер","ticker"], ["Позиция","position"], ["Готовность","state",false,null,"state"], ["Режим риска","risk"], ["Лимит риска ₽","risk_limit_rub",false,2], ["Политика","policy",false,null,"comment"], ["Last","last"], ["Bid","bid"], ["Ask","ask"], ["Спред","spread"], ["Стоп","stop_ticks"], ["Спред/стоп %","spread_to_stop_pct"], ["Стакан","book"], ["Комментарий","comment",false,null,"comment"]
       ], data.ticker_overview || []);
       table(document.getElementById('wideSpread'), [
         ["Контур","portfolio"], ["Тикер","ticker"], ["Last","last"], ["Спред","spread"], ["Стоп","stop_ticks"], ["Спред/стоп %","spread_to_stop_pct"], ["Класс","spread_class"], ["Стакан","book"], ["Комментарий","comment",false,null,"comment"]
       ], data.wide_spread_watchlist || []);
       table(document.getElementById('trades'), [
-        ["Время","time"], ["Портфель","portfolio"], ["Контур","contour"], ["Тикер","ticker"], ["Напр.","direction"], ["Qty","qty"], ["Entry","entry_price"], ["Exit","exit_price"], ["Ticks","ticks",true,2], ["Fee","fees_rub",false,2], ["Net","net_pnl_rub",true,2], ["Статус","fill_status"], ["Причина","skip_reason"]
+        ["Закрыта","time"], ["Открыта","opened_at"], ["Контур","portfolio"], ["Режим","contour"], ["Тикер","ticker"], ["Напр.","direction"], ["Qty","qty"], ["Entry","entry_price"], ["Trigger","trigger_price"], ["Exit","exit_price"], ["Выход","exit_source",false,null,"comment"], ["Лимит qty","stop_limit_qty"], ["Перелёт тиков","stop_overrun_ticks",true,2], ["Тики","ticks",true,2], ["Комиссия ₽","fees_rub",false,2], ["Net ₽","net_pnl_rub",true,2], ["Статус","fill_status"], ["Причина","skip_reason",false,null,"comment"]
       ], data.recent_trades || []);
       table(document.getElementById('gptTrades'), [
-        ["Время","time"], ["Слой","model_label"], ["Портфель","portfolio"], ["Сигнал","signal_family"], ["Тикер","ticker"], ["Напр.","direction"], ["Qty","qty"], ["Entry","entry_price"], ["Exit","exit_price"], ["Тики","ticks",true,2], ["Комиссия ₽","fees_rub",false,2], ["Результат ₽","net_pnl_rub",true,2], ["Выход","exit_source"]
+        ["Время","time"], ["Слой","model_label"], ["Контур","portfolio"], ["Режим","contour"], ["Сигнал","signal_family"], ["Тикер","ticker"], ["Напр.","direction"], ["Qty","qty"], ["Entry","entry_price"], ["Trigger","trigger_price"], ["Exit","exit_price"], ["Тики","ticks",true,2], ["Комиссия ₽","fees_rub",false,2], ["Результат ₽","net_pnl_rub",true,2], ["Выход","exit_source",false,null,"comment"]
       ], data.gpt_shadow_recent || []);
       const positions = data.open_positions || [];
       const posEl = document.getElementById('positions');
@@ -1060,7 +1416,7 @@ HTML = r"""<!doctype html>
       else {
         posEl.innerHTML = '<div class="table-wrap"><table id="positionsTable"></table></div>';
         table(document.getElementById('positionsTable'), [
-          ["Контур","portfolio"], ["Режим","contour"], ["Риск","risk_mode"], ["Тикер","ticker"], ["Напр.","direction"], ["Qty","qty"], ["ГО ₽","margin_rub",false,2], ["Стоп ₽","full_stop_risk_rub",false,2], ["Entry","entry_price"], ["Last","last_price"], ["Mark","mark_price"], ["Stop","stop_price"], ["Тики","unrealized_ticks",true,2], ["Грязными ₽","gross_pnl_rub",true,2], ["Комиссия ₽","fees_rub",false,2], ["Сейчас ₽","unrealized_net_rub",true,2], ["Открыта","opened_at"]
+          ["Контур","portfolio"], ["Режим","contour"], ["Риск","risk_mode"], ["Политика","risk_reason_text",false,null,"comment"], ["Тикер","ticker"], ["Напр.","direction"], ["Qty","qty"], ["ГО ₽","margin_rub",false,2], ["Стоп ₽","full_stop_risk_rub",false,2], ["Exit-модель","exit_mode_label"], ["Entry","entry_price"], ["Last","last_price"], ["Mark","mark_price"], ["Источник mark","mark_source_label",false,null,"comment"], ["Stop","stop_price"], ["Тики","unrealized_ticks",true,2], ["Грязными ₽","gross_pnl_rub",true,2], ["Комиссия ₽","fees_rub",false,2], ["Сейчас ₽","unrealized_net_rub",true,2], ["Открыта","opened_at"]
         ], positions);
       }
       window.scrollTo(sx, sy);
