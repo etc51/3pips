@@ -311,6 +311,7 @@ def main() -> None:
     parser.add_argument("--risk-stop-to-median-reduced", type=float, default=7.0)
     parser.add_argument("--risk-stop-to-median-micro", type=float, default=10.0)
     parser.add_argument("--risk-stop-to-median-cap", type=float, default=4.0)
+    parser.add_argument("--risk-observe-trades", type=int, default=5)
     parser.add_argument("--risk-probation-trades", type=int, default=30)
     parser.add_argument("--stop-limit-emergency-ticks", type=float, default=2.0)
     parser.add_argument("--actual-exit-model", choices=["stream_stoplimit", "candle_like"], default="stream_stoplimit")
@@ -429,6 +430,7 @@ def main() -> None:
             stop_to_median_reduced=float(args.risk_stop_to_median_reduced),
             stop_to_median_micro=float(args.risk_stop_to_median_micro),
             stop_to_median_cap=float(args.risk_stop_to_median_cap),
+            observe_trades=int(args.risk_observe_trades),
             probation_trades=int(args.risk_probation_trades),
         )
         setattr(args, "risk_governor", risk_governor)
