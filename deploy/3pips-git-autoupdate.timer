@@ -1,0 +1,11 @@
+[Unit]
+Description=Check GitHub for 3pips updates every 15 minutes
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+Persistent=true
+Unit=3pips-git-autoupdate.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,13 @@
+[Unit]
+Description=3pips autonomous watchdog
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/3pips
+EnvironmentFile=-/etc/3pips/3pips.env
+ExecStart=/opt/3pips/.venv-a26cf99/bin/python /opt/3pips/scripts/server_watchdog.py --project-root /opt/3pips --run-name v7_live_20260525 --service-name 3pips-paper-a26.service --dashboard-url http://127.0.0.1:8768/ --email-to etc00051@yandex.ru
+

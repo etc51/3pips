@@ -1,0 +1,10 @@
+[Unit]
+Description=Run 3pips daily autonomy bundle after trading day
+
+[Timer]
+OnCalendar=Mon..Fri 23:58:00
+Persistent=true
+Unit=3pips-daily-autonomy.service
+
+[Install]
+WantedBy=timers.target

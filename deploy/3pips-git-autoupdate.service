@@ -1,0 +1,13 @@
+[Unit]
+Description=3pips GitHub auto-update
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/3pips
+EnvironmentFile=-/etc/3pips/3pips.env
+ExecStart=/opt/3pips/.venv-a26cf99/bin/python /opt/3pips/scripts/git_autoupdate.py --project-root /opt/3pips --remote origin --branch rollback-20260525-a26cf99 --service-name 3pips-paper-a26.service --venv-python /opt/3pips/.venv-a26cf99/bin/python
+

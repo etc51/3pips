@@ -1,0 +1,13 @@
+[Unit]
+Description=3pips daily autonomy bundle
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/3pips
+EnvironmentFile=-/etc/3pips/3pips.env
+ExecStart=/opt/3pips/.venv-a26cf99/bin/python /opt/3pips/scripts/daily_autonomy_runner.py --project-root /opt/3pips --run-name v7_live_20260525 --email-to etc00051@yandex.ru
+

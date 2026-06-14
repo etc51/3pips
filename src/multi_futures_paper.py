@@ -10,6 +10,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from statistics import median
 
 from ng_scalper_bot import (
     Direction,
@@ -38,7 +39,7 @@ BR_POLICY_LOSS_PAUSE_SECONDS = 2 * 60 * 60
 SPREAD_WATCH_RATIO = 0.25
 SPREAD_HEAVY_RATIO = 0.40
 SPREAD_DOMINATES_RATIO = 1.00
-DEFAULT_MAX_FULL_STOP_RUB = 4_000.0
+DEFAULT_MAX_FULL_STOP_RUB = 1_000.0
 
 
 @dataclass
@@ -804,12 +805,17 @@ def close_shadow(
     stop_overrun_ticks: float | None = None,
 ) -> None:
     ticks, gross, net = pnl_rub(pos, exit_price, state.spec, state.side_fee)
+    closed_at = now_str()
     append_trade(
         path,
         {
-            "closed_at": now_str(),
+            "closed_at": closed_at,
+            "opened_at": pos.opened_at,
+            "minutes_held": position_minutes_held(pos, closed_at),
             "model": model,
             "contour": state.contour,
+            "family": state.profile.family or contract_family(state.spec.secid),
+            "profile_source": state.profile.source_secid or state.profile.secid,
             "secid": state.spec.secid,
             "direction": pos.direction,
             "qty": pos.qty,
@@ -824,9 +830,30 @@ def close_shadow(
             "gross_rub": round(gross, 2),
             "fees_rub": round(2 * state.side_fee * pos.qty, 2),
             "net_rub": round(net, 2),
+            "stop_ticks": state.profile.stop_ticks,
+            "trail_ticks": state.profile.trail_ticks,
+            "trail_arm_ticks": state.profile.trail_arm_ticks,
+            "target_min_ticks": state.profile.target_min_ticks,
+            "full_stop_1lot_rub": round(full_stop_risk_rub(state.profile, state.spec, state.side_fee, 1), 2),
+            "full_stop_risk_rub": round(full_stop_risk_rub(state.profile, state.spec, state.side_fee, pos.qty), 2),
         },
     )
     state.shadow_closed[model] = True
+
+
+def parse_position_time(value: str) -> datetime | None:
+    try:
+        return datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return None
+
+
+def position_minutes_held(pos: Position, closed_at: str | None = None) -> int | None:
+    opened = parse_position_time(pos.opened_at)
+    closed = parse_position_time(closed_at) if closed_at else datetime.now()
+    if opened is None or closed is None:
+        return None
+    return max(0, int((closed - opened).total_seconds() // 60))
 
 
 def update_shadow_models(
@@ -1005,7 +1032,12 @@ def process_open_state_exit(
         Path(args.log),
         {
             "closed_at": now_str(),
+            "opened_at": st.position.opened_at,
+            "minutes_held": position_minutes_held(st.position),
+            "portfolio_group": trade_log_group(Path(args.log)),
             "contour": st.contour,
+            "family": st.profile.family or contract_family(st.spec.secid),
+            "profile_source": st.profile.source_secid or st.profile.secid,
             "secid": st.spec.secid,
             "direction": st.position.direction,
             "qty": st.position.qty,
@@ -1021,6 +1053,12 @@ def process_open_state_exit(
             "fees_rub": round(2 * st.side_fee * st.position.qty, 2),
             "net_rub": round(net, 2),
             "closed_net_rub": round(st.closed_net, 2),
+            "stop_ticks": st.profile.stop_ticks,
+            "trail_ticks": st.profile.trail_ticks,
+            "trail_arm_ticks": st.profile.trail_arm_ticks,
+            "target_min_ticks": st.profile.target_min_ticks,
+            "full_stop_1lot_rub": round(full_stop_risk_rub(st.profile, st.spec, st.side_fee, 1), 2),
+            "full_stop_risk_rub": round(full_stop_risk_rub(st.profile, st.spec, st.side_fee, st.position.qty), 2),
         },
     )
     print(
@@ -1406,6 +1444,14 @@ def append_schema_stable_csv(path: Path, row: dict) -> None:
             path.replace(backup)
             print(f"{now_str()} SNAPSHOT schema_changed backup={backup}", flush=True)
     append_trade(path, row)
+
+
+def trade_log_group(path: Path) -> str:
+    name = path.stem
+    suffix = "_multi_futures_paper_trades"
+    if name.endswith(suffix):
+        return name[: -len(suffix)]
+    return name
 
 
 def main() -> None:
