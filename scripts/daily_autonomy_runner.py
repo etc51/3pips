@@ -668,6 +668,44 @@ def load_margin_timeline(run_dir: Path, trade_date: str) -> list[dict]:
     return rows
 
 
+def load_margin_snapshot_fallback(run_dir: Path) -> list[dict]:
+    capitals = load_portfolio_capitals(run_dir)
+    rows: list[dict] = []
+    for path in sorted(run_dir.glob("*_health.json")):
+        portfolio = path.stem.removesuffix("_health")
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        capital = capitals.get(portfolio, 0.0)
+        closed_net = safe_float(payload.get("closed_net"))
+        used_margin = safe_float(payload.get("used_margin"))
+        max_total_margin_pct = 0.80
+        equity = capital + closed_net if capital > 0 else 0.0
+        max_total_margin_rub = equity * max_total_margin_pct if equity > 0 else 0.0
+        free_headroom = max_total_margin_rub - used_margin if max_total_margin_rub > 0 else 0.0
+        rows.append(
+            {
+                "portfolio": portfolio,
+                "timestamp": str(payload.get("timestamp") or ""),
+                "capital_rub": round(capital, 2) if capital > 0 else None,
+                "equity_rub": round(equity, 2) if equity > 0 else None,
+                "closed_net_rub": round(closed_net, 2),
+                "used_margin_rub": round(used_margin, 2),
+                "open_positions": safe_int(payload.get("open_positions")),
+                "max_total_margin_pct": round(max_total_margin_pct * 100.0, 2),
+                "max_total_margin_rub": round(max_total_margin_rub, 2) if max_total_margin_rub > 0 else None,
+                "free_margin_headroom_rub": round(free_headroom, 2) if max_total_margin_rub > 0 else None,
+                "used_margin_pct_of_capital": round(used_margin / capital * 100.0, 2) if capital > 0 else None,
+                "used_margin_pct_of_limit": round(used_margin / max_total_margin_rub * 100.0, 2) if max_total_margin_rub > 0 else None,
+                "source": "health_snapshot_fallback",
+            }
+        )
+    return rows
+
+
 def summarize_margin_day(day_rows: list[dict], timeline_rows: list[dict], run_dir: Path) -> list[dict]:
     capitals = load_portfolio_capitals(run_dir)
     by_portfolio = grouped_metrics(day_rows, lambda row: str(row.get("portfolio_group") or ""))
@@ -710,6 +748,7 @@ def summarize_margin_day(day_rows: list[dict], timeline_rows: list[dict], run_di
                 "return_on_peak_margin_pct": round(day_net / peak_used * 100.0, 3) if peak_used > 0 else None,
                 "return_on_avg_margin_pct": round(day_net / avg_used * 100.0, 3) if avg_used > 0 else None,
                 "samples": len(points),
+                "source": str(points[0].get("source") or "portfolio_log") if points else "missing",
             }
         )
     out.sort(key=lambda row: (safe_float(row.get("return_on_peak_margin_pct")), safe_float(row.get("net_rub"))), reverse=True)
@@ -889,7 +928,7 @@ def build_summary_markdown(
     lines.append("- GO analysis uses actual paper portfolio logs: equity / used_margin / free headroom from runtime `PORTFOLIO` snapshots.")
     lines.append("")
     lines.append(markdown_top("By Portfolio", by_portfolio, ["group", "trades", "win_rate_pct", "net_rub", "expectancy_rub"], limit=10))
-    lines.append(markdown_top("Margin / GO by Portfolio", margin_summary, ["portfolio", "trades", "net_rub", "peak_used_margin_rub", "peak_used_margin_pct_of_limit", "min_free_margin_headroom_rub", "return_on_peak_margin_pct", "realized_intraday_drawdown_rub"], limit=10))
+    lines.append(markdown_top("Margin / GO by Portfolio", margin_summary, ["portfolio", "trades", "net_rub", "peak_used_margin_rub", "peak_used_margin_pct_of_limit", "min_free_margin_headroom_rub", "return_on_peak_margin_pct", "realized_intraday_drawdown_rub", "source"], limit=10))
     lines.append(markdown_top("By Portfolio + Layer", by_group, ["group", "trades", "win_rate_pct", "net_rub", "expectancy_rub", "profit_factor"]))
     lines.append(markdown_top("Best Tickers", best_tickers, ["group", "trades", "win_rate_pct", "net_rub", "expectancy_rub"], limit=10))
     lines.append(markdown_top("Worst Tickers", worst_tickers, ["group", "trades", "win_rate_pct", "net_rub", "expectancy_rub"], limit=10))
@@ -985,6 +1024,12 @@ def main() -> int:
     open_summary = summarize_open_positions(open_positions)
     roll_watch = load_roll_watch(run_dir)
     margin_timeline = load_margin_timeline(run_dir, trade_date)
+    fallback_margin_timeline = load_margin_snapshot_fallback(run_dir)
+    existing_margin_portfolios = {str(row.get("portfolio") or "") for row in margin_timeline}
+    for row in fallback_margin_timeline:
+        portfolio = str(row.get("portfolio") or "")
+        if portfolio and portfolio not in existing_margin_portfolios:
+            margin_timeline.append(row)
     margin_summary = summarize_margin_day(day_rows, margin_timeline, run_dir)
 
     research_day = build_research_scenarios(all_rows, day_rows, profiles)

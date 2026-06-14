@@ -181,8 +181,13 @@ class Supervisor:
 
     def start_process(self, name: str, argv: list[str], pid_path: Path, reason: str) -> None:
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        stdout = self.run_dir / f"{name}_supervisor_{stamp}.stdout.log"
-        stderr = self.run_dir / f"{name}_supervisor_{stamp}.stderr.log"
+        if name.startswith("bot="):
+            bot_name = name.split("=", 1)[1]
+            stdout = self.run_dir / f"{bot_name}_multi_paper.log"
+            stderr = self.run_dir / f"{bot_name}_multi_paper.err.log"
+        else:
+            stdout = self.run_dir / f"{name}_supervisor_{stamp}.stdout.log"
+            stderr = self.run_dir / f"{name}_supervisor_{stamp}.stderr.log"
         cmd = [self.python, *argv]
         self.log(f"start {name} reason={reason} cmd={' '.join(cmd)}")
         out = stdout.open("ab")
