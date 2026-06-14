@@ -487,21 +487,26 @@ def select_roll_contract(
         if not can_trade:
             candidate_event["status"] = "blocked"
             continue
+        live_book_ok = False
         try:
             book = client.market_data.get_order_book(figi=candidate_spec.figi, depth=int(args.orderbook_depth))
-            if not getattr(book, "bids", None) or not getattr(book, "asks", None):
-                candidate_event["status"] = "blocked"
-                candidate_event["reason"] = "no_live_book"
-                continue
+            live_book_ok = bool(getattr(book, "bids", None) and getattr(book, "asks", None))
         except Exception as exc:
-            candidate_event["status"] = "blocked"
-            candidate_event["reason"] = f"book_error {type(exc).__name__}: {exc}"
-            continue
-        candidate_event["status"] = "selected"
+            candidate_event["reason"] = f"{fee_reason}; book_error {type(exc).__name__}: {exc}"
+        if live_book_ok:
+            candidate_event["status"] = "selected"
+            candidate_event["reason"] = fee_reason
+        else:
+            candidate_event["status"] = "selected_no_live_book"
+            candidate_event["reason"] = f"{fee_reason}; no_live_book_startup"
         event["status"] = "roll_ready"
         event["selected"] = ticker
         event["selected_profile_source"] = candidate_event["profile_source"]
-        event["reason"] = f"current_dte={current_dte:.1f}d candidate_ok {fee_reason}"
+        event["reason"] = (
+            f"current_dte={current_dte:.1f}d "
+            f"{'candidate_ok' if live_book_ok else 'candidate_ok_no_live_book'} "
+            f"{candidate_event['reason']}"
+        )
         return ticker, profile, event
 
     event["status"] = "blocked_no_candidate"
@@ -1481,9 +1486,9 @@ def main() -> None:
     parser.add_argument("--actual-exit-model", choices=["stream_stoplimit", "candle_like"], default="stream_stoplimit")
     parser.add_argument("--stream-stale-sec", type=float, default=15.0)
     parser.add_argument("--fallback-poll-sec", type=float, default=2.0)
-    parser.add_argument("--no-new-expiry-days", type=float, default=5.0)
+    parser.add_argument("--no-new-expiry-days", type=float, default=10.0)
     parser.add_argument("--expiry-force-close-days", type=float, default=3.0)
-    parser.add_argument("--roll-observe-days", type=float, default=10.0)
+    parser.add_argument("--roll-observe-days", type=float, default=21.0)
     parser.add_argument("--roll-state-log", default=str(REPORTS / "paper_roll_state.json"))
     parser.add_argument("--disable-auto-roll", action="store_true")
     args = parser.parse_args()
