@@ -141,6 +141,59 @@ tail -f /opt/3pips/reports/runtime/docker_autoupdate.log
 cat /opt/3pips/reports/runtime/docker_autoupdate_state.json
 ```
 
+## 7.2 Включить host watchdog
+
+Watchdog работает снаружи контейнера. Он:
+
+- проверяет `3pips-paper` и `3pips-archive`
+- проверяет dashboard
+- смотрит свежесть `*_health.json` и snapshot-логов
+- пытается поднять сервис сам
+- шлет письмо при аварии и при восстановлении, если SMTP уже настроен
+
+Установка:
+
+```bash
+cd /opt/3pips
+sudo cp deploy/3pips-watchdog.service /etc/systemd/system/
+sudo cp deploy/3pips-watchdog.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable 3pips-watchdog.timer
+sudo systemctl start 3pips-watchdog.timer
+```
+
+Проверка:
+
+```bash
+systemctl list-timers 3pips-watchdog.timer --no-pager
+sudo systemctl start 3pips-watchdog.service
+tail -f /opt/3pips/reports/runtime/server_watchdog.log
+cat /opt/3pips/reports/runtime/server_watchdog_state.json
+```
+
+Для писем нужен SMTP-пароль:
+
+```bash
+cd /opt/3pips
+mkdir -p secrets
+nano secrets/archive_smtp_password.txt
+chmod 600 secrets/archive_smtp_password.txt
+```
+
+И в `/etc/3pips/3pips.env`:
+
+```text
+WATCHDOG_EMAIL_ENABLED=1
+WATCHDOG_EMAIL_TO=etc00051@yandex.ru
+WATCHDOG_EMAIL_FROM=etc00051@yandex.ru
+WATCHDOG_SMTP_HOST=smtp.yandex.ru
+WATCHDOG_SMTP_PORT=465
+WATCHDOG_SMTP_USER=etc00051@yandex.ru
+WATCHDOG_SMTP_PASSWORD_FILE=/opt/3pips/secrets/archive_smtp_password.txt
+WATCHDOG_SMTP_USE_SSL=1
+WATCHDOG_SMTP_STARTTLS=0
+```
+
 ## 8. Dashboard
 
 С сервера dashboard доступен на:
