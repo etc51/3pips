@@ -13,7 +13,7 @@ Environment=SSL_TBANK_VERIFY=true
 ExecStart=/opt/3pips/.venv-a26cf99/bin/python /opt/3pips/scripts/ubuntu_paper_supervisor.py --project-root /opt/3pips --python /opt/3pips/.venv-a26cf99/bin/python --dashboard-host 0.0.0.0 --dashboard-port 8768
 Restart=always
 RestartSec=10
-KillMode=process
+KillMode=control-group
 TimeoutStopSec=20
 
 [Install]
