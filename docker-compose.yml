@@ -14,7 +14,7 @@ services:
     secrets:
       - tbank_token
     ports:
-      - "127.0.0.1:8768:8768"
+      - "8768:8768"
     volumes:
       - ./reports/runtime:/app/reports/runtime
       - ./reports/paper_runs:/app/reports/paper_runs
