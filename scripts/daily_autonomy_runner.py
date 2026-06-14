@@ -88,6 +88,11 @@ def parse_trade_net(row: dict) -> float:
     return safe_float(row.get("net_rub"))
 
 
+def trade_sort_key(row: dict) -> tuple:
+    dt = parse_dt(str(row.get("closed_at") or "")) or parse_dt(str(row.get("opened_at") or ""))
+    return (dt.isoformat() if dt else "", str(row.get("secid") or ""), str(row.get("contour") or ""))
+
+
 def metrics(rows: list[dict]) -> dict:
     nets = [parse_trade_net(row) for row in rows]
     wins = [value for value in nets if value > 0]
@@ -121,6 +126,15 @@ def grouped_metrics(rows: list[dict], key_fn) -> list[dict]:
         out.append(m)
     out.sort(key=lambda row: (row["net_rub"], row["expectancy_rub"]), reverse=True)
     return out
+
+
+def ranked_tail(rows: list[dict], limit: int = 10, reverse: bool = False) -> list[dict]:
+    ordered = sorted(
+        rows,
+        key=lambda row: (safe_float(row.get("net_rub")), safe_float(row.get("expectancy_rub")), safe_int(row.get("trades"), 0)),
+        reverse=reverse,
+    )
+    return ordered[:limit]
 
 
 def family_for_row(row: dict, profiles: dict[str, dict]) -> str:
@@ -186,6 +200,35 @@ def evaluate_scenario(
     }
 
 
+def evaluate_pause_after_losses(
+    name: str,
+    rows: list[dict],
+    profiles: dict[str, dict],
+    max_losses: int,
+    scope: str,
+    note: str,
+) -> dict:
+    loss_counts: dict[str, int] = defaultdict(int)
+    selected: list[dict] = []
+    skipped = 0
+    for row in sorted(rows, key=trade_sort_key):
+        if scope == "family":
+            key = family_for_row(row, profiles)
+        else:
+            key = str(row.get("secid") or "")
+        if not key:
+            key = "unknown"
+        if loss_counts[key] >= max_losses:
+            skipped += 1
+            continue
+        selected.append(row)
+        if parse_trade_net(row) < 0:
+            loss_counts[key] += 1
+    out = evaluate_scenario(name, selected, profiles, note=note)
+    out["skipped_trades"] = skipped
+    return out
+
+
 def build_research_scenarios(all_rows: list[dict], sample_rows: list[dict], profiles: dict[str, dict]) -> list[dict]:
     scenarios: list[dict] = []
     scenarios.append(evaluate_scenario("base", sample_rows, profiles, note="current live policy"))
@@ -231,6 +274,37 @@ def build_research_scenarios(all_rows: list[dict], sample_rows: list[dict], prof
             )
         )
 
+    scenarios.append(
+        evaluate_pause_after_losses(
+            "pause_ticker_after_1_loss",
+            sample_rows,
+            profiles,
+            max_losses=1,
+            scope="ticker",
+            note="stop opening same ticker after first losing close",
+        )
+    )
+    scenarios.append(
+        evaluate_pause_after_losses(
+            "pause_ticker_after_2_losses",
+            sample_rows,
+            profiles,
+            max_losses=2,
+            scope="ticker",
+            note="stop opening same ticker after second losing close",
+        )
+    )
+    scenarios.append(
+        evaluate_pause_after_losses(
+            "pause_family_after_2_losses",
+            sample_rows,
+            profiles,
+            max_losses=2,
+            scope="family",
+            note="stop opening same family after second losing close",
+        )
+    )
+
     family_rows = grouped_metrics(
         all_rows,
         lambda row: family_for_row(row, profiles),
@@ -275,14 +349,136 @@ def markdown_top(title: str, rows: list[dict], columns: list[str], limit: int = 
     return "\n".join([f"## {title}", "", head, sep, *body, ""])
 
 
+def load_open_position_snapshot(run_dir: Path) -> list[dict]:
+    rows: list[dict] = []
+    for path in sorted(run_dir.glob("*_paper_open_positions.json")):
+        group = path.stem.removesuffix("_paper_open_positions")
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(payload, list):
+            continue
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            row = dict(item)
+            row.setdefault("portfolio_group", group)
+            rows.append(row)
+    return rows
+
+
+def summarize_open_positions(rows: list[dict]) -> dict:
+    total_net = 0.0
+    for row in rows:
+        total_net += safe_float(row.get("unrealized_net_rub") or row.get("unrealized_rub") or 0.0)
+    return {
+        "count": len(rows),
+        "net_rub": round(total_net, 2),
+    }
+
+
+def load_roll_watch(run_dir: Path) -> list[dict]:
+    rows: list[dict] = []
+    for path in sorted(run_dir.glob("*_roll_state.json")):
+        group = path.stem.removesuffix("_roll_state")
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        observe_days = safe_float(payload.get("roll_observe_days"))
+        for event in payload.get("roll_events") or []:
+            if not isinstance(event, dict):
+                continue
+            dte = safe_float(event.get("days_to_expiration"))
+            selected = str(event.get("selected") or "")
+            status = str(event.get("status") or "")
+            if not (
+                selected
+                or status not in {"not_near_roll", "perpetual_or_far_expiration", "no_expiration"}
+                or (observe_days > 0 and dte <= observe_days)
+            ):
+                continue
+            rows.append(
+                {
+                    "portfolio_group": group,
+                    "family": str(event.get("family") or ""),
+                    "ticker": str(event.get("ticker") or ""),
+                    "days_to_expiration": round(dte, 3) if math.isfinite(dte) else None,
+                    "selected": selected,
+                    "status": status,
+                    "reason": str(event.get("reason") or ""),
+                }
+            )
+    rows.sort(key=lambda row: (safe_float(row.get("days_to_expiration"), 10**9), row.get("portfolio_group", ""), row.get("ticker", "")))
+    return rows
+
+
+def build_recommendations(
+    overall: dict,
+    by_ticker: list[dict],
+    by_family: list[dict],
+    by_hour: list[dict],
+    research_day: list[dict],
+) -> list[str]:
+    notes: list[str] = []
+    if overall.get("trades", 0) <= 0:
+        return ["Сделок за день нет, менять логику рано."]
+    avg_win = safe_float(overall.get("avg_win_rub"))
+    avg_loss = abs(safe_float(overall.get("avg_loss_rub")))
+    if avg_win > 0 and avg_loss > avg_win * 1.8:
+        notes.append(f"Средний убыток {round(avg_loss,2)} ₽ заметно крупнее среднего плюса {round(avg_win,2)} ₽: проблема в хвостовых стопах, а не в частоте входов.")
+    worst_tickers = [row for row in by_ticker if safe_float(row.get("net_rub")) < 0]
+    if worst_tickers:
+        top = ranked_tail(worst_tickers, limit=3, reverse=False)
+        ticker_line = ", ".join(f"{row['group']} {row['net_rub']} ₽" for row in top)
+        notes.append(f"Главные разрушители дня по тикерам: {ticker_line}.")
+    worst_families = [row for row in by_family if safe_float(row.get("net_rub")) < 0]
+    if worst_families:
+        top = ranked_tail(worst_families, limit=2, reverse=False)
+        fam_line = ", ".join(f"{row['group']} {row['net_rub']} ₽" for row in top)
+        notes.append(f"Семейства под давлением: {fam_line}.")
+    late_hours = []
+    for row in by_hour:
+        hour = str(row.get("group") or "")
+        try:
+            hh = int(hour.split(":", 1)[0])
+        except Exception:
+            continue
+        if hh >= 17 and safe_float(row.get("net_rub")) < 0:
+            late_hours.append(row)
+    if late_hours:
+        worst_late = ranked_tail(late_hours, limit=1, reverse=False)[0]
+        notes.append(f"Поздний час {worst_late['group']} дал {worst_late['net_rub']} ₽: cutoff по новым входам остаётся важным.")
+    if research_day:
+        base = next((row for row in research_day if row.get("scenario") == "base"), research_day[0])
+        best = research_day[0]
+        if best.get("scenario") != "base" and safe_float(best.get("net_rub")) > safe_float(base.get("net_rub")) + 300:
+            notes.append(
+                f"Лучший быстрый overlay дня: {best['scenario']} ({best['net_rub']} ₽ против {base['net_rub']} ₽ у base). "
+                f"Это кандидат на следующий тестовый слой, а не мгновенный перевод боевой логики."
+            )
+        else:
+            notes.append("На дневном срезе нет overlay, который убедительно лучше base без натяжки.")
+    return notes[:6]
+
+
 def build_summary_markdown(
     trade_date: str,
     overall: dict,
+    open_summary: dict,
     by_group: list[dict],
     by_ticker: list[dict],
     by_family: list[dict],
     by_hour: list[dict],
     worst_trades: list[dict],
+    best_tickers: list[dict],
+    worst_tickers: list[dict],
+    worst_families: list[dict],
+    roll_watch: list[dict],
+    recommendations: list[str],
     best_research_day: list[dict],
     best_research_all: list[dict],
 ) -> str:
@@ -298,12 +494,23 @@ def build_summary_markdown(
         f"- avg_win_rub: {overall['avg_win_rub']}",
         f"- avg_loss_rub: {overall['avg_loss_rub']}",
         f"- profit_factor: {overall['profit_factor']}",
+        f"- open_positions_count: {open_summary.get('count')}",
+        f"- open_positions_net_rub: {open_summary.get('net_rub')}",
         "",
     ]
+    if recommendations:
+        lines.append("## Что делать дальше\n")
+        for note in recommendations:
+            lines.append(f"- {note}")
+        lines.append("")
     lines.append(markdown_top("By Portfolio + Layer", by_group, ["group", "trades", "win_rate_pct", "net_rub", "expectancy_rub", "profit_factor"]))
+    lines.append(markdown_top("Best Tickers", best_tickers, ["group", "trades", "win_rate_pct", "net_rub", "expectancy_rub"], limit=10))
+    lines.append(markdown_top("Worst Tickers", worst_tickers, ["group", "trades", "win_rate_pct", "net_rub", "expectancy_rub"], limit=10))
     lines.append(markdown_top("By Ticker", by_ticker, ["group", "trades", "win_rate_pct", "net_rub", "expectancy_rub"], limit=15))
+    lines.append(markdown_top("Worst Families", worst_families, ["group", "trades", "win_rate_pct", "net_rub", "expectancy_rub"], limit=10))
     lines.append(markdown_top("By Family", by_family, ["group", "trades", "win_rate_pct", "net_rub", "expectancy_rub"], limit=15))
     lines.append(markdown_top("By Hour", by_hour, ["group", "trades", "win_rate_pct", "net_rub", "expectancy_rub"], limit=12))
+    lines.append(markdown_top("Rollover Watch", roll_watch, ["portfolio_group", "family", "ticker", "days_to_expiration", "selected", "status"], limit=12))
     lines.append(markdown_top("Worst Trades", worst_trades, ["closed_at", "portfolio_group", "contour", "secid", "direction", "qty", "net_rub", "ticks"], limit=10))
     lines.append(markdown_top("Research Top: Latest Day", best_research_day, ["scenario", "trades", "win_rate_pct", "net_rub", "expectancy_rub", "note"], limit=10))
     lines.append(markdown_top("Research Top: All Sample", best_research_all, ["scenario", "trades", "win_rate_pct", "net_rub", "expectancy_rub", "note"], limit=10))
@@ -373,18 +580,31 @@ def main() -> int:
     by_family = grouped_metrics(day_rows, lambda row: row["family"])
     by_hour = grouped_metrics(day_rows, hour_bucket)
     worst_trades = sorted(day_rows, key=parse_trade_net)[:10]
+    best_tickers = ranked_tail([row for row in by_ticker if safe_float(row.get("net_rub")) > 0], limit=10, reverse=True)
+    worst_tickers = ranked_tail([row for row in by_ticker if safe_float(row.get("net_rub")) < 0], limit=10, reverse=False)
+    worst_families = ranked_tail([row for row in by_family if safe_float(row.get("net_rub")) < 0], limit=10, reverse=False)
+    open_positions = load_open_position_snapshot(run_dir)
+    open_summary = summarize_open_positions(open_positions)
+    roll_watch = load_roll_watch(run_dir)
 
     research_day = build_research_scenarios(all_rows, day_rows, profiles)
     research_all = build_research_scenarios(all_rows, all_rows, profiles)
+    recommendations = build_recommendations(overall, by_ticker, by_family, by_hour, research_day)
 
     summary_md = build_summary_markdown(
         trade_date,
         overall,
+        open_summary,
         by_group,
         by_ticker,
         by_family,
         by_hour,
         worst_trades,
+        best_tickers,
+        worst_tickers,
+        worst_families,
+        roll_watch,
+        recommendations,
         research_day,
         research_all,
     )
@@ -395,6 +615,8 @@ def main() -> int:
             "trade_date": trade_date,
             "generated_at": now_str(),
             "overall": overall,
+            "open_positions": open_summary,
+            "recommendations": recommendations,
         },
     )
     write_csv_rows(analysis_dir / "by_group.csv", by_group)
@@ -402,6 +624,11 @@ def main() -> int:
     write_csv_rows(analysis_dir / "by_family.csv", by_family)
     write_csv_rows(analysis_dir / "by_hour.csv", by_hour)
     write_csv_rows(analysis_dir / "worst_trades.csv", worst_trades)
+    write_csv_rows(analysis_dir / "best_tickers.csv", best_tickers)
+    write_csv_rows(analysis_dir / "worst_tickers.csv", worst_tickers)
+    write_csv_rows(analysis_dir / "worst_families.csv", worst_families)
+    write_csv_rows(analysis_dir / "roll_watch.csv", roll_watch)
+    write_text(analysis_dir / "recommendations.md", "\n".join(f"- {line}" for line in recommendations) + ("\n" if recommendations else ""))
 
     for row in research_day:
         row["sample"] = "latest_day"
@@ -423,7 +650,7 @@ def main() -> int:
     if shadow_rows:
         write_csv_rows(raw_dir / "day_shadow_trades.csv", shadow_rows)
 
-    for pattern in ["*_health.json", "*_paper_open_positions.json", "*_instrument_specs.csv", "*_startup_status.csv"]:
+    for pattern in ["*_health.json", "*_paper_open_positions.json", "*_instrument_specs.csv", "*_startup_status.csv", "*_roll_state.json"]:
         for path in run_dir.glob(pattern):
             shutil.copy2(path, raw_dir / path.name)
     for pattern in ["*_wide_spread_review.csv", "*_shadow_exit_models.csv"]:
@@ -436,16 +663,19 @@ def main() -> int:
 
     shutil.copy2(analysis_dir / "daily_summary.md", bundle_dir / "daily_summary.md")
     shutil.copy2(research_dir / "research_summary.md", bundle_dir / "research_summary.md")
-    write_json(
-        bundle_dir / "manifest.json",
-        {
-            "trade_date": trade_date,
-            "generated_at": now_str(),
-            "overall": overall,
-            "best_latest_day_scenario": research_day[0] if research_day else {},
-            "best_all_sample_scenario": research_all[0] if research_all else {},
-        },
-    )
+    manifest_payload = {
+        "trade_date": trade_date,
+        "generated_at": now_str(),
+        "overall": overall,
+        "open_positions": open_summary,
+        "recommendations": recommendations,
+        "best_latest_day_scenario": research_day[0] if research_day else {},
+        "best_all_sample_scenario": research_all[0] if research_all else {},
+        "top_killer_tickers": worst_tickers[:3],
+        "top_killer_families": worst_families[:3],
+        "roll_watch": roll_watch[:12],
+    }
+    write_json(bundle_dir / "manifest.json", manifest_payload)
 
     zip_path = archive_root / f"3pips_daily_{trade_date}.zip"
     if zip_path.exists():
@@ -454,15 +684,12 @@ def main() -> int:
 
     latest_summary = manifest_root / "latest_daily_summary.md"
     write_text(latest_summary, summary_md)
-    write_json(
-        manifest_root / "latest_daily_manifest.json",
-        {
-            "trade_date": trade_date,
-            "generated_at": now_str(),
-            "archive": str(zip_path),
-            "overall": overall,
-        },
-    )
+    latest_manifest_payload = {
+        **manifest_payload,
+        "archive": str(zip_path),
+    }
+    write_json(manifest_root / "latest_daily_manifest.json", latest_manifest_payload)
+    write_json(manifest_root / "latest_manifest.json", latest_manifest_payload)
 
     subject = f"[3pips] daily {trade_date} net={overall['net_rub']} trades={overall['trades']}"
     body_lines = [
