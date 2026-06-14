@@ -9,12 +9,13 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
-COPY deploy/certs/russian_trusted_root_ca.crt /usr/local/share/ca-certificates/russian_trusted_root_ca.crt
-
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates tzdata \
-    && update-ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+COPY deploy/certs/russian_trusted_root_ca.crt /usr/local/share/ca-certificates/russian_trusted_root_ca.crt
+
+RUN update-ca-certificates
 
 COPY requirements.txt .
 
