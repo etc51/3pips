@@ -1,0 +1,16 @@
+[Unit]
+Description=3pips rollback paper bot (a26cf99)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/3pips
+ExecStart=/opt/3pips/.venv-a26cf99/bin/python /opt/3pips/scripts/ubuntu_paper_supervisor.py --project-root /opt/3pips --python /opt/3pips/.venv-a26cf99/bin/python --dashboard-host 0.0.0.0 --dashboard-port 8768
+Restart=always
+RestartSec=10
+KillMode=process
+TimeoutStopSec=20
+
+[Install]
+WantedBy=multi-user.target

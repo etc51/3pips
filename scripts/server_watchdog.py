@@ -37,6 +37,24 @@ def restart_service(service_name: str) -> tuple[bool, str]:
     return ok, summary
 
 
+def service_age_sec(service_name: str) -> float | None:
+    result = subprocess.run(
+        ["systemctl", "show", service_name, "-p", "ActiveEnterTimestampMonotonic", "--value"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    raw = result.stdout.strip()
+    if not raw or raw == "0":
+        return None
+    try:
+        started = int(raw) / 1_000_000.0
+        return max(0.0, time.monotonic() - started)
+    except Exception:
+        return None
+
+
 def dashboard_ok(url: str) -> tuple[bool, str]:
     try:
         with urlopen(url, timeout=5) as response:
@@ -47,7 +65,7 @@ def dashboard_ok(url: str) -> tuple[bool, str]:
         return False, f"error:{exc}"
 
 
-def check_run_health(run_dir: Path, health_stale_sec: int) -> list[str]:
+def check_run_health(run_dir: Path, health_stale_sec: int, svc_age_sec: float | None = None, startup_grace_sec: int = 0) -> list[str]:
     issues: list[str] = []
     health_files = sorted(run_dir.glob("*_health.json"))
     if not health_files:
@@ -59,6 +77,8 @@ def check_run_health(run_dir: Path, health_stale_sec: int) -> list[str]:
             continue
         age = int(now - path.stat().st_mtime)
         if age > health_stale_sec:
+            if svc_age_sec is not None and svc_age_sec < startup_grace_sec:
+                continue
             issues.append(f"stale_health[{path.name}] age={age}s")
             continue
         try:
@@ -129,6 +149,7 @@ def main() -> int:
     parser.add_argument("--dashboard-url", default="http://127.0.0.1:8768/")
     parser.add_argument("--health-stale-sec", type=int, default=180)
     parser.add_argument("--startup-wait-sec", type=int, default=25)
+    parser.add_argument("--startup-grace-sec", type=int, default=180)
     parser.add_argument("--state-path", default="")
     parser.add_argument("--log-path", default="")
     parser.add_argument("--email-to", default="etc00051@yandex.ru")
@@ -142,15 +163,16 @@ def main() -> int:
     log_path = Path(args.log_path) if args.log_path else runtime_dir / "server_watchdog.log"
     hostname = subprocess.run(["hostname"], capture_output=True, text=True).stdout.strip() or "unknown-host"
 
-    log(log_path, f"watchdog_start run_name={args.run_name} service={args.service_name} dashboard={args.dashboard_url} health_stale_sec={args.health_stale_sec} no_remediate={args.no_remediate}")
+    log(log_path, f"watchdog_start run_name={args.run_name} service={args.service_name} dashboard={args.dashboard_url} health_stale_sec={args.health_stale_sec} startup_grace_sec={args.startup_grace_sec} no_remediate={args.no_remediate}")
 
     issues: list[str] = []
+    svc_age = service_age_sec(args.service_name)
     if not service_active(args.service_name):
         issues.append(f"service_inactive[{args.service_name}]")
     ok, dash_status = dashboard_ok(args.dashboard_url)
-    if not ok:
+    if not ok and not (svc_age is not None and svc_age < args.startup_grace_sec):
         issues.append(f"dashboard_down[{dash_status}]")
-    issues.extend(check_run_health(run_dir, args.health_stale_sec))
+    issues.extend(check_run_health(run_dir, args.health_stale_sec, svc_age_sec=svc_age, startup_grace_sec=args.startup_grace_sec))
 
     if not issues:
         save_state(
@@ -172,13 +194,27 @@ def main() -> int:
         log(log_path, f"remediate name=systemctl_restart {summary}")
         if restarted:
             time.sleep(max(5, args.startup_wait_sec))
+            svc_age = service_age_sec(args.service_name)
+            if svc_age is not None and svc_age < args.startup_grace_sec:
+                save_state(
+                    state_path,
+                    {
+                        "status": "warming_up",
+                        "fingerprint": "",
+                        "last_email_epoch": 0.0,
+                        "last_change": now_str(),
+                        "last_summary": f"service_warming_up age={svc_age:.1f}s",
+                    },
+                )
+                log(log_path, f"incident_auto_recovered status=warming_up age={svc_age:.1f}s")
+                return 0
             retry_issues: list[str] = []
             if not service_active(args.service_name):
                 retry_issues.append(f"service_inactive[{args.service_name}]")
             ok, dash_status = dashboard_ok(args.dashboard_url)
             if not ok:
                 retry_issues.append(f"dashboard_down[{dash_status}]")
-            retry_issues.extend(check_run_health(run_dir, args.health_stale_sec))
+            retry_issues.extend(check_run_health(run_dir, args.health_stale_sec, svc_age_sec=svc_age, startup_grace_sec=args.startup_grace_sec))
             if not retry_issues:
                 save_state(
                     state_path,
