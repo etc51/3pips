@@ -605,6 +605,247 @@ def pick_best_consensus_scenario(rows: list[dict]) -> dict:
     return qualified[0] if qualified else base
 
 
+def scenario_kind(name: str) -> str:
+    if name.startswith("stop_cap_"):
+        return "stop_cap_rub"
+    if name.startswith("no_new_after_"):
+        return "entry_cutoff"
+    if name.startswith("contour_only_"):
+        return "contour_filter"
+    if name.startswith("pause_ticker_after_"):
+        return "ticker_pause_after_losses"
+    if name.startswith("pause_family_after_"):
+        return "family_pause_after_losses"
+    if name.startswith("blacklist_family_"):
+        return "family_blacklist"
+    if name.startswith("whitelist_"):
+        return "family_whitelist"
+    return "other"
+
+
+def recommended_use_for_scenario(kind: str) -> str:
+    if kind in {"entry_cutoff", "stop_cap_rub"}:
+        return "candidate_runtime_tune"
+    if kind in {
+        "contour_filter",
+        "ticker_pause_after_losses",
+        "family_pause_after_losses",
+        "family_blacklist",
+        "family_whitelist",
+    }:
+        return "candidate_runtime_restriction"
+    return "research_only"
+
+
+def build_optimizer_candidates(
+    research_day: list[dict],
+    research_all: list[dict],
+    research_consensus: list[dict],
+) -> list[dict]:
+    rows: list[dict] = []
+
+    def append_rows(source: str, items: list[dict], limit: int) -> None:
+        for rank, row in enumerate(items[:limit], start=1):
+            scenario = str(row.get("scenario") or "")
+            if not scenario or scenario == "base":
+                continue
+            kind = scenario_kind(scenario)
+            item = {
+                "source": source,
+                "rank": rank,
+                "scenario": scenario,
+                "candidate_type": kind,
+                "recommended_use": recommended_use_for_scenario(kind),
+                "note": str(row.get("note") or ""),
+            }
+            for key in (
+                "trades",
+                "wins",
+                "losses",
+                "win_rate_pct",
+                "net_rub",
+                "expectancy_rub",
+                "profit_factor",
+                "days",
+                "beat_base_days",
+                "beat_base_pct",
+                "delta_total_rub",
+                "median_daily_net_rub",
+                "worst_day_rub",
+                "latest_day_delta_rub",
+            ):
+                if key in row:
+                    item[key] = row.get(key)
+            rows.append(item)
+
+    append_rows("latest_day", research_day, 12)
+    append_rows("all_sample", research_all, 12)
+    append_rows("consensus", research_consensus, 12)
+
+    priority = {"consensus": 0, "all_sample": 1, "latest_day": 2}
+    deduped: dict[str, dict] = {}
+    for row in rows:
+        scenario = str(row.get("scenario") or "")
+        prev = deduped.get(scenario)
+        if prev is None:
+            deduped[scenario] = row
+            continue
+        prev_pri = priority.get(str(prev.get("source") or ""), 99)
+        curr_pri = priority.get(str(row.get("source") or ""), 99)
+        if curr_pri < prev_pri:
+            deduped[scenario] = row
+            continue
+        if curr_pri == prev_pri:
+            prev_score = (
+                safe_float(prev.get("delta_total_rub")),
+                safe_float(prev.get("net_rub")),
+                safe_float(prev.get("expectancy_rub")),
+            )
+            curr_score = (
+                safe_float(row.get("delta_total_rub")),
+                safe_float(row.get("net_rub")),
+                safe_float(row.get("expectancy_rub")),
+            )
+            if curr_score > prev_score:
+                deduped[scenario] = row
+
+    out = list(deduped.values())
+    out.sort(
+        key=lambda row: (
+            priority.get(str(row.get("source") or ""), 99) * -1,
+            safe_float(row.get("beat_base_days")),
+            safe_float(row.get("delta_total_rub")),
+            safe_float(row.get("net_rub")),
+            safe_float(row.get("expectancy_rub")),
+        ),
+        reverse=True,
+    )
+    return out
+
+
+def build_restriction_rows(auto_policy: dict) -> list[dict]:
+    active = auto_policy.get("active") if isinstance(auto_policy.get("active"), dict) else {}
+    proposed = auto_policy.get("proposed") if isinstance(auto_policy.get("proposed"), dict) else {}
+    rows: list[dict] = []
+    for key in ("observe_only_tickers", "observe_only_families", "strict_only_tickers", "strict_only_families"):
+        values = active.get(key) or []
+        for value in values:
+            rows.append(
+                {
+                    "stage": "active",
+                    "restriction_type": key,
+                    "value": value,
+                    "note": "",
+                }
+            )
+    for note in active.get("notes") or []:
+        rows.append(
+            {
+                "stage": "active_note",
+                "restriction_type": "note",
+                "value": "",
+                "note": note,
+            }
+        )
+    if proposed.get("candidate_entry_cutoff"):
+        rows.append(
+            {
+                "stage": "proposed",
+                "restriction_type": "candidate_entry_cutoff",
+                "value": proposed.get("candidate_entry_cutoff"),
+                "note": "",
+            }
+        )
+    if proposed.get("candidate_stop_cap_rub") not in (None, ""):
+        rows.append(
+            {
+                "stage": "proposed",
+                "restriction_type": "candidate_stop_cap_rub",
+                "value": proposed.get("candidate_stop_cap_rub"),
+                "note": "",
+            }
+        )
+    best_latest = proposed.get("best_latest_overlay") if isinstance(proposed.get("best_latest_overlay"), dict) else {}
+    best_consensus = proposed.get("best_consensus_overlay") if isinstance(proposed.get("best_consensus_overlay"), dict) else {}
+    if best_latest.get("scenario"):
+        rows.append(
+            {
+                "stage": "proposed",
+                "restriction_type": "best_latest_overlay",
+                "value": best_latest.get("scenario"),
+                "note": "",
+            }
+        )
+    if best_consensus.get("scenario"):
+        rows.append(
+            {
+                "stage": "proposed",
+                "restriction_type": "best_consensus_overlay",
+                "value": best_consensus.get("scenario"),
+                "note": "",
+            }
+        )
+    for note in proposed.get("notes") or []:
+        rows.append(
+            {
+                "stage": "proposed_note",
+                "restriction_type": "note",
+                "value": "",
+                "note": note,
+            }
+        )
+    return rows
+
+
+def build_nightly_cycle_status(
+    trade_date: str,
+    overall: dict,
+    research_day: list[dict],
+    research_all: list[dict],
+    research_consensus: list[dict],
+    optimizer_candidates: list[dict],
+    restriction_rows: list[dict],
+    auto_policy: dict,
+) -> dict:
+    active = auto_policy.get("active") if isinstance(auto_policy.get("active"), dict) else {}
+    return {
+        "trade_date": trade_date,
+        "generated_at": now_str(),
+        "status": "ok",
+        "stages": {
+            "analyze": {
+                "status": "ok",
+                "trades": safe_int(overall.get("trades")),
+                "net_rub": safe_float(overall.get("net_rub")),
+            },
+            "research": {
+                "status": "ok",
+                "latest_day_scenarios": len(research_day),
+                "all_sample_scenarios": len(research_all),
+                "consensus_scenarios": len(research_consensus),
+            },
+            "optimizer": {
+                "status": "ok",
+                "candidates": len(optimizer_candidates),
+                "top_candidate": str(optimizer_candidates[0].get("scenario") or "") if optimizer_candidates else "",
+            },
+            "restrictions": {
+                "status": "ok",
+                "active_rule_count": sum(
+                    len(active.get(key) or [])
+                    for key in ("observe_only_tickers", "observe_only_families", "strict_only_tickers", "strict_only_families")
+                ),
+                "rows": len(restriction_rows),
+            },
+            "summary": {
+                "status": "ok",
+                "archive_ready": True,
+                "archive_path": "",
+            },
+        },
+    }
+
+
 def metrics_map(rows: list[dict], key_fn) -> dict[str, dict]:
     return {str(row.get("group") or ""): row for row in grouped_metrics(rows, key_fn)}
 
@@ -1260,6 +1501,8 @@ def main() -> int:
         research_day=research_day,
         research_consensus=scenario_consensus,
     )
+    optimizer_candidates = build_optimizer_candidates(research_day, research_all, scenario_consensus)
+    restriction_rows = build_restriction_rows(auto_policy)
 
     summary_md = build_summary_markdown(
         trade_date,
@@ -1317,6 +1560,7 @@ def main() -> int:
     write_text(analysis_dir / "recommendations.md", "\n".join(f"- {line}" for line in recommendations) + ("\n" if recommendations else ""))
     write_json(analysis_dir / "auto_policy.json", auto_policy)
     write_text(analysis_dir / "auto_policy.md", render_auto_policy_markdown(auto_policy))
+    write_csv_rows(analysis_dir / "restrictions_runtime.csv", restriction_rows)
 
     for row in research_day:
         row["sample"] = "latest_day"
@@ -1333,6 +1577,16 @@ def main() -> int:
         + markdown_top("Research Top: All Sample", research_all, ["scenario", "trades", "win_rate_pct", "net_rub", "expectancy_rub", "note"], limit=15)
         + "\n"
         + markdown_top("Research Top: Consensus", scenario_consensus, ["scenario", "days", "beat_base_days", "delta_total_rub", "median_daily_net_rub", "worst_day_rub", "note"], limit=15),
+    )
+    write_csv_rows(research_dir / "optimizer_candidates.csv", optimizer_candidates)
+    write_text(
+        research_dir / "optimizer_summary.md",
+        markdown_top(
+            "Optimizer Candidates",
+            optimizer_candidates,
+            ["source", "scenario", "candidate_type", "recommended_use", "net_rub", "expectancy_rub", "delta_total_rub", "beat_base_days", "note"],
+            limit=20,
+        ),
     )
 
     raw_dir = bundle_dir / "raw"
@@ -1356,11 +1610,13 @@ def main() -> int:
     shutil.copy2(analysis_dir / "daily_summary.md", bundle_dir / "daily_summary.md")
     shutil.copy2(analysis_dir / "auto_policy.md", bundle_dir / "auto_policy.md")
     shutil.copy2(research_dir / "research_summary.md", bundle_dir / "research_summary.md")
+    shutil.copy2(research_dir / "optimizer_summary.md", bundle_dir / "optimizer_summary.md")
     for path in [
         analysis_dir / "day_history.csv",
         analysis_dir / "by_portfolio.csv",
         analysis_dir / "margin_timeline.csv",
         analysis_dir / "margin_summary.csv",
+        analysis_dir / "restrictions_runtime.csv",
         analysis_dir / "recurring_killer_tickers.csv",
         analysis_dir / "recurring_killer_families.csv",
         analysis_dir / "worst_tickers.csv",
@@ -1369,6 +1625,7 @@ def main() -> int:
         research_dir / "policy_sweep_all_sample.csv",
         research_dir / "policy_sweep_daily_history.csv",
         research_dir / "policy_sweep_consensus.csv",
+        research_dir / "optimizer_candidates.csv",
     ]:
         if path.exists():
             shutil.copy2(path, bundle_dir / path.name)
@@ -1395,22 +1652,42 @@ def main() -> int:
         "recurring_killer_tickers": recurring_tickers[:5],
         "recurring_killer_families": recurring_families[:5],
         "research_consensus_top": scenario_consensus[:10],
+        "optimizer_top": optimizer_candidates[:10],
+        "restrictions_runtime": restriction_rows,
         "roll_watch": roll_watch[:12],
         "auto_policy": auto_policy,
     }
     write_json(bundle_dir / "manifest.json", manifest_payload)
 
+    nightly_cycle_status = build_nightly_cycle_status(
+        trade_date=trade_date,
+        overall=overall,
+        research_day=research_day,
+        research_all=research_all,
+        research_consensus=scenario_consensus,
+        optimizer_candidates=optimizer_candidates,
+        restriction_rows=restriction_rows,
+        auto_policy=auto_policy,
+    )
+    write_json(analysis_dir / "nightly_cycle_status.json", nightly_cycle_status)
+    write_json(bundle_dir / "nightly_cycle_status.json", nightly_cycle_status)
+
     zip_path = archive_root / f"3pips_daily_{trade_date}.zip"
     if zip_path.exists():
         zip_path.unlink()
     build_zip(zip_path, bundle_dir)
+    nightly_cycle_status["stages"]["summary"]["archive_path"] = str(zip_path)
+    write_json(analysis_dir / "nightly_cycle_status.json", nightly_cycle_status)
+    write_json(bundle_dir / "nightly_cycle_status.json", nightly_cycle_status)
 
     latest_summary = manifest_root / "latest_daily_summary.md"
     write_text(latest_summary, summary_md)
     write_json(manifest_root / "latest_auto_policy.json", auto_policy)
+    write_json(manifest_root / "latest_nightly_cycle_status.json", nightly_cycle_status)
     latest_manifest_payload = {
         **manifest_payload,
         "archive": str(zip_path),
+        "nightly_cycle_status": nightly_cycle_status,
     }
     write_json(manifest_root / "latest_daily_manifest.json", latest_manifest_payload)
     write_json(manifest_root / "latest_manifest.json", latest_manifest_payload)

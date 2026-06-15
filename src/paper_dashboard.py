@@ -808,6 +808,9 @@ def build_state(base_dir: Path) -> dict:
             "day_class_counts": autonomy_manifest.get("day_class_counts") if isinstance(autonomy_manifest.get("day_class_counts"), dict) else {},
             "day_history_tail": autonomy_manifest.get("day_history_tail") if isinstance(autonomy_manifest.get("day_history_tail"), list) else [],
             "research_consensus_top": autonomy_manifest.get("research_consensus_top") if isinstance(autonomy_manifest.get("research_consensus_top"), list) else [],
+            "optimizer_top": autonomy_manifest.get("optimizer_top") if isinstance(autonomy_manifest.get("optimizer_top"), list) else [],
+            "restrictions_runtime": autonomy_manifest.get("restrictions_runtime") if isinstance(autonomy_manifest.get("restrictions_runtime"), list) else [],
+            "nightly_cycle_status": autonomy_manifest.get("nightly_cycle_status") if isinstance(autonomy_manifest.get("nightly_cycle_status"), dict) else {},
             "archive": autonomy_manifest.get("archive"),
             "roll_watch": autonomy_manifest.get("roll_watch") if isinstance(autonomy_manifest.get("roll_watch"), list) else [],
             "auto_policy": autonomy_manifest.get("auto_policy") if isinstance(autonomy_manifest.get("auto_policy"), dict) else (autonomy_policy if isinstance(autonomy_policy, dict) else {}),
@@ -830,6 +833,9 @@ def build_state(base_dir: Path) -> dict:
             "day_class_counts": {},
             "day_history_tail": [],
             "research_consensus_top": [],
+            "optimizer_top": [],
+            "restrictions_runtime": [],
+            "nightly_cycle_status": {},
             "archive": None,
             "roll_watch": [],
             "auto_policy": autonomy_policy if isinstance(autonomy_policy, dict) else {},
@@ -1063,6 +1069,9 @@ HTML = r"""<!doctype html>
       const autoDayCounts = auto.day_class_counts || {};
       const autoPolicy = auto.auto_policy || {};
       const autoPolicyActive = autoPolicy.active || {};
+      const autoOptimizer = auto.optimizer_top || [];
+      const autoRestrictions = auto.restrictions_runtime || [];
+      const autoNightly = auto.nightly_cycle_status || {};
       const autoEl = document.getElementById('autonomySummary');
       if (!auto.trade_date) {
         autoEl.innerHTML = '<div class="empty">Авторазбор дня ещё не собран</div>';
@@ -1082,6 +1091,15 @@ HTML = r"""<!doctype html>
         const marginText = autoMargin.length
           ? autoMargin.slice(0, 3).map(x => `${x.portfolio}: пик ГО ${fmt(x.peak_used_margin_rub, 0)} ₽, ROI ${fmt(x.return_on_peak_margin_pct, 3)}%`).join(' | ')
           : 'нет';
+        const optimizerText = autoOptimizer.length
+          ? autoOptimizer.slice(0, 3).map(x => `${x.scenario} [${x.candidate_type}]`).join(' | ')
+          : 'нет';
+        const restrictionsText = autoRestrictions.length
+          ? autoRestrictions.filter(x => x.stage === 'active').slice(0, 4).map(x => `${x.restriction_type}: ${x.value}`).join(' | ')
+          : 'нет';
+        const stageMap = autoNightly.stages || {};
+        const stageNames = ['analyze', 'research', 'optimizer', 'restrictions', 'summary'];
+        const nightlyText = stageNames.map(name => `${name}:${(stageMap[name] || {}).status || '-'}`).join(' | ');
         const policyBits = [];
         if ((autoPolicyActive.observe_only_tickers || []).length) policyBits.push(`observe ticker: ${(autoPolicyActive.observe_only_tickers || []).join(', ')}`);
         if ((autoPolicyActive.observe_only_families || []).length) policyBits.push(`observe family: ${(autoPolicyActive.observe_only_families || []).join(', ')}`);
@@ -1107,6 +1125,9 @@ HTML = r"""<!doctype html>
             <div><strong>Главные killers:</strong> ${killerText}</div>
             <div><strong>Повторяющиеся killers:</strong> ${recurringText}</div>
             <div><strong>Устойчивый overlay:</strong> ${consensusText}</div>
+            <div><strong>Ночной цикл:</strong> ${nightlyText}</div>
+            <div><strong>Optimizer top:</strong> ${optimizerText}</div>
+            <div><strong>Restrictions:</strong> ${restrictionsText}</div>
             <div><strong>ГО за день:</strong> ${marginText}</div>
             <div><strong>Runtime auto-policy:</strong> ${policyText}</div>
             ${recHtml}
