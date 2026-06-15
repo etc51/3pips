@@ -2841,7 +2841,6 @@ def main() -> int:
     day_rows = filter_trade_date(all_rows, trade_date)
     profiles = load_profiles(profiles_path)
     all_wide_spread_rows = load_wide_spread_reviews(run_dir)
-    day_wide_spread_rows = filter_snapshot_date(all_wide_spread_rows, trade_date)
 
     for row in all_rows:
         row["family"] = family_for_row(row, profiles)
@@ -2876,7 +2875,7 @@ def main() -> int:
         all_rows,
         lambda row: f"{str(row.get('portfolio_group') or '').upper()}/{str(row.get('contour') or '').upper()}::{str(row.get('family') or '').upper()}",
     )
-    microstructure_summary = build_microstructure_summary(day_wide_spread_rows, all_group_family_metrics)
+    microstructure_summary = build_microstructure_summary(all_wide_spread_rows, all_group_family_metrics)
     worst_trades = sorted(day_rows, key=parse_trade_net)[:10]
     best_tickers = ranked_tail([row for row in by_ticker if safe_float(row.get("net_rub")) > 0], limit=10, reverse=True)
     worst_tickers = ranked_tail([row for row in by_ticker if safe_float(row.get("net_rub")) < 0], limit=10, reverse=False)
