@@ -271,6 +271,26 @@ def load_shadow_trades(run_dir: Path) -> list[dict]:
     return rows
 
 
+def load_wide_spread_reviews(run_dir: Path) -> list[dict]:
+    rows: list[dict] = []
+    suffix = "_wide_spread_review"
+    for path in sorted(run_dir.glob("*_wide_spread_review.csv")):
+        name = path.stem
+        portfolio_group = name[: -len(suffix)] if name.endswith(suffix) else name
+        for row in read_csv_rows(path):
+            item = dict(row)
+            item.pop(None, None)
+            family = str(item.get("family") or "").strip().upper()
+            if not family:
+                continue
+            item["portfolio_group"] = str(portfolio_group or "").upper()
+            item["contour"] = "aggressive"
+            item["group"] = f"{item['portfolio_group']}/AGGRESSIVE::{family}"
+            item["_source_file"] = path.name
+            rows.append(item)
+    return rows
+
+
 def latest_trade_date(rows: list[dict]) -> str | None:
     dates = sorted({str(row.get("closed_at") or "")[:10] for row in rows if row.get("closed_at")})
     return dates[-1] if dates else None
@@ -278,6 +298,10 @@ def latest_trade_date(rows: list[dict]) -> str | None:
 
 def filter_trade_date(rows: list[dict], trade_date: str) -> list[dict]:
     return [row for row in rows if str(row.get("closed_at") or "").startswith(trade_date)]
+
+
+def filter_snapshot_date(rows: list[dict], trade_date: str) -> list[dict]:
+    return [row for row in rows if str(row.get("snapshot_time") or "").startswith(trade_date)]
 
 
 def parse_trade_net(row: dict) -> float:
@@ -1304,6 +1328,48 @@ def metrics_map(rows: list[dict], key_fn) -> dict[str, dict]:
     return {str(row.get("group") or ""): row for row in grouped_metrics(rows, key_fn)}
 
 
+def build_microstructure_summary(rows: list[dict], trade_metrics_by_group: dict[str, dict] | None = None) -> list[dict]:
+    groups: dict[str, list[dict]] = defaultdict(list)
+    for row in rows:
+        key = str(row.get("group") or "").strip().upper()
+        if key:
+            groups[key].append(row)
+    out: list[dict] = []
+    for key, items in groups.items():
+        ratios = [safe_float(item.get("spread_to_stop_ratio")) for item in items if item.get("spread_to_stop_ratio") not in (None, "")]
+        dominates = sum(1 for item in items if str(item.get("spread_class") or "") == "SPREAD_DOMINATES")
+        heavy = sum(1 for item in items if str(item.get("spread_class") or "") == "SPREAD_HEAVY")
+        watch = sum(1 for item in items if str(item.get("spread_class") or "") == "SPREAD_WATCH")
+        sample = items[0]
+        trade_metrics = (trade_metrics_by_group or {}).get(key, {})
+        count = len(items)
+        out.append(
+            {
+                "group": key,
+                "portfolio_group": str(sample.get("portfolio_group") or "").upper(),
+                "contour": "aggressive",
+                "family": str(sample.get("family") or "").upper(),
+                "spread_events": count,
+                "median_spread_ratio": round(median(ratios), 4) if ratios else None,
+                "max_spread_ratio": round(max(ratios), 4) if ratios else None,
+                "dominates_share_pct": round(dominates / count * 100.0, 2) if count else 0.0,
+                "heavy_share_pct": round(heavy / count * 100.0, 2) if count else 0.0,
+                "watch_share_pct": round(watch / count * 100.0, 2) if count else 0.0,
+                "trades": safe_int(trade_metrics.get("trades")),
+                "net_rub": safe_float(trade_metrics.get("net_rub")),
+                "expectancy_rub": safe_float(trade_metrics.get("expectancy_rub")),
+            }
+        )
+    out.sort(
+        key=lambda row: (
+            safe_float(row.get("net_rub")),
+            -safe_int(row.get("spread_events")),
+            -safe_float(row.get("median_spread_ratio")),
+        )
+    )
+    return out
+
+
 def scenario_loss_limit(name: str, prefix: str) -> int | None:
     if not name.startswith(prefix):
         return None
@@ -1454,6 +1520,7 @@ def build_auto_policy(
     day_history: list[dict],
     recurring_tickers: list[dict],
     recurring_families: list[dict],
+    microstructure_summary: list[dict],
     research_day: list[dict],
     research_all: list[dict],
     research_consensus: list[dict],
@@ -1542,6 +1609,27 @@ def build_auto_policy(
             active["notes"].append(
                 f"{family}: семейство лучше ведёт себя без aggressive-слоя, переводим aggressive в observe-only."
             )
+
+    for row in microstructure_summary:
+        group_key = str(row.get("group") or "").upper()
+        if not group_key:
+            continue
+        spread_events = safe_int(row.get("spread_events"))
+        median_ratio = safe_float(row.get("median_spread_ratio"))
+        dominates_share_pct = safe_float(row.get("dominates_share_pct"))
+        trades = safe_int(row.get("trades"))
+        net_rub = safe_float(row.get("net_rub"))
+        if spread_events < 200:
+            continue
+        if median_ratio < 0.75 and dominates_share_pct < 50.0:
+            continue
+        if trades < 1 or net_rub >= 0:
+            continue
+        active["observe_only_group_families"].append(group_key)
+        active["notes"].append(
+            f"Микроструктура {group_key}: {spread_events} wide-spread событий, median spread/stop={median_ratio:.2f}, "
+            f"dominates={dominates_share_pct:.1f}% и net={net_rub:.2f} ₽. Новые входы переводим в observe-only."
+        )
 
     best_latest_overlay = next((row for row in research_day if row.get("scenario") != "base"), {})
     best_latest_group_family_overlays = [
@@ -2301,6 +2389,7 @@ def build_recommendations(
     by_ticker: list[dict],
     by_family: list[dict],
     by_hour: list[dict],
+    microstructure_summary: list[dict],
     research_day: list[dict],
     research_all: list[dict],
     research_consensus: list[dict],
@@ -2324,6 +2413,19 @@ def build_recommendations(
         top = ranked_tail(worst_families, limit=2, reverse=False)
         fam_line = ", ".join(f"{row['group']} {row['net_rub']} ₽" for row in top)
         notes.append(f"Семейства под давлением: {fam_line}.")
+    toxic_micro = [
+        row
+        for row in microstructure_summary
+        if safe_int(row.get("spread_events")) >= 200
+        and (safe_float(row.get("median_spread_ratio")) >= 0.75 or safe_float(row.get("dominates_share_pct")) >= 50.0)
+        and safe_float(row.get("net_rub")) < 0
+    ]
+    if toxic_micro:
+        top = toxic_micro[0]
+        notes.append(
+            f"Микроструктурный токсичный срез: {top['group']} "
+            f"(wide-spread={top['spread_events']}, median spread/stop={top.get('median_spread_ratio')}, dominates={top.get('dominates_share_pct')}%, net={top.get('net_rub')} ₽)."
+        )
     late_hours = []
     for row in by_hour:
         hour = str(row.get("group") or "")
@@ -2396,6 +2498,7 @@ def build_strategy_lab(
     by_group: list[dict],
     by_family: list[dict],
     by_hour: list[dict],
+    microstructure_summary: list[dict],
     day_history: list[dict],
     research_day: list[dict],
     research_all: list[dict],
@@ -2584,8 +2687,10 @@ def build_strategy_lab(
     wide_spread_family = next(
         (
             row
-            for row in by_group
-            if "BR" in str(row.get("group") or "").upper() and safe_float(row.get("net_rub")) < 0
+            for row in microstructure_summary
+            if safe_int(row.get("spread_events")) >= 200
+            and (safe_float(row.get("median_spread_ratio")) >= 0.75 or safe_float(row.get("dominates_share_pct")) >= 50.0)
+            and safe_float(row.get("net_rub")) < 0
         ),
         {},
     )
@@ -2599,7 +2704,11 @@ def build_strategy_lab(
             action_type="shadow_backtest",
             safe_mode="research_only",
             autopromote_ready=False,
-            evidence=f"weak slice={wide_spread_family.get('group')} net={safe_float(wide_spread_family.get('net_rub'))} ₽",
+            evidence=(
+                f"weak slice={wide_spread_family.get('group')} net={safe_float(wide_spread_family.get('net_rub'))} ₽, "
+                f"spread_events={safe_int(wide_spread_family.get('spread_events'))}, "
+                f"median_ratio={safe_float(wide_spread_family.get('median_spread_ratio'))}"
+            ),
             next_step="отдельно моделировать входы с динамическим spread/stop ratio вместо грубого статического запрета.",
             required_features="orderbook snapshots, spread ticks, stop ticks, fill path, family slice",
             scenario_anchor=str(best_consensus.get("scenario") or ""),
@@ -2629,6 +2738,7 @@ def build_summary_markdown(
     recurring_tickers: list[dict],
     recurring_families: list[dict],
     margin_summary: list[dict],
+    microstructure_summary: list[dict],
     recommendations: list[str],
     best_research_day: list[dict],
     best_research_all: list[dict],
@@ -2682,6 +2792,7 @@ def build_summary_markdown(
     lines.append(markdown_top("Day History", day_history, ["trade_date", "day_class", "trades", "net_rub", "top1_loss_rub", "top3_loss_rub", "late_net_rub", "worst_ticker"], limit=15))
     lines.append(markdown_top("Recurring Killer Tickers", recurring_tickers, ["group", "days", "killer_days", "total_bucket_net_rub", "worst_bucket_rub"], limit=10))
     lines.append(markdown_top("Recurring Killer Families", recurring_families, ["group", "days", "killer_days", "total_bucket_net_rub", "worst_bucket_rub"], limit=10))
+    lines.append(markdown_top("Microstructure Toxic Slices", microstructure_summary, ["group", "spread_events", "median_spread_ratio", "dominates_share_pct", "trades", "net_rub", "expectancy_rub"], limit=10))
     lines.append(markdown_top("Worst Trades", worst_trades, ["closed_at", "portfolio_group", "contour", "secid", "direction", "qty", "net_rub", "ticks"], limit=10))
     lines.append(markdown_top("Research Top: Latest Day", best_research_day, ["scenario", "trades", "win_rate_pct", "net_rub", "expectancy_rub", "note"], limit=10))
     lines.append(markdown_top("Research Top: All Sample", best_research_all, ["scenario", "trades", "win_rate_pct", "net_rub", "expectancy_rub", "note"], limit=10))
@@ -2729,6 +2840,8 @@ def main() -> int:
 
     day_rows = filter_trade_date(all_rows, trade_date)
     profiles = load_profiles(profiles_path)
+    all_wide_spread_rows = load_wide_spread_reviews(run_dir)
+    day_wide_spread_rows = filter_snapshot_date(all_wide_spread_rows, trade_date)
 
     for row in all_rows:
         row["family"] = family_for_row(row, profiles)
@@ -2759,6 +2872,11 @@ def main() -> int:
     by_ticker = grouped_metrics(day_rows, lambda row: str(row.get("secid") or ""))
     by_family = grouped_metrics(day_rows, lambda row: row["family"])
     by_hour = grouped_metrics(day_rows, hour_bucket)
+    all_group_family_metrics = metrics_map(
+        all_rows,
+        lambda row: f"{str(row.get('portfolio_group') or '').upper()}/{str(row.get('contour') or '').upper()}::{str(row.get('family') or '').upper()}",
+    )
+    microstructure_summary = build_microstructure_summary(day_wide_spread_rows, all_group_family_metrics)
     worst_trades = sorted(day_rows, key=parse_trade_net)[:10]
     best_tickers = ranked_tail([row for row in by_ticker if safe_float(row.get("net_rub")) > 0], limit=10, reverse=True)
     worst_tickers = ranked_tail([row for row in by_ticker if safe_float(row.get("net_rub")) < 0], limit=10, reverse=False)
@@ -2778,7 +2896,7 @@ def main() -> int:
 
     research_day = build_research_scenarios(all_rows, day_rows, profiles)
     research_all = build_research_scenarios(all_rows, all_rows, profiles)
-    recommendations = build_recommendations(overall, by_ticker, by_family, by_hour, research_day, research_all, scenario_consensus, day_history, margin_summary)
+    recommendations = build_recommendations(overall, by_ticker, by_family, by_hour, microstructure_summary, research_day, research_all, scenario_consensus, day_history, margin_summary)
     auto_policy = build_auto_policy(
         all_rows=all_rows,
         profiles=profiles,
@@ -2786,6 +2904,7 @@ def main() -> int:
         day_history=day_history,
         recurring_tickers=recurring_tickers,
         recurring_families=recurring_families,
+        microstructure_summary=microstructure_summary,
         research_day=research_day,
         research_all=research_all,
         research_consensus=scenario_consensus,
@@ -2798,6 +2917,7 @@ def main() -> int:
         by_group=by_group,
         by_family=by_family,
         by_hour=by_hour,
+        microstructure_summary=microstructure_summary,
         day_history=day_history,
         research_day=research_day,
         research_all=research_all,
@@ -2824,6 +2944,7 @@ def main() -> int:
         recurring_tickers,
         recurring_families,
         margin_summary,
+        microstructure_summary,
         recommendations,
         research_day,
         research_all,
@@ -2842,6 +2963,7 @@ def main() -> int:
             "recommendations": recommendations,
             "best_consensus_scenario": pick_best_consensus_scenario(scenario_consensus),
             "strategy_lab_top": strategy_lab[:10],
+            "microstructure_top": microstructure_summary[:10],
             "margin_mode": runtime_trade_model.get("margin_mode"),
             "fee_model": runtime_trade_model.get("fee_model"),
         },
@@ -2859,6 +2981,7 @@ def main() -> int:
     write_csv_rows(analysis_dir / "day_history.csv", day_history)
     write_csv_rows(analysis_dir / "recurring_killer_tickers.csv", recurring_tickers)
     write_csv_rows(analysis_dir / "recurring_killer_families.csv", recurring_families)
+    write_csv_rows(analysis_dir / "microstructure_summary.csv", microstructure_summary)
     write_csv_rows(analysis_dir / "margin_timeline.csv", margin_timeline)
     write_csv_rows(analysis_dir / "margin_summary.csv", margin_summary)
     write_text(analysis_dir / "recommendations.md", "\n".join(f"- {line}" for line in recommendations) + ("\n" if recommendations else ""))
@@ -2948,6 +3071,7 @@ def main() -> int:
     for path in [
         analysis_dir / "day_history.csv",
         analysis_dir / "by_portfolio.csv",
+        analysis_dir / "microstructure_summary.csv",
         analysis_dir / "margin_timeline.csv",
         analysis_dir / "margin_summary.csv",
         analysis_dir / "restrictions_runtime.csv",
@@ -2986,6 +3110,7 @@ def main() -> int:
         "top_killer_families": worst_families[:3],
         "recurring_killer_tickers": recurring_tickers[:5],
         "recurring_killer_families": recurring_families[:5],
+        "microstructure_top": microstructure_summary[:10],
         "research_consensus_top": scenario_consensus[:10],
         "optimizer_top": optimizer_candidates[:10],
         "strategy_lab_top": strategy_lab[:10],

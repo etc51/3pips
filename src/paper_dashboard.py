@@ -827,6 +827,7 @@ def build_state(base_dir: Path) -> dict:
             "top_killer_families": autonomy_manifest.get("top_killer_families") if isinstance(autonomy_manifest.get("top_killer_families"), list) else [],
             "recurring_killer_tickers": autonomy_manifest.get("recurring_killer_tickers") if isinstance(autonomy_manifest.get("recurring_killer_tickers"), list) else [],
             "recurring_killer_families": autonomy_manifest.get("recurring_killer_families") if isinstance(autonomy_manifest.get("recurring_killer_families"), list) else [],
+            "microstructure_top": autonomy_manifest.get("microstructure_top") if isinstance(autonomy_manifest.get("microstructure_top"), list) else [],
             "best_consensus_scenario": autonomy_manifest.get("best_consensus_scenario") if isinstance(autonomy_manifest.get("best_consensus_scenario"), dict) else {},
             "day_class_counts": autonomy_manifest.get("day_class_counts") if isinstance(autonomy_manifest.get("day_class_counts"), dict) else {},
             "day_history_tail": autonomy_manifest.get("day_history_tail") if isinstance(autonomy_manifest.get("day_history_tail"), list) else [],
@@ -854,6 +855,7 @@ def build_state(base_dir: Path) -> dict:
             "top_killer_families": [],
             "recurring_killer_tickers": [],
             "recurring_killer_families": [],
+            "microstructure_top": [],
             "best_consensus_scenario": {},
             "day_class_counts": {},
             "day_history_tail": [],
@@ -1099,6 +1101,7 @@ HTML = r"""<!doctype html>
       const autoOptimizer = auto.optimizer_top || [];
       const autoStrategyLab = auto.strategy_lab_top || [];
       const autoStrategyCounts = auto.strategy_lab_counts || {};
+      const autoMicro = auto.microstructure_top || [];
       const autoRestrictions = auto.restrictions_runtime || [];
       const autoNightly = auto.nightly_cycle_status || {};
       const autoEl = document.getElementById('autonomySummary');
@@ -1125,6 +1128,9 @@ HTML = r"""<!doctype html>
           : 'нет';
         const strategyLabText = autoStrategyLab.length
           ? autoStrategyLab.slice(0, 3).map(x => `${x.candidate} [${x.action_type}]`).join(' | ')
+          : 'нет';
+        const microText = autoMicro.length
+          ? autoMicro.slice(0, 3).map(x => `${x.group}: events ${x.spread_events}, med ${fmt(x.median_spread_ratio, 3)}, net ${fmt(x.net_rub, 2)} ₽`).join(' | ')
           : 'нет';
         const restrictionsText = autoRestrictions.length
           ? autoRestrictions.filter(x => x.stage === 'active').slice(0, 4).map(x => `${x.restriction_type}: ${x.value}`).join(' | ')
@@ -1182,6 +1188,7 @@ HTML = r"""<!doctype html>
             <div><strong>Optimizer top:</strong> ${optimizerText}</div>
             <div><strong>Strategy lab:</strong> ${strategyLabText}</div>
             <div><strong>Strategy lab counts:</strong> всего ${autoStrategyCounts.total ?? 0}, runtime ${autoStrategyCounts.runtime_policy ?? 0}, shadow ${autoStrategyCounts.shadow_backtest ?? 0}, ready ${autoStrategyCounts.autopromote_ready ?? 0}</div>
+            <div><strong>Microstructure:</strong> ${microText}</div>
             <div><strong>Restrictions:</strong> ${restrictionsText}</div>
             <div><strong>ГО за день:</strong> ${marginText}</div>
             <div><strong>Runtime auto-policy:</strong> ${policyText}</div>
