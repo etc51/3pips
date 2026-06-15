@@ -274,6 +274,13 @@ def split_group_family_key(value: str) -> tuple[str, str, str]:
     return portfolio_name, contour_name, family
 
 
+def group_family_slice_key(value: str) -> str:
+    portfolio_name, contour_name, _family = split_group_family_key(value)
+    if not portfolio_name or not contour_name:
+        return ""
+    return f"{portfolio_name}/{contour_name}"
+
+
 def concentrated_family_group_key(family: str, by_group_family: dict[str, dict[str, float]]) -> str:
     family_norm = str(family or "").strip().upper()
     if not family_norm:
@@ -459,6 +466,8 @@ def compute_intraday_watchdog_overrides(
     dashboard_state: dict | None = None,
     base_active: dict | None = None,
 ) -> dict:
+    base_active = base_active if isinstance(base_active, dict) else {}
+    covered_group_blackout_slices = set(policy_group_blackout_windows(base_active))
     rows = load_closed_trade_rows(run_dir, trade_date)
     by_ticker: dict[str, dict[str, float]] = {}
     by_family: dict[str, dict[str, float]] = {}
@@ -528,6 +537,7 @@ def compute_intraday_watchdog_overrides(
     )
 
     observe_families: list[str] = []
+    localized_blackout_notes: list[str] = []
     for family, bucket in sorted(by_family.items()):
         triggered = (
             (bucket["losses"] >= 1 and bucket["closed_net_rub"] <= -3000.0)
@@ -539,6 +549,13 @@ def compute_intraday_watchdog_overrides(
             continue
         concentrated_key = concentrated_family_group_key(family, by_group_family)
         if concentrated_key:
+            slice_key = group_family_slice_key(concentrated_key)
+            if slice_key in covered_group_blackout_slices:
+                total_net = round(float(bucket["closed_net_rub"] + bucket["open_net_rub"]), 2)
+                localized_blackout_notes.append(
+                    f"watchdog intraday: {family} damage {total_net:.2f} RUB stays local in {concentrated_key} and is already covered by group blackout"
+                )
+                continue
             observe_group_families.append(concentrated_key)
             continue
         observe_families.append(family)
@@ -556,7 +573,6 @@ def compute_intraday_watchdog_overrides(
         and family_from_ticker(secid) not in set(observe_families)
     )
 
-    base_active = base_active if isinstance(base_active, dict) else {}
     covered_portfolios = set(normalize_upper_list(base_active.get("observe_only_portfolios")))
     covered_group_families = set(normalize_upper_list(base_active.get("observe_only_group_families")))
     covered_families = set(normalize_upper_list(base_active.get("observe_only_families")))
@@ -579,6 +595,7 @@ def compute_intraday_watchdog_overrides(
     for key in observe_group_families[:6]:
         total_net = round(float(by_group_family[key]["closed_net_rub"] + by_group_family[key]["open_net_rub"]), 2)
         notes.append(f"watchdog intraday: {key} -> observe-only after {total_net:.2f} RUB slice damage")
+    notes.extend(localized_blackout_notes[:4])
     for family in observe_families[:4]:
         total_net = round(float(by_family[family]["closed_net_rub"] + by_family[family]["open_net_rub"]), 2)
         notes.append(f"watchdog intraday: {family} -> observe-only after {total_net:.2f} RUB family damage")
