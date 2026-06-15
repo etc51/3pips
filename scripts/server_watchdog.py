@@ -18,6 +18,14 @@ if str(CURRENT_DIR) not in sys.path:
     sys.path.insert(0, str(CURRENT_DIR))
 
 from autonomy_common import now_str, parse_dt, send_email, tail_text, write_json  # noqa: E402
+from auto_policy_utils import (  # noqa: E402
+    merge_group_blackout_windows,
+    normalize_blackout_windows,
+    normalize_clock_hhmm,
+    normalize_group_blackout_windows,
+    normalize_upper_list,
+    policy_group_blackout_windows,
+)
 
 
 def log(path: Path, message: str) -> None:
@@ -149,95 +157,6 @@ def latest_trade_date(run_dir: Path) -> str:
         except Exception:
             continue
     return latest
-
-
-def normalize_upper_list(values: object) -> list[str]:
-    if not isinstance(values, list):
-        return []
-    out: list[str] = []
-    for value in values:
-        text = str(value or "").strip().upper()
-        if text:
-            out.append(text)
-    return sorted(set(out))
-
-
-def normalize_clock_hhmm(value: object) -> str:
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    if ":" in text:
-        parts = text.split(":", 1)
-    elif len(text) == 4 and text.isdigit():
-        parts = [text[:2], text[2:]]
-    else:
-        return ""
-    try:
-        hour = int(parts[0])
-        minute = int(parts[1])
-    except Exception:
-        return ""
-    if not (0 <= hour <= 23 and 0 <= minute <= 59):
-        return ""
-    return f"{hour:02d}:{minute:02d}"
-
-
-def normalize_blackout_window(value: object) -> str:
-    text = str(value or "").strip()
-    if not text or "-" not in text:
-        return ""
-    start_raw, end_raw = text.split("-", 1)
-    start_norm = normalize_clock_hhmm(start_raw)
-    end_norm = normalize_clock_hhmm(end_raw)
-    if not start_norm or not end_norm or start_norm > end_norm:
-        return ""
-    return f"{start_norm}-{end_norm}"
-
-
-def normalize_blackout_windows(values: object) -> list[str]:
-    if isinstance(values, str):
-        values = [part.strip() for part in values.split(",")]
-    if not isinstance(values, (list, tuple, set)):
-        return []
-    out: list[str] = []
-    for value in values:
-        normalized = normalize_blackout_window(value)
-        if normalized:
-            out.append(normalized)
-    return sorted(set(out))
-
-
-def normalize_group_blackout_windows(values: object) -> dict[str, list[str]]:
-    if not isinstance(values, dict):
-        return {}
-    out: dict[str, list[str]] = {}
-    for raw_key, raw_windows in values.items():
-        key = str(raw_key or "").strip().upper()
-        if "/" not in key:
-            continue
-        windows = normalize_blackout_windows(raw_windows)
-        if windows:
-            out[key] = windows
-    return out
-
-
-def policy_group_blackout_windows(values: object) -> dict[str, list[str]]:
-    if not isinstance(values, dict):
-        return {}
-    if "entry_blackout_group_windows" in values or "group_blackout_windows" in values:
-        return normalize_group_blackout_windows(values.get("entry_blackout_group_windows") or values.get("group_blackout_windows"))
-    return normalize_group_blackout_windows(values)
-
-
-def merge_group_blackout_windows(left: object, right: object) -> dict[str, list[str]]:
-    left_norm = normalize_group_blackout_windows(left)
-    right_norm = normalize_group_blackout_windows(right)
-    out: dict[str, list[str]] = {}
-    for key in sorted(set(left_norm) | set(right_norm)):
-        windows = sorted(set(left_norm.get(key) or []) | set(right_norm.get(key) or []))
-        if windows:
-            out[key] = windows
-    return out
 
 
 def family_from_ticker(ticker: str) -> str:

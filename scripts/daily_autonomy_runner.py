@@ -28,6 +28,17 @@ from autonomy_common import (  # noqa: E402
     write_json,
     write_text,
 )
+from auto_policy_utils import (  # noqa: E402
+    count_group_blackout_rules,
+    format_group_blackout_windows,
+    merge_blackout_windows,
+    merge_group_blackout_windows,
+    normalize_blackout_windows,
+    normalize_clock_hhmm,
+    normalize_group_blackout_windows,
+    normalize_upper_list,
+    policy_group_blackout_windows,
+)
 
 
 PREMIUM_FUTURES_RATE = 0.00025
@@ -122,115 +133,6 @@ def load_json(path: Path) -> dict:
     except Exception:
         return {}
     return payload if isinstance(payload, dict) else {}
-
-
-def normalize_upper_list(values: object) -> list[str]:
-    if not isinstance(values, (list, tuple, set)):
-        return []
-    return sorted({str(value).strip().upper() for value in values if str(value).strip()})
-
-
-def normalize_clock_hhmm(value: object) -> str:
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    if ":" in text:
-        parts = text.split(":", 1)
-    elif len(text) == 4 and text.isdigit():
-        parts = [text[:2], text[2:]]
-    else:
-        return ""
-    try:
-        hour = int(parts[0])
-        minute = int(parts[1])
-    except Exception:
-        return ""
-    if not (0 <= hour <= 23 and 0 <= minute <= 59):
-        return ""
-    return f"{hour:02d}:{minute:02d}"
-
-
-def normalize_blackout_window(value: object) -> str:
-    text = str(value or "").strip()
-    if not text or "-" not in text:
-        return ""
-    start_raw, end_raw = text.split("-", 1)
-    start_norm = normalize_clock_hhmm(start_raw)
-    end_norm = normalize_clock_hhmm(end_raw)
-    if not start_norm or not end_norm or start_norm > end_norm:
-        return ""
-    return f"{start_norm}-{end_norm}"
-
-
-def normalize_blackout_windows(values: object) -> list[str]:
-    if isinstance(values, str):
-        values = [part.strip() for part in values.split(",")]
-    if not isinstance(values, (list, tuple, set)):
-        return []
-    out: list[str] = []
-    for value in values:
-        normalized = normalize_blackout_window(value)
-        if normalized:
-            out.append(normalized)
-    return sorted(set(out))
-
-
-def merge_blackout_windows(left: object, right: object) -> list[str]:
-    return sorted(set(normalize_blackout_windows(left)) | set(normalize_blackout_windows(right)))
-
-
-def normalize_group_blackout_slice(value: object) -> str:
-    text = str(value or "").strip().upper()
-    if not text or "/" not in text:
-        return ""
-    portfolio_name, contour_name = text.split("/", 1)
-    portfolio_name = portfolio_name.strip().upper()
-    contour_name = contour_name.strip().upper()
-    if not portfolio_name or contour_name not in {"STRICT", "AGGRESSIVE"}:
-        return ""
-    return f"{portfolio_name}/{contour_name}"
-
-
-def normalize_group_blackout_windows(values: object) -> dict[str, list[str]]:
-    if not isinstance(values, dict):
-        return {}
-    out: dict[str, list[str]] = {}
-    for key, windows in values.items():
-        group_key = normalize_group_blackout_slice(key)
-        normalized_windows = normalize_blackout_windows(windows)
-        if group_key and normalized_windows:
-            out[group_key] = normalized_windows
-    return {key: out[key] for key in sorted(out)}
-
-
-def merge_group_blackout_windows(left: object, right: object) -> dict[str, list[str]]:
-    left_norm = normalize_group_blackout_windows(left)
-    right_norm = normalize_group_blackout_windows(right)
-    out: dict[str, list[str]] = {}
-    for key in sorted(set(left_norm) | set(right_norm)):
-        merged = merge_blackout_windows(left_norm.get(key), right_norm.get(key))
-        if merged:
-            out[key] = merged
-    return out
-
-
-def count_group_blackout_rules(values: object) -> int:
-    return sum(len(windows) for windows in normalize_group_blackout_windows(values).values())
-
-
-def format_group_blackout_windows(values: object, empty: str = "none") -> str:
-    normalized = normalize_group_blackout_windows(values)
-    if not normalized:
-        return empty
-    return "; ".join(f"{key}={', '.join(windows)}" for key, windows in normalized.items())
-
-
-def policy_group_blackout_windows(values: object) -> dict[str, list[str]]:
-    if not isinstance(values, dict):
-        return {}
-    if "entry_blackout_group_windows" in values or "group_blackout_windows" in values:
-        return normalize_group_blackout_windows(values.get("entry_blackout_group_windows") or values.get("group_blackout_windows"))
-    return normalize_group_blackout_windows(values)
 
 
 def earlier_clock_hhmm(left: object, right: object) -> str:
@@ -2205,6 +2107,26 @@ def build_auto_policy(
 
     latest_scenario = str(best_latest_overlay.get("scenario") or "")
     base_day_net = safe_float(base_day_overlay.get("net_rub"))
+    latest_blackout_scenario = str(best_latest_blackout_overlay.get("scenario") or "")
+    latest_blackout_windows = scenario_blackout_windows(latest_blackout_scenario)
+    latest_blackout_all_overlay = research_all_by_scenario.get(latest_blackout_scenario) if latest_blackout_scenario else {}
+    latest_blackout_all_net = safe_float(latest_blackout_all_overlay.get("net_rub")) if isinstance(latest_blackout_all_overlay, dict) else 0.0
+    latest_blackout_all_trades = safe_int(latest_blackout_all_overlay.get("trades")) if isinstance(latest_blackout_all_overlay, dict) else 0
+    latest_blackout_day_net = safe_float(best_latest_blackout_overlay.get("net_rub"))
+    latest_blackout_delta = latest_blackout_day_net - base_day_net
+    if (
+        latest_blackout_windows
+        and base_day_net < 0
+        and latest_blackout_day_net > 0
+        and latest_blackout_delta >= 2_500
+        and latest_blackout_all_net > 0
+        and latest_blackout_all_trades >= 5
+    ):
+        active["entry_blackout_windows"] = merge_blackout_windows(active.get("entry_blackout_windows"), latest_blackout_windows)
+        active["notes"].append(
+            f"Авто-policy: новые входы блокируются в окне {', '.join(latest_blackout_windows)}, "
+            f"потому что {latest_blackout_scenario} переворачивает текущий день из минуса в плюс и остаётся положительным по общей выборке."
+        )
     latest_group_blackout_scenario = str(best_latest_group_blackout_overlay.get("scenario") or "")
     latest_group_blackout_windows = scenario_group_blackout_windows(latest_group_blackout_scenario)
     latest_group_blackout_all_overlay = research_all_by_scenario.get(latest_group_blackout_scenario) if latest_group_blackout_scenario else {}

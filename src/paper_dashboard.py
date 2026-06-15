@@ -873,6 +873,15 @@ def build_state(base_dir: Path) -> dict:
         autonomy["email_status"] = human_email_status(autonomy_email.get("status"))
         autonomy["email_sent"] = autonomy_email.get("sent")
 
+    auto_policy = resolved_auto_policy if isinstance(resolved_auto_policy, dict) else {}
+    auto_policy_active = auto_policy.get("active") if isinstance(auto_policy.get("active"), dict) else {}
+    auto_policy_summary = auto_policy.get("summary") if isinstance(auto_policy.get("summary"), dict) else {}
+    auto_policy_trade_date = str(auto_policy.get("trade_date") or "")
+    autonomy_trade_date = auto_policy_trade_date or str(
+        (autonomy.get("trade_date") if isinstance(autonomy, dict) else "") or ""
+    )
+    auto_policy_generated_at = str(auto_policy.get("generated_at") or "")
+
     return {
         "base_dir": str(base_dir),
         "stats": stats,
@@ -888,6 +897,12 @@ def build_state(base_dir: Path) -> dict:
         "heartbeat": heart,
         "execution_summary": exec_summary,
         "autonomy": autonomy,
+        "autonomy_trade_date": autonomy_trade_date,
+        "auto_policy_trade_date": auto_policy_trade_date,
+        "auto_policy_generated_at": auto_policy_generated_at,
+        "auto_policy_active": auto_policy_active,
+        "auto_policy_active_rule_count": auto_policy_summary.get("active_rule_count"),
+        "auto_policy_active_notes_count": auto_policy_summary.get("active_notes_count"),
     }
 
 
@@ -1248,7 +1263,7 @@ def make_handler(base_dir: Path):
                         "dir": str(selected),
                         "ts": datetime.now().isoformat(timespec="seconds"),
                         "positions": len(state.get("open_positions") or []),
-                        "autonomy_trade_date": ((state.get("autonomy") or {}).get("trade_date") or ""),
+                        "autonomy_trade_date": (state.get("autonomy_trade_date") or ""),
                     }
                     status = 200
                 except Exception as exc:
