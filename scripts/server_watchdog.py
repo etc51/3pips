@@ -229,6 +229,17 @@ def policy_group_blackout_windows(values: object) -> dict[str, list[str]]:
     return normalize_group_blackout_windows(values)
 
 
+def merge_group_blackout_windows(left: object, right: object) -> dict[str, list[str]]:
+    left_norm = normalize_group_blackout_windows(left)
+    right_norm = normalize_group_blackout_windows(right)
+    out: dict[str, list[str]] = {}
+    for key in sorted(set(left_norm) | set(right_norm)):
+        windows = sorted(set(left_norm.get(key) or []) | set(right_norm.get(key) or []))
+        if windows:
+            out[key] = windows
+    return out
+
+
 def family_from_ticker(ticker: str) -> str:
     secid = str(ticker or "").strip()
     if not secid:
