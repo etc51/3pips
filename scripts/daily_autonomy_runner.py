@@ -1347,6 +1347,11 @@ def build_auto_policy(
             )
 
     best_latest_overlay = next((row for row in research_day if row.get("scenario") != "base"), {})
+    best_latest_group_family_overlays = [
+        row
+        for row in research_day
+        if scenario_kind(str(row.get("scenario") or "")) == "group_family_blacklist"
+    ]
     best_consensus_overlay = pick_best_consensus_scenario(research_consensus)
     base_day_overlay = next((row for row in research_day if str(row.get("scenario") or "") == "base"), {})
     base_all_overlay = next((row for row in research_all if str(row.get("scenario") or "") == "base"), {})
@@ -1415,10 +1420,21 @@ def build_auto_policy(
         )
 
     latest_scenario = str(best_latest_overlay.get("scenario") or "")
+    base_day_net = safe_float(base_day_overlay.get("net_rub"))
+    for row in best_latest_group_family_overlays[:2]:
+        group_family_key = scenario_blacklist_group_family(str(row.get("scenario") or ""))
+        group_family_total = by_group_family.get(group_family_key) or {}
+        latest_group_delta = safe_float(row.get("net_rub")) - base_day_net
+        if safe_float(group_family_total.get("net_rub")) <= -1_000 and latest_group_delta >= 1_500:
+            active["observe_only_group_families"].append(group_family_key)
+            active["notes"].append(
+                f"Авто-policy: связка {group_family_key} переведена в observe-only, "
+                f"потому что {row.get('scenario')} резко улучшает текущий день против base."
+            )
     latest_blacklist_group_family = scenario_blacklist_group_family(latest_scenario)
     if latest_blacklist_group_family:
         group_family_total = by_group_family.get(latest_blacklist_group_family) or {}
-        latest_group_delta = safe_float(best_latest_overlay.get("net_rub")) - safe_float(base_day_overlay.get("net_rub"))
+        latest_group_delta = safe_float(best_latest_overlay.get("net_rub")) - base_day_net
         if safe_float(group_family_total.get("net_rub")) <= -1_000 and latest_group_delta >= 1_500:
             active["observe_only_group_families"].append(latest_blacklist_group_family)
             active["notes"].append(
