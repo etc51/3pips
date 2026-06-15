@@ -177,6 +177,7 @@ def merge_watchdog_overrides(auto_policy: dict, existing_policy: dict) -> dict:
         set(normalize_upper_list(active_base.get("observe_only_group_families")))
         | set(normalize_upper_list(overrides.get("observe_only_group_families")))
     )
+    merged["allow_aggressive_group_families"] = normalize_upper_list(active_base.get("allow_aggressive_group_families"))
     merged["observe_only_tickers"] = sorted(
         set(normalize_upper_list(active_base.get("observe_only_tickers"))) | set(normalize_upper_list(overrides.get("observe_only_tickers")))
     )
@@ -199,6 +200,7 @@ def merge_watchdog_overrides(auto_policy: dict, existing_policy: dict) -> dict:
     summary["active_rule_count"] = (
         len(merged.get("observe_only_portfolios") or [])
         + len(merged.get("observe_only_group_families") or [])
+        + len(merged.get("allow_aggressive_group_families") or [])
         + len(merged.get("observe_only_tickers") or [])
         + len(merged.get("observe_only_families") or [])
         + len(merged.get("strict_only_tickers") or [])
@@ -521,6 +523,16 @@ def build_research_scenarios(
         for row in group_family_rows
         if row["group"] and row["net_rub"] < 0 and (row["trades"] >= 2 or row["net_rub"] <= -1_000)
     ]
+    profitable_aggressive_group_families = []
+    for row in group_family_rows:
+        group_name = str(row.get("group") or "")
+        if not group_name or safe_int(row.get("trades")) < 2 or safe_float(row.get("net_rub")) <= 0:
+            continue
+        portfolio_name, contour_name, family = split_group_family_key(group_name)
+        if contour_name != "AGGRESSIVE" or not portfolio_name or not family:
+            continue
+        profitable_aggressive_group_families.append((portfolio_name, family, safe_float(row.get("net_rub"))))
+    profitable_aggressive_group_families.sort(key=lambda item: item[2], reverse=True)
     if weak_families:
         for family in weak_families[:8]:
             scenarios.append(
@@ -572,6 +584,24 @@ def build_research_scenarios(
                 profiles,
                 predicate=lambda row: family_for_row(row, profiles) in profitable_families,
                 note="keep only families positive on full sample",
+            )
+        )
+
+    for portfolio_name, family, _net_rub in profitable_aggressive_group_families[:6]:
+        scenarios.append(
+            evaluate_scenario(
+                f"strict_plus_aggressive_group_family_{portfolio_name}__{family}",
+                sample_rows,
+                profiles,
+                predicate=lambda row, portfolio_name=portfolio_name, family=family: (
+                    str(row.get("contour") or "") == "strict"
+                    or (
+                        str(row.get("contour") or "") == "aggressive"
+                        and str(row.get("portfolio_group") or "").upper() == portfolio_name
+                        and family_for_row(row, profiles).upper() == family
+                    )
+                ),
+                note=f"strict layer + profitable aggressive slice {portfolio_name}/AGGRESSIVE::{family}",
             )
         )
 
@@ -685,6 +715,24 @@ def build_research_scenarios(
                     ),
                     cap_rub=500,
                     note=f"500 RUB stop cap + remove slice {group_key}::{family}",
+                )
+            )
+        for portfolio_name, family, _net_rub in profitable_aggressive_group_families[:4]:
+            scenarios.append(
+                evaluate_scenario(
+                    f"combo_stop_cap_500__strict_plus_aggressive_group_family_{portfolio_name}__{family}",
+                    sample_rows,
+                    profiles,
+                    predicate=lambda row, portfolio_name=portfolio_name, family=family: (
+                        str(row.get("contour") or "") == "strict"
+                        or (
+                            str(row.get("contour") or "") == "aggressive"
+                            and str(row.get("portfolio_group") or "").upper() == portfolio_name
+                            and family_for_row(row, profiles).upper() == family
+                        )
+                    ),
+                    cap_rub=500,
+                    note=f"500 RUB stop cap + strict layer + aggressive slice {portfolio_name}/AGGRESSIVE::{family}",
                 )
             )
 
@@ -872,6 +920,8 @@ def pick_best_consensus_scenario(rows: list[dict]) -> dict:
 
 
 def scenario_kind(name: str) -> str:
+    if scenario_allow_aggressive_group_family(name):
+        return "allow_aggressive_group_family"
     if name.startswith("combo_"):
         return "combo_overlay"
     if name.startswith("stop_cap_"):
@@ -900,6 +950,8 @@ def recommended_use_for_scenario(kind: str) -> str:
         return "candidate_runtime_combo"
     if kind in {"entry_cutoff", "stop_cap_rub"}:
         return "candidate_runtime_tune"
+    if kind == "allow_aggressive_group_family":
+        return "candidate_runtime_exception"
     if kind in {
         "contour_filter",
         "ticker_pause_after_losses",
@@ -1017,6 +1069,15 @@ def build_restriction_rows(auto_policy: dict) -> list[dict]:
             {
                 "stage": "active",
                 "restriction_type": "observe_only_group_families",
+                "value": value,
+                "note": "",
+            }
+        )
+    for value in active.get("allow_aggressive_group_families") or []:
+        rows.append(
+            {
+                "stage": "active",
+                "restriction_type": "allow_aggressive_group_families",
                 "value": value,
                 "note": "",
             }
@@ -1155,7 +1216,15 @@ def build_nightly_cycle_status(
                 "status": "ok",
                 "active_rule_count": sum(
                     len(active.get(key) or [])
-                    for key in ("observe_only_portfolios", "observe_only_group_families", "observe_only_tickers", "observe_only_families", "strict_only_tickers", "strict_only_families")
+                    for key in (
+                        "observe_only_portfolios",
+                        "observe_only_group_families",
+                        "allow_aggressive_group_families",
+                        "observe_only_tickers",
+                        "observe_only_families",
+                        "strict_only_tickers",
+                        "strict_only_families",
+                    )
                 )
                 + sum(
                     1
@@ -1247,6 +1316,23 @@ def scenario_blacklist_group_family(name: str) -> str:
     return ""
 
 
+def scenario_allow_aggressive_group_family(name: str) -> str:
+    candidate_names = combo_components(name) if name.startswith("combo_") else [name]
+    prefix = "strict_plus_aggressive_group_family_"
+    for candidate in candidate_names:
+        if not candidate.startswith(prefix):
+            continue
+        payload = candidate.removeprefix(prefix)
+        parts = payload.split("__", 1)
+        if len(parts) != 2:
+            continue
+        portfolio_name, family = parts
+        if not portfolio_name or not family:
+            continue
+        return f"{portfolio_name}/AGGRESSIVE::{family}".upper()
+    return ""
+
+
 def scenario_has_component(name: str, component: str) -> bool:
     if not name or not component:
         return False
@@ -1319,6 +1405,7 @@ def build_auto_policy(
     active = {
         "observe_only_portfolios": [],
         "observe_only_group_families": [],
+        "allow_aggressive_group_families": [],
         "observe_only_tickers": [],
         "observe_only_families": [],
         "strict_only_tickers": [],
@@ -1690,6 +1777,64 @@ def build_auto_policy(
                 f"потому что strongest combo {best_combo_scenario} уже даёт положительный результат на общей и последней выборке."
             )
 
+    research_all_by_scenario = {str(row.get("scenario") or ""): row for row in research_all}
+    research_day_by_scenario = {str(row.get("scenario") or ""): row for row in research_day}
+    allowed_aggressive_by_group: dict[str, dict] = {}
+    for scenario_name, scenario_row in research_all_by_scenario.items():
+        group_key = scenario_allow_aggressive_group_family(scenario_name)
+        if not group_key:
+            continue
+        portfolio_name, contour_name, family = split_group_family_key(group_key)
+        if contour_name != "AGGRESSIVE" or not portfolio_name or not family:
+            continue
+        if family not in set(active.get("strict_only_families") or []):
+            continue
+        day_row = research_day_by_scenario.get(scenario_name)
+        if not isinstance(day_row, dict):
+            continue
+        stop_cap = scenario_stop_cap(scenario_name)
+        benchmark_name = f"combo_stop_cap_{stop_cap}__contour_only_strict" if stop_cap is not None else "contour_only_strict"
+        benchmark_all = research_all_by_scenario.get(benchmark_name)
+        benchmark_day = research_day_by_scenario.get(benchmark_name)
+        if not isinstance(benchmark_all, dict) or not isinstance(benchmark_day, dict):
+            continue
+        group_total = by_group_family.get(group_key) or {}
+        group_trades = safe_int(group_total.get("trades"))
+        group_net = safe_float(group_total.get("net_rub"))
+        candidate_all_net = safe_float(scenario_row.get("net_rub"))
+        candidate_day_net = safe_float(day_row.get("net_rub"))
+        strict_all_net = safe_float(benchmark_all.get("net_rub"))
+        strict_day_net = safe_float(benchmark_day.get("net_rub"))
+        delta_all_vs_strict = candidate_all_net - strict_all_net
+        delta_day_vs_strict = candidate_day_net - strict_day_net
+        if (
+            group_trades < 2
+            or group_net <= 0
+            or candidate_all_net <= 0
+            or delta_all_vs_strict < 300
+            or delta_day_vs_strict < 0
+        ):
+            continue
+        score = (delta_all_vs_strict, delta_day_vs_strict, group_net, candidate_all_net)
+        prev = allowed_aggressive_by_group.get(group_key)
+        if prev is None or score > prev["score"]:
+            allowed_aggressive_by_group[group_key] = {
+                "group_key": group_key,
+                "scenario": scenario_name,
+                "delta_all_vs_strict": round(delta_all_vs_strict, 2),
+                "delta_day_vs_strict": round(delta_day_vs_strict, 2),
+                "group_net": round(group_net, 2),
+                "score": score,
+            }
+
+    for item in sorted(allowed_aggressive_by_group.values(), key=lambda row: row["score"], reverse=True)[:4]:
+        active["allow_aggressive_group_families"].append(item["group_key"])
+        active["notes"].append(
+            f"Авто-policy: разрешаем aggressive для {item['group_key']} поверх broad strict-only, "
+            f"потому что {item['scenario']} лучше strict-only на серии (+{item['delta_all_vs_strict']:.2f} ₽) "
+            f"и на последнем дне (+{item['delta_day_vs_strict']:.2f} ₽)."
+        )
+
     pause_ticker_limit = scenario_loss_limit(consensus_scenario, "pause_ticker_after_")
     if (
         pause_ticker_limit is not None
@@ -1731,7 +1876,25 @@ def build_auto_policy(
             )
         )
     ]
-    for key in ("observe_only_portfolios", "observe_only_group_families", "observe_only_tickers", "observe_only_families", "strict_only_tickers", "strict_only_families"):
+    observe_group_family_values = set(active.get("observe_only_group_families") or [])
+    active["allow_aggressive_group_families"] = [
+        value
+        for value in (active.get("allow_aggressive_group_families") or [])
+        if (
+            (lambda portfolio_name, _contour_name, family_name: portfolio_name not in covered_portfolios and family_name not in covered_families and value not in observe_group_family_values)(
+                *split_group_family_key(str(value))
+            )
+        )
+    ]
+    for key in (
+        "observe_only_portfolios",
+        "observe_only_group_families",
+        "allow_aggressive_group_families",
+        "observe_only_tickers",
+        "observe_only_families",
+        "strict_only_tickers",
+        "strict_only_families",
+    ):
         active[key] = sorted({str(value).upper() for value in active[key] if str(value).strip()})
     active["notes"] = list(dict.fromkeys(active["notes"]))[:12]
 
@@ -1744,6 +1907,7 @@ def build_auto_policy(
         "active_base": dict(active),
         "watchdog_overrides": {
             "trade_date": trade_date,
+            "observe_only_group_families": [],
             "observe_only_tickers": [],
             "observe_only_families": [],
             "notes": [],
@@ -1752,7 +1916,15 @@ def build_auto_policy(
         "summary": {
             "active_rule_count": sum(
                 len(active[key])
-                for key in ("observe_only_portfolios", "observe_only_group_families", "observe_only_tickers", "observe_only_families", "strict_only_tickers", "strict_only_families")
+                for key in (
+                    "observe_only_portfolios",
+                    "observe_only_group_families",
+                    "allow_aggressive_group_families",
+                    "observe_only_tickers",
+                    "observe_only_families",
+                    "strict_only_tickers",
+                    "strict_only_families",
+                )
             )
             + sum(
                 1
@@ -1780,6 +1952,7 @@ def render_auto_policy_markdown(auto_policy: dict) -> str:
         "",
         f"- observe_only_portfolios: {', '.join(active.get('observe_only_portfolios') or []) or 'none'}",
         f"- observe_only_group_families: {', '.join(active.get('observe_only_group_families') or []) or 'none'}",
+        f"- allow_aggressive_group_families: {', '.join(active.get('allow_aggressive_group_families') or []) or 'none'}",
         f"- observe_only_tickers: {', '.join(active.get('observe_only_tickers') or []) or 'none'}",
         f"- observe_only_families: {', '.join(active.get('observe_only_families') or []) or 'none'}",
         f"- strict_only_tickers: {', '.join(active.get('strict_only_tickers') or []) or 'none'}",

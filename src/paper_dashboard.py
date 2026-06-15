@@ -1126,6 +1126,7 @@ HTML = r"""<!doctype html>
         const policyBits = [];
         if ((autoPolicyActive.observe_only_portfolios || []).length) policyBits.push(`observe portfolio: ${(autoPolicyActive.observe_only_portfolios || []).join(', ')}`);
         if ((autoPolicyActive.observe_only_group_families || []).length) policyBits.push(`observe slice: ${(autoPolicyActive.observe_only_group_families || []).join(', ')}`);
+        if ((autoPolicyActive.allow_aggressive_group_families || []).length) policyBits.push(`allow aggressive slice: ${(autoPolicyActive.allow_aggressive_group_families || []).join(', ')}`);
         if ((autoPolicyActive.observe_only_tickers || []).length) policyBits.push(`observe ticker: ${(autoPolicyActive.observe_only_tickers || []).join(', ')}`);
         if ((autoPolicyActive.observe_only_families || []).length) policyBits.push(`observe family: ${(autoPolicyActive.observe_only_families || []).join(', ')}`);
         if ((autoPolicyActive.strict_only_tickers || []).length) policyBits.push(`strict-only ticker: ${(autoPolicyActive.strict_only_tickers || []).join(', ')}`);

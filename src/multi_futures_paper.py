@@ -124,6 +124,7 @@ def empty_auto_policy() -> dict:
         "generated_at": "",
         "observe_only_portfolios": [],
         "observe_only_group_families": [],
+        "allow_aggressive_group_families": [],
         "observe_only_tickers": [],
         "observe_only_families": [],
         "strict_only_tickers": [],
@@ -193,6 +194,7 @@ def parse_auto_policy_payload(payload: object) -> dict:
         "generated_at": str(payload.get("generated_at") or ""),
         "observe_only_portfolios": normalize_policy_names(active.get("observe_only_portfolios")),
         "observe_only_group_families": normalize_policy_names(active.get("observe_only_group_families")),
+        "allow_aggressive_group_families": normalize_policy_names(active.get("allow_aggressive_group_families")),
         "observe_only_tickers": normalize_policy_names(active.get("observe_only_tickers")),
         "observe_only_families": normalize_policy_names(active.get("observe_only_families")),
         "strict_only_tickers": normalize_policy_names(active.get("strict_only_tickers")),
@@ -244,6 +246,7 @@ def refresh_auto_policy(cache: dict, force: bool = False) -> dict:
     cache["last_error"] = ""
     cache["payload"] = payload
     observe_count = len(payload["observe_only_portfolios"]) + len(payload["observe_only_group_families"]) + len(payload["observe_only_tickers"]) + len(payload["observe_only_families"])
+    allow_aggressive_count = len(payload["allow_aggressive_group_families"])
     strict_count = len(payload["strict_only_tickers"]) + len(payload["strict_only_families"])
     entry_cutoff = payload.get("entry_no_new_after")
     stop_cap = payload.get("entry_max_full_stop_rub")
@@ -251,7 +254,7 @@ def refresh_auto_policy(cache: dict, force: bool = False) -> dict:
     pause_family = payload.get("pause_family_after_losses")
     print(
         f"{now_str()} AUTO_POLICY loaded trade_date={payload.get('trade_date') or '-'} "
-        f"observe={observe_count} strict_only={strict_count} "
+        f"observe={observe_count} allow_aggressive={allow_aggressive_count} strict_only={strict_count} "
         f"entry_no_new_after={entry_cutoff or '-'} "
         f"stop_cap_rub={stop_cap if stop_cap is not None else '-'} "
         f"pause_ticker={pause_ticker if pause_ticker is not None else '-'} "
@@ -276,7 +279,8 @@ def auto_policy_block_reason(st: State, contour: str, policy: dict, portfolio_gr
     if contour == "aggressive":
         if secid in set(policy.get("strict_only_tickers") or []):
             return "auto_policy strict_only_ticker"
-        if family in set(policy.get("strict_only_families") or []):
+        allow_aggressive = set(policy.get("allow_aggressive_group_families") or [])
+        if family in set(policy.get("strict_only_families") or []) and group_family_key not in allow_aggressive:
             return "auto_policy strict_only_family"
     return None
 
