@@ -1224,13 +1224,27 @@ def make_handler(base_dir: Path):
                 self.send(200, HTML.encode("utf-8"), "text/html; charset=utf-8", include_body=include_body)
                 return
             if parsed.path == "/healthz":
-                payload = {
-                    "ok": True,
-                    "dir": str(self.resolve_selected(parsed)),
-                    "ts": datetime.now().isoformat(timespec="seconds"),
-                }
+                selected = self.resolve_selected(parsed)
+                try:
+                    state = build_state(selected)
+                    payload = {
+                        "ok": True,
+                        "dir": str(selected),
+                        "ts": datetime.now().isoformat(timespec="seconds"),
+                        "positions": len(state.get("open_positions") or []),
+                        "autonomy_trade_date": ((state.get("autonomy") or {}).get("trade_date") or ""),
+                    }
+                    status = 200
+                except Exception as exc:
+                    payload = {
+                        "ok": False,
+                        "dir": str(selected),
+                        "ts": datetime.now().isoformat(timespec="seconds"),
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                    status = 500
                 self.send(
-                    200,
+                    status,
                     json.dumps(payload, ensure_ascii=False).encode("utf-8"),
                     "application/json; charset=utf-8",
                     include_body=include_body,

@@ -284,7 +284,7 @@ function Check-Dashboard {
         return
     }
     try {
-        Invoke-WebRequest -Uri "http://127.0.0.1:$DashboardPort/" -UseBasicParsing -TimeoutSec 3 | Out-Null
+        Invoke-WebRequest -Uri "http://127.0.0.1:$DashboardPort/healthz" -UseBasicParsing -TimeoutSec 3 | Out-Null
     } catch {
         Restart-Dashboard -Reason "http_check_failed"
         return
