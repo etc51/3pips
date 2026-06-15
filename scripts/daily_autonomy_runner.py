@@ -1823,7 +1823,9 @@ def build_auto_policy(
     research_consensus: list[dict],
 ) -> dict:
     history_days = len(day_history)
+    day_rows = filter_trade_date(all_rows, trade_date)
     by_ticker = metrics_map(all_rows, lambda row: str(row.get("secid") or ""))
+    by_ticker_day = metrics_map(day_rows, lambda row: str(row.get("secid") or ""))
     by_family = metrics_map(all_rows, lambda row: family_for_row(row, profiles))
     by_portfolio = metrics_map(all_rows, lambda row: str(row.get("portfolio_group") or ""))
     by_portfolio_contour = metrics_map(
@@ -1891,6 +1893,28 @@ def build_auto_policy(
             )
 
     for ticker, total_row in by_ticker.items():
+        if ticker in set(active.get("observe_only_tickers") or []):
+            continue
+        day_row = by_ticker_day.get(ticker)
+        total_trades = safe_int(total_row.get("trades"))
+        total_losses = safe_int(total_row.get("losses"))
+        total_net = safe_float(total_row.get("net_rub"))
+        total_win_rate = safe_float(total_row.get("win_rate_pct"))
+        day_net = safe_float(day_row.get("net_rub")) if isinstance(day_row, dict) else 0.0
+        if (
+            isinstance(day_row, dict)
+            and total_trades >= 3
+            and total_losses >= 2
+            and total_win_rate <= 25.0
+            and total_net <= -2_000.0
+            and day_net < 0
+        ):
+            active["observe_only_tickers"].append(ticker)
+            active["notes"].append(
+                f"{ticker}: тикер остается токсичным на накопленной серии ({total_trades} trades, net={total_net:.2f} ₽) "
+                f"и снова закрывается в минус ({day_net:.2f} ₽) на последнем дне, переводим новые входы в observe-only."
+            )
+            continue
         if safe_int(total_row.get("trades")) < 4:
             continue
         aggr = by_ticker_contour.get(f"{ticker}::aggressive")
