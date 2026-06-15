@@ -1527,6 +1527,7 @@ def build_recommendations(
     by_family: list[dict],
     by_hour: list[dict],
     research_day: list[dict],
+    research_all: list[dict],
     research_consensus: list[dict],
     day_history: list[dict],
     margin_summary: list[dict],
@@ -1570,6 +1571,15 @@ def build_recommendations(
             )
         else:
             notes.append("На дневном срезе нет overlay, который убедительно лучше base без натяжки.")
+    if research_all:
+        base_all = next((row for row in research_all if row.get("scenario") == "base"), research_all[0])
+        best_combo = next((row for row in research_all if str(row.get("scenario") or "").startswith("combo_")), {})
+        if best_combo and safe_float(best_combo.get("net_rub")) > safe_float(base_all.get("net_rub")) + 500:
+            notes.append(
+                f"Сильнейшая связка на всей выборке сейчас: {best_combo['scenario']} "
+                f"({best_combo['net_rub']} ₽ против {base_all['net_rub']} ₽ у base). "
+                f"Пока это исследовательский кандидат, а не автоматический боевой перевод."
+            )
     if day_history:
         killer_days = sum(1 for row in day_history if row.get("day_class") == "killer_day")
         if killer_days:
@@ -1770,7 +1780,7 @@ def main() -> int:
 
     research_day = build_research_scenarios(all_rows, day_rows, profiles)
     research_all = build_research_scenarios(all_rows, all_rows, profiles)
-    recommendations = build_recommendations(overall, by_ticker, by_family, by_hour, research_day, scenario_consensus, day_history, margin_summary)
+    recommendations = build_recommendations(overall, by_ticker, by_family, by_hour, research_day, research_all, scenario_consensus, day_history, margin_summary)
     auto_policy = build_auto_policy(
         all_rows=all_rows,
         profiles=profiles,
