@@ -51,6 +51,7 @@ class Supervisor:
         self.log_path = self.runtime_dir / "v7_paper_supervisor_20260525.log"
         self.pid_path = self.runtime_dir / "v7_paper_supervisor_20260525.pid"
         self.start_times: dict[str, float] = {}
+        self.dashboard_failures = 0
 
     def setup(self) -> None:
         self.runtime_dir.mkdir(parents=True, exist_ok=True)
@@ -242,6 +243,7 @@ class Supervisor:
 
     def restart_dashboard(self, reason: str) -> None:
         pid_path = self.dashboard_pid_path()
+        self.dashboard_failures = 0
         self.stop_pid(self.read_pid(pid_path), reason)
         argv = [
             "src/paper_dashboard.py",
@@ -284,11 +286,17 @@ class Supervisor:
     def check_dashboard(self) -> None:
         pid = self.read_pid(self.dashboard_pid_path())
         if not self.process_alive(pid):
+            self.dashboard_failures = 0
             self.restart_dashboard("missing_process")
             return
         if not self.dashboard_http_ok():
-            self.restart_dashboard("http_check_failed")
+            self.dashboard_failures += 1
+            if self.dashboard_failures < 2:
+                self.log(f"wait dashboard pid={pid} reason=http_check_failed failures={self.dashboard_failures}")
+                return
+            self.restart_dashboard(f"http_check_failed_{self.dashboard_failures}x")
             return
+        self.dashboard_failures = 0
         self.log(f"ok dashboard pid={pid}")
 
     def run(self) -> None:

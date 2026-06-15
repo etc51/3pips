@@ -467,6 +467,35 @@ def equity_stats(pnl: pd.Series) -> dict:
     }
 
 
+def build_health_payload(base_dir: Path) -> dict:
+    portfolio_names = discover_portfolios(base_dir)
+    watched_paths = [REPORTS / "autonomy" / "latest" / "latest_manifest.json", REPORTS / "autonomy" / "latest" / "latest_auto_policy.json"]
+    open_positions_count = 0
+    for portfolio in portfolio_names:
+        positions_path = portfolio_path(base_dir, portfolio, "paper_open_positions.json")
+        watched_paths.append(positions_path)
+        watched_paths.append(portfolio_path(base_dir, portfolio, "startup_status.csv"))
+        opened = read_json(positions_path)
+        if isinstance(opened, list):
+            open_positions_count += sum(1 for item in opened if isinstance(item, dict))
+    autonomy_manifest = read_json(REPORTS / "autonomy" / "latest" / "latest_manifest.json")
+    autonomy_policy = read_json(REPORTS / "autonomy" / "latest" / "latest_auto_policy.json")
+    resolved_auto_policy = resolve_autonomy_policy(autonomy_manifest, autonomy_policy)
+    autonomy_trade_date = ""
+    if isinstance(resolved_auto_policy, dict):
+        autonomy_trade_date = str(resolved_auto_policy.get("trade_date") or "")
+    if not autonomy_trade_date and isinstance(autonomy_manifest, dict):
+        autonomy_trade_date = str(autonomy_manifest.get("trade_date") or "")
+    return {
+        "ok": True,
+        "dir": str(base_dir),
+        "ts": datetime.now().isoformat(timespec="seconds"),
+        "positions": open_positions_count,
+        "autonomy_trade_date": autonomy_trade_date,
+        "last_update": latest_mtime(watched_paths),
+    }
+
+
 def build_state(base_dir: Path) -> dict:
     config = read_portfolio_config(base_dir)
     runtime_config = read_runtime_config(base_dir)
@@ -1257,14 +1286,7 @@ def make_handler(base_dir: Path):
             if parsed.path == "/healthz":
                 selected = self.resolve_selected(parsed)
                 try:
-                    state = build_state(selected)
-                    payload = {
-                        "ok": True,
-                        "dir": str(selected),
-                        "ts": datetime.now().isoformat(timespec="seconds"),
-                        "positions": len(state.get("open_positions") or []),
-                        "autonomy_trade_date": (state.get("autonomy_trade_date") or ""),
-                    }
+                    payload = build_health_payload(selected)
                     status = 200
                 except Exception as exc:
                     payload = {
