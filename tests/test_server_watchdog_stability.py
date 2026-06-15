@@ -14,6 +14,7 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 import server_watchdog as sw  # noqa: E402
+import watchdog_policy as wp  # noqa: E402
 
 
 class ServerWatchdogStabilityTest(unittest.TestCase):
@@ -66,7 +67,7 @@ class ServerWatchdogStabilityTest(unittest.TestCase):
             ]
         }
 
-        with patch.object(sw, "load_closed_trade_rows", return_value=closed_rows):
+        with patch.object(wp, "load_closed_trade_rows", return_value=closed_rows):
             overrides_a = sw.compute_intraday_watchdog_overrides(
                 Path("."),
                 "2026-06-15",
