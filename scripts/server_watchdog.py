@@ -150,6 +150,186 @@ def latest_trade_date(run_dir: Path) -> str:
     return latest
 
 
+def normalize_upper_list(values: object) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    out: list[str] = []
+    for value in values:
+        text = str(value or "").strip().upper()
+        if text:
+            out.append(text)
+    return sorted(set(out))
+
+
+def family_from_ticker(ticker: str) -> str:
+    secid = str(ticker or "").strip()
+    if not secid:
+        return ""
+    if secid.endswith("perpA"):
+        return secid.upper()
+    head = secid.rstrip("0123456789")
+    month_codes = set("FGHJKMNQUVXZ")
+    if len(head) > 1 and head[-1].upper() in month_codes:
+        head = head[:-1]
+    return (head or secid).upper()
+
+
+def load_closed_trade_rows(run_dir: Path, trade_date: str) -> list[dict]:
+    rows: list[dict] = []
+    for path in sorted(run_dir.glob("*_multi_futures_paper_trades.csv")):
+        try:
+            with path.open("r", encoding="utf-8-sig", newline="") as handle:
+                reader = csv.DictReader(handle)
+                for row in reader:
+                    closed_at = str(row.get("closed_at") or "")
+                    if trade_date and not closed_at.startswith(trade_date):
+                        continue
+                    secid = str(row.get("secid") or row.get("ticker") or "").upper()
+                    if not secid:
+                        continue
+                    try:
+                        net = float(row.get("net_rub") or 0.0)
+                    except Exception:
+                        continue
+                    rows.append(
+                        {
+                            "secid": secid,
+                            "family": family_from_ticker(secid),
+                            "net_rub": net,
+                        }
+                    )
+        except Exception:
+            continue
+    return rows
+
+
+def strip_watchdog_overrides(active: dict, overrides: dict) -> dict:
+    base = dict(active) if isinstance(active, dict) else {}
+    for key in ("observe_only_tickers", "observe_only_families", "strict_only_tickers", "strict_only_families"):
+        values = normalize_upper_list(base.get(key))
+        if key in {"observe_only_tickers", "observe_only_families"}:
+            remove_values = set(normalize_upper_list(overrides.get(key)))
+            values = [value for value in values if value not in remove_values]
+        base[key] = values
+    notes = [str(item) for item in (base.get("notes") or []) if str(item).strip()]
+    remove_notes = {str(item) for item in (overrides.get("notes") or []) if str(item).strip()}
+    base["notes"] = [note for note in notes if note not in remove_notes]
+    return base
+
+
+def merge_policy_views(base_active: dict, overrides: dict) -> dict:
+    merged = dict(base_active) if isinstance(base_active, dict) else {}
+    merged["observe_only_tickers"] = sorted(
+        set(normalize_upper_list(base_active.get("observe_only_tickers"))) | set(normalize_upper_list(overrides.get("observe_only_tickers")))
+    )
+    merged["observe_only_families"] = sorted(
+        set(normalize_upper_list(base_active.get("observe_only_families"))) | set(normalize_upper_list(overrides.get("observe_only_families")))
+    )
+    merged["strict_only_tickers"] = normalize_upper_list(base_active.get("strict_only_tickers"))
+    merged["strict_only_families"] = normalize_upper_list(base_active.get("strict_only_families"))
+    base_notes = [str(item) for item in (base_active.get("notes") or []) if str(item).strip()]
+    override_notes = [str(item) for item in (overrides.get("notes") or []) if str(item).strip()]
+    merged["notes"] = list(dict.fromkeys(base_notes + override_notes))[:12]
+    return merged
+
+
+def compute_intraday_watchdog_overrides(run_dir: Path, trade_date: str) -> dict:
+    rows = load_closed_trade_rows(run_dir, trade_date)
+    by_ticker: dict[str, dict[str, float]] = {}
+    by_family: dict[str, dict[str, float]] = {}
+    for row in rows:
+        secid = row["secid"]
+        family = row["family"]
+        net = float(row["net_rub"])
+        ticker_bucket = by_ticker.setdefault(secid, {"net_rub": 0.0, "losses": 0.0, "trades": 0.0})
+        family_bucket = by_family.setdefault(family, {"net_rub": 0.0, "losses": 0.0, "trades": 0.0})
+        ticker_bucket["net_rub"] += net
+        ticker_bucket["trades"] += 1
+        family_bucket["net_rub"] += net
+        family_bucket["trades"] += 1
+        if net < 0:
+            ticker_bucket["losses"] += 1
+            family_bucket["losses"] += 1
+
+    observe_families = sorted(
+        family
+        for family, bucket in by_family.items()
+        if bucket["losses"] >= 1 and bucket["net_rub"] <= -3000.0
+    )
+    observe_tickers = sorted(
+        secid
+        for secid, bucket in by_ticker.items()
+        if bucket["losses"] >= 1
+        and bucket["net_rub"] <= -2000.0
+        and family_from_ticker(secid) not in set(observe_families)
+    )
+    notes: list[str] = []
+    for family in observe_families[:4]:
+        net = round(float(by_family[family]["net_rub"]), 2)
+        notes.append(f"watchdog intraday: {family} -> observe-only after {net:.2f} RUB daily family damage")
+    for secid in observe_tickers[:4]:
+        net = round(float(by_ticker[secid]["net_rub"]), 2)
+        notes.append(f"watchdog intraday: {secid} -> observe-only after {net:.2f} RUB daily ticker damage")
+    return {
+        "trade_date": trade_date,
+        "observe_only_tickers": observe_tickers,
+        "observe_only_families": observe_families,
+        "notes": notes[:8],
+    }
+
+
+def refresh_intraday_killer_policy(project_root: Path, run_dir: Path) -> tuple[bool, str]:
+    policy_path = project_root / "reports" / "autonomy" / "latest" / "latest_auto_policy.json"
+    if not policy_path.exists():
+        return False, "policy_missing"
+    try:
+        payload = json.loads(policy_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return False, f"policy_bad_json {type(exc).__name__}: {exc}"
+    if not isinstance(payload, dict):
+        return False, "policy_not_dict"
+
+    trade_date = latest_trade_date(run_dir)
+    current_overrides = payload.get("watchdog_overrides") if isinstance(payload.get("watchdog_overrides"), dict) else {}
+    if not trade_date:
+        overrides = {"trade_date": "", "observe_only_tickers": [], "observe_only_families": [], "notes": []}
+    else:
+        overrides = compute_intraday_watchdog_overrides(run_dir, trade_date)
+
+    active = payload.get("active") if isinstance(payload.get("active"), dict) else {}
+    active_base = payload.get("active_base") if isinstance(payload.get("active_base"), dict) else strip_watchdog_overrides(active, current_overrides)
+    merged_active = merge_policy_views(active_base, overrides)
+
+    changed = (
+        normalize_upper_list((current_overrides or {}).get("observe_only_tickers")) != normalize_upper_list(overrides.get("observe_only_tickers"))
+        or normalize_upper_list((current_overrides or {}).get("observe_only_families")) != normalize_upper_list(overrides.get("observe_only_families"))
+        or [str(item) for item in ((current_overrides or {}).get("notes") or []) if str(item).strip()] != [str(item) for item in (overrides.get("notes") or []) if str(item).strip()]
+        or payload.get("active_base") != active_base
+        or payload.get("active") != merged_active
+    )
+
+    payload["active_base"] = active_base
+    payload["watchdog_overrides"] = overrides
+    payload["active"] = merged_active
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    summary["active_rule_count"] = (
+        len(merged_active.get("observe_only_tickers") or [])
+        + len(merged_active.get("observe_only_families") or [])
+        + len(merged_active.get("strict_only_tickers") or [])
+        + len(merged_active.get("strict_only_families") or [])
+        + sum(
+            1
+            for key in ("entry_max_full_stop_rub", "pause_ticker_after_losses", "pause_family_after_losses", "pause_after_loss_minutes")
+            if merged_active.get(key) not in (None, "")
+        )
+    )
+    summary["active_notes_count"] = len(merged_active.get("notes") or [])
+    payload["summary"] = summary
+    if changed:
+        write_json(policy_path, payload)
+    return changed, f"trade_date={trade_date or '-'} families={','.join(overrides.get('observe_only_families') or []) or '-'} tickers={','.join(overrides.get('observe_only_tickers') or []) or '-'}"
+
+
 def load_latest_autonomy_trade_date(project_root: Path) -> str:
     path = project_root / "reports" / "autonomy" / "latest" / "latest_auto_policy.json"
     if not path.exists():
@@ -218,6 +398,9 @@ def main() -> int:
     state = load_state(state_path)
 
     log(log_path, f"watchdog_start run_name={args.run_name} service={args.service_name} dashboard={args.dashboard_url} health_stale_sec={args.health_stale_sec} startup_grace_sec={args.startup_grace_sec} no_remediate={args.no_remediate}")
+
+    changed, summary = refresh_intraday_killer_policy(project_root, run_dir)
+    log(log_path, f"intraday_policy_refresh changed={changed} {summary}")
 
     now_local = datetime.now()
     if should_check_daily_autonomy(now_local, state):

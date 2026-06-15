@@ -1075,6 +1075,13 @@ def build_auto_policy(
         "history_days": history_days,
         "sample_trades": len(all_rows),
         "active": active,
+        "active_base": dict(active),
+        "watchdog_overrides": {
+            "trade_date": trade_date,
+            "observe_only_tickers": [],
+            "observe_only_families": [],
+            "notes": [],
+        },
         "proposed": proposed,
         "summary": {
             "active_rule_count": sum(
