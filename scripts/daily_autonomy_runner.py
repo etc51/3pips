@@ -1252,6 +1252,33 @@ def scenario_has_component(name: str, component: str) -> bool:
     return component in combo_components(name)
 
 
+def concentrated_family_group_key(family: str, by_group_family: dict[str, dict]) -> str:
+    family_norm = str(family or "").strip().upper()
+    if not family_norm:
+        return ""
+    family_rows: list[tuple[str, dict]] = []
+    for key, row in by_group_family.items():
+        if not key.endswith(f"::{family_norm}"):
+            continue
+        family_rows.append((key, row))
+    if len(family_rows) < 2:
+        return ""
+    negative_rows = [(key, row) for key, row in family_rows if safe_float(row.get("net_rub")) < 0]
+    positive_rows = [(key, row) for key, row in family_rows if safe_float(row.get("net_rub")) > 0]
+    if not negative_rows or not positive_rows:
+        return ""
+    total_negative_abs = sum(abs(safe_float(row.get("net_rub"))) for _, row in negative_rows)
+    if total_negative_abs < 1_000:
+        return ""
+    worst_key, worst_row = min(negative_rows, key=lambda item: safe_float(item[1].get("net_rub")))
+    worst_abs = abs(safe_float(worst_row.get("net_rub")))
+    if worst_abs < max(1_000.0, total_negative_abs * 0.55):
+        return ""
+    if max(safe_float(row.get("net_rub")) for _, row in positive_rows) <= 0:
+        return ""
+    return worst_key
+
+
 def build_auto_policy(
     all_rows: list[dict],
     profiles: dict[str, dict],
@@ -1495,6 +1522,7 @@ def build_auto_policy(
         family_total = by_family.get(consensus_blacklist_family) or {}
         family_trades = safe_int(family_total.get("trades"))
         family_net = safe_float(family_total.get("net_rub"))
+        concentrated_group_key = concentrated_family_group_key(consensus_blacklist_family, by_group_family)
         latest_delta = safe_float(best_consensus_overlay.get("latest_day_delta_rub"))
         robust_consensus = consensus_days >= 2 and consensus_beats >= consensus_days and consensus_delta >= 1_500
         strong_latest_confirmation = (
@@ -1502,11 +1530,18 @@ def build_auto_policy(
             and latest_delta >= 2_000
         )
         if family_trades >= 3 and family_net < 0 and (robust_consensus or strong_latest_confirmation):
-            active["observe_only_families"].append(consensus_blacklist_family)
-            active["notes"].append(
-                f"Авто-policy: семейство {consensus_blacklist_family} переведено в observe-only, "
-                f"потому что {consensus_scenario} устойчиво улучшает результат против base."
-            )
+            if concentrated_group_key:
+                active["observe_only_group_families"].append(concentrated_group_key)
+                active["notes"].append(
+                    f"Авто-policy: широкая блокировка семьи {consensus_blacklist_family} заменена на узкий quarantine {concentrated_group_key}, "
+                    f"потому что урон семьи сосредоточен в одном срезе."
+                )
+            else:
+                active["observe_only_families"].append(consensus_blacklist_family)
+                active["notes"].append(
+                    f"Авто-policy: семейство {consensus_blacklist_family} переведено в observe-only, "
+                    f"потому что {consensus_scenario} устойчиво улучшает результат против base."
+                )
 
     consensus_blacklist_portfolio = scenario_blacklist_portfolio(consensus_scenario)
     if consensus_blacklist_portfolio:
@@ -1575,17 +1610,25 @@ def build_auto_policy(
         family_total = by_family.get(combo_blacklist_family) or {}
         family_trades = safe_int(family_total.get("trades"))
         family_net = safe_float(family_total.get("net_rub"))
+        concentrated_group_key = concentrated_family_group_key(combo_blacklist_family, by_group_family)
         robust_combo = (
             combo_trades >= 6
             and all_sample_combo_delta >= 2_500
             and latest_combo_delta >= 1_500
         )
         if family_trades >= 3 and family_net < 0 and robust_combo:
-            active["observe_only_families"].append(combo_blacklist_family)
-            active["notes"].append(
-                f"Авто-policy: семейство {combo_blacklist_family} переведено в observe-only, "
-                f"потому что strongest combo {best_combo_scenario} резко улучшает и последний день, и всю короткую выборку."
-            )
+            if concentrated_group_key:
+                active["observe_only_group_families"].append(concentrated_group_key)
+                active["notes"].append(
+                    f"Авто-policy: широкая блокировка семьи {combo_blacklist_family} заменена на узкий quarantine {concentrated_group_key}, "
+                    f"потому что strongest combo показывает локальную, а не общесемейную проблему."
+                )
+            else:
+                active["observe_only_families"].append(combo_blacklist_family)
+                active["notes"].append(
+                    f"Авто-policy: семейство {combo_blacklist_family} переведено в observe-only, "
+                    f"потому что strongest combo {best_combo_scenario} резко улучшает и последний день, и всю короткую выборку."
+                )
     if combo_blacklist_portfolio and combo_cap_matches_active:
         portfolio_total = by_portfolio.get(combo_blacklist_portfolio) or {}
         portfolio_trades = safe_int(portfolio_total.get("trades"))
@@ -1664,7 +1707,7 @@ def build_auto_policy(
 
     for key in ("observe_only_portfolios", "observe_only_group_families", "observe_only_tickers", "observe_only_families", "strict_only_tickers", "strict_only_families"):
         active[key] = sorted({str(value).upper() for value in active[key] if str(value).strip()})
-    active["notes"] = active["notes"][:12]
+    active["notes"] = list(dict.fromkeys(active["notes"]))[:12]
 
     return {
         "generated_at": now_str(),
