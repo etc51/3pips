@@ -1187,6 +1187,7 @@ def build_nightly_cycle_status(
     research_all: list[dict],
     research_consensus: list[dict],
     optimizer_candidates: list[dict],
+    strategy_lab: list[dict],
     restriction_rows: list[dict],
     auto_policy: dict,
 ) -> dict:
@@ -1211,6 +1212,11 @@ def build_nightly_cycle_status(
                 "status": "ok",
                 "candidates": len(optimizer_candidates),
                 "top_candidate": str(optimizer_candidates[0].get("scenario") or "") if optimizer_candidates else "",
+            },
+            "strategy_lab": {
+                "status": "ok",
+                "candidates": len(strategy_lab),
+                "top_candidate": str(strategy_lab[0].get("candidate") or "") if strategy_lab else "",
             },
             "restrictions": {
                 "status": "ok",
@@ -2300,6 +2306,227 @@ def build_recommendations(
     return notes[:6]
 
 
+def build_strategy_lab(
+    all_rows: list[dict],
+    day_rows: list[dict],
+    by_group: list[dict],
+    by_family: list[dict],
+    by_hour: list[dict],
+    day_history: list[dict],
+    research_day: list[dict],
+    research_all: list[dict],
+    research_consensus: list[dict],
+    auto_policy: dict,
+) -> list[dict]:
+    active = auto_policy.get("active") if isinstance(auto_policy.get("active"), dict) else {}
+    all_overall = metrics(all_rows)
+    day_overall = metrics(day_rows)
+    all_group_families = grouped_metrics(
+        all_rows,
+        lambda row: f"{str(row.get('portfolio_group') or '').upper()}/{str(row.get('contour') or '').upper()}::{str(row.get('family') or '').upper()}",
+    )
+    all_group_families.sort(key=lambda row: (safe_float(row.get("net_rub")), safe_float(row.get("expectancy_rub"))), reverse=True)
+
+    def hour_net(rows: list[dict], start_hh: int, end_hh: int | None = None) -> float:
+        total = 0.0
+        for row in rows:
+            bucket = str(row.get("group") or "")
+            try:
+                hh = int(bucket.split(":", 1)[0])
+            except Exception:
+                continue
+            if hh < start_hh:
+                continue
+            if end_hh is not None and hh >= end_hh:
+                continue
+            total += safe_float(row.get("net_rub"))
+        return round(total, 2)
+
+    killer_days = sum(1 for row in day_history if row.get("day_class") == "killer_day")
+    killer_share = round(killer_days / len(day_history) * 100.0, 2) if day_history else 0.0
+    avg_win = safe_float(all_overall.get("avg_win_rub"))
+    avg_loss = abs(safe_float(all_overall.get("avg_loss_rub")))
+    morning_net = hour_net(by_hour, 10, 13)
+    late_net = hour_net(by_hour, 17, None)
+    strict_consensus = next((row for row in research_consensus if str(row.get("scenario") or "") == "contour_only_strict"), {})
+    best_consensus = pick_best_consensus_scenario(research_consensus)
+    aggressive_positive_slices = []
+    for row in all_group_families:
+        key = str(row.get("group") or "")
+        portfolio_name, contour_name, family_name = split_group_family_key(key)
+        if contour_name != "AGGRESSIVE":
+            continue
+        if safe_int(row.get("trades")) < 2 or safe_float(row.get("net_rub")) <= 0:
+            continue
+        aggressive_positive_slices.append((key, portfolio_name, family_name, row))
+
+    hypotheses: list[dict] = []
+
+    def add_hypothesis(
+        hypothesis_id: str,
+        priority: int,
+        category: str,
+        candidate: str,
+        scope: str,
+        action_type: str,
+        safe_mode: str,
+        autopromote_ready: bool,
+        evidence: str,
+        next_step: str,
+        required_features: str,
+        scenario_anchor: str = "",
+    ) -> None:
+        hypotheses.append(
+            {
+                "hypothesis_id": hypothesis_id,
+                "priority": priority,
+                "category": category,
+                "candidate": candidate,
+                "scope": scope,
+                "action_type": action_type,
+                "safe_mode": safe_mode,
+                "autopromote_ready": autopromote_ready,
+                "evidence": evidence,
+                "recommended_next_step": next_step,
+                "required_features": required_features,
+                "scenario_anchor": scenario_anchor,
+            }
+        )
+
+    if strict_consensus and str(strict_consensus.get("scenario") or "") == "contour_only_strict":
+        add_hypothesis(
+            hypothesis_id="runtime_strict_primary",
+            priority=98,
+            category="runtime_policy",
+            candidate="strict primary baseline",
+            scope="all classic futures",
+            action_type="runtime_policy",
+            safe_mode="paper_autopolicy",
+            autopromote_ready=bool(active.get("strict_only_families")),
+            evidence=(
+                f"strict consensus delta_total={safe_float(strict_consensus.get('delta_total_rub'))} ₽, "
+                f"beat_base_days={safe_int(strict_consensus.get('beat_base_days'))}/{safe_int(strict_consensus.get('days'))}"
+            ),
+            next_step="держать strict как базовую ось и пускать aggressive только точечно, где он переживает серию.",
+            required_features="trade csv, day history, research consensus",
+            scenario_anchor=str(strict_consensus.get("scenario") or ""),
+        )
+
+    if aggressive_positive_slices:
+        best_slice = aggressive_positive_slices[0]
+        add_hypothesis(
+            hypothesis_id="runtime_selective_aggressive_exceptions",
+            priority=94,
+            category="runtime_hybrid",
+            candidate="strict baseline + selective aggressive slices",
+            scope="portfolio/family slice",
+            action_type="runtime_policy",
+            safe_mode="paper_autopolicy",
+            autopromote_ready=bool(active.get("allow_aggressive_group_families")),
+            evidence=(
+                f"positive aggressive slices={len(aggressive_positive_slices)}, best={best_slice[0]} "
+                f"net={safe_float(best_slice[3].get('net_rub'))} ₽ trades={safe_int(best_slice[3].get('trades'))}"
+            ),
+            next_step="продолжать искать profitable aggressive-срезы и выпускать их из broad strict-only только после подтверждения на серии.",
+            required_features="trade csv, grouped contour/family metrics, strict baseline comparison",
+            scenario_anchor=str(best_consensus.get("scenario") or ""),
+        )
+
+    if morning_net > 0 and late_net < 0:
+        add_hypothesis(
+            hypothesis_id="shadow_opening_range_continuation",
+            priority=88,
+            category="shadow_strategy",
+            candidate="opening-range continuation only",
+            scope="10:15-13:00 Moscow session",
+            action_type="shadow_backtest",
+            safe_mode="research_only",
+            autopromote_ready=False,
+            evidence=f"morning_net={morning_net} ₽ while late_net={late_net} ₽ on latest day",
+            next_step="собрать shadow/backtest слой: разрешать новые входы только в сильные утренние часы и отдельно считать expectancy.",
+            required_features="1m candles, hour bucket, family, contour, session clock",
+            scenario_anchor=str(best_consensus.get("scenario") or ""),
+        )
+
+    if avg_win > 0 and avg_loss > avg_win * 1.8:
+        add_hypothesis(
+            hypothesis_id="shadow_tail_risk_normalized_exit",
+            priority=91,
+            category="exit_model",
+            candidate="tail-risk normalized exits",
+            scope="all futures layers",
+            action_type="shadow_backtest",
+            safe_mode="research_only",
+            autopromote_ready=False,
+            evidence=f"avg_loss={round(avg_loss,2)} ₽ vs avg_win={round(avg_win,2)} ₽ on accumulated sample",
+            next_step="считать альтернативный выход: более ранний трейл / tighter time-stop / volatility-normalized exit и сравнить tail damage.",
+            required_features="trade ledger, opened_at/closed_at, 1m candles, current stop/exit path",
+            scenario_anchor=str(best_consensus.get("scenario") or ""),
+        )
+
+    if killer_days >= 1:
+        add_hypothesis(
+            hypothesis_id="runtime_family_regime_routing",
+            priority=86,
+            category="regime_routing",
+            candidate="family-specific routing by regime",
+            scope="destructive families only",
+            action_type="research_then_runtime",
+            safe_mode="paper_only",
+            autopromote_ready=False,
+            evidence=f"killer_days={killer_days}/{len(day_history)} ({killer_share}%) in accumulated history",
+            next_step="разделить семьи на stable / mixed / destructive и для mixed запускать новые контракты сначала в micro/observe до накопления своей статистики.",
+            required_features="day history, family PnL, rollover state, contract lineage",
+            scenario_anchor="day_history",
+        )
+
+    worst_family = next((row for row in by_family if safe_float(row.get("net_rub")) < 0), {})
+    if worst_family:
+        add_hypothesis(
+            hypothesis_id="shadow_vwap_reversion_family_probe",
+            priority=80,
+            category="new_strategy",
+            candidate="VWAP reversion probe on weak families",
+            scope=str(worst_family.get("group") or "weak families"),
+            action_type="shadow_backtest",
+            safe_mode="research_only",
+            autopromote_ready=False,
+            evidence=f"worst_family={worst_family.get('group')} net={safe_float(worst_family.get('net_rub'))} ₽ on latest day",
+            next_step="подготовить отдельный research-слой mean-reversion вокруг VWAP для семейств, где текущий momentum-tail даёт плохой payout.",
+            required_features="1m candles, rolling/session VWAP, deviation z-score, spread filter, family label",
+            scenario_anchor=str(best_consensus.get("scenario") or ""),
+        )
+
+    wide_spread_family = next(
+        (
+            row
+            for row in by_group
+            if "BR" in str(row.get("group") or "").upper() and safe_float(row.get("net_rub")) < 0
+        ),
+        {},
+    )
+    if wide_spread_family:
+        add_hypothesis(
+            hypothesis_id="microstructure_spread_adaptive_gate",
+            priority=78,
+            category="microstructure",
+            candidate="spread-adaptive entry gate",
+            scope=str(wide_spread_family.get("group") or "wide-spread slices"),
+            action_type="shadow_backtest",
+            safe_mode="research_only",
+            autopromote_ready=False,
+            evidence=f"weak slice={wide_spread_family.get('group')} net={safe_float(wide_spread_family.get('net_rub'))} ₽",
+            next_step="отдельно моделировать входы с динамическим spread/stop ratio вместо грубого статического запрета.",
+            required_features="orderbook snapshots, spread ticks, stop ticks, fill path, family slice",
+            scenario_anchor=str(best_consensus.get("scenario") or ""),
+        )
+
+    hypotheses.sort(key=lambda row: (safe_int(row.get("priority")), str(row.get("candidate") or "")), reverse=True)
+    for idx, row in enumerate(hypotheses, start=1):
+        row["rank"] = idx
+    return hypotheses
+
+
 def build_summary_markdown(
     trade_date: str,
     overall: dict,
@@ -2322,6 +2549,7 @@ def build_summary_markdown(
     best_research_day: list[dict],
     best_research_all: list[dict],
     best_research_consensus: list[dict],
+    strategy_lab: list[dict],
     runtime_trade_model: dict,
 ) -> str:
     fee_model = runtime_trade_model.get("fee_model") if isinstance(runtime_trade_model.get("fee_model"), dict) else dict(DEFAULT_FEE_MODEL)
@@ -2374,6 +2602,7 @@ def build_summary_markdown(
     lines.append(markdown_top("Research Top: Latest Day", best_research_day, ["scenario", "trades", "win_rate_pct", "net_rub", "expectancy_rub", "note"], limit=10))
     lines.append(markdown_top("Research Top: All Sample", best_research_all, ["scenario", "trades", "win_rate_pct", "net_rub", "expectancy_rub", "note"], limit=10))
     lines.append(markdown_top("Research Top: Consensus", best_research_consensus, ["scenario", "days", "beat_base_days", "delta_total_rub", "median_daily_net_rub", "worst_day_rub", "note"], limit=10))
+    lines.append(markdown_top("Strategy Lab", strategy_lab, ["rank", "candidate", "category", "action_type", "safe_mode", "autopromote_ready", "evidence"], limit=10))
     return "\n".join(lines)
 
 
@@ -2479,6 +2708,18 @@ def main() -> int:
     )
     auto_policy = merge_watchdog_overrides(auto_policy, load_json(manifest_root / "latest_auto_policy.json"))
     optimizer_candidates = build_optimizer_candidates(research_day, research_all, scenario_consensus)
+    strategy_lab = build_strategy_lab(
+        all_rows=all_rows,
+        day_rows=day_rows,
+        by_group=by_group,
+        by_family=by_family,
+        by_hour=by_hour,
+        day_history=day_history,
+        research_day=research_day,
+        research_all=research_all,
+        research_consensus=scenario_consensus,
+        auto_policy=auto_policy,
+    )
     restriction_rows = build_restriction_rows(auto_policy)
 
     summary_md = build_summary_markdown(
@@ -2503,6 +2744,7 @@ def main() -> int:
         research_day,
         research_all,
         scenario_consensus,
+        strategy_lab,
         runtime_trade_model,
     )
     write_text(analysis_dir / "daily_summary.md", summary_md)
@@ -2515,6 +2757,7 @@ def main() -> int:
             "open_positions": open_summary,
             "recommendations": recommendations,
             "best_consensus_scenario": pick_best_consensus_scenario(scenario_consensus),
+            "strategy_lab_top": strategy_lab[:10],
             "margin_mode": runtime_trade_model.get("margin_mode"),
             "fee_model": runtime_trade_model.get("fee_model"),
         },
@@ -2565,6 +2808,35 @@ def main() -> int:
             limit=20,
         ),
     )
+    strategy_lab_counts = {
+        "total": len(strategy_lab),
+        "runtime_policy": sum(1 for row in strategy_lab if str(row.get("action_type") or "") == "runtime_policy"),
+        "shadow_backtest": sum(1 for row in strategy_lab if str(row.get("action_type") or "") == "shadow_backtest"),
+        "research_then_runtime": sum(1 for row in strategy_lab if str(row.get("action_type") or "") == "research_then_runtime"),
+        "autopromote_ready": sum(1 for row in strategy_lab if bool(row.get("autopromote_ready"))),
+    }
+    write_csv_rows(research_dir / "strategy_lab_candidates.csv", strategy_lab)
+    write_text(
+        research_dir / "strategy_lab_summary.md",
+        "\n".join(
+            [
+                "# Strategy Lab",
+                "",
+                f"- total_candidates: {strategy_lab_counts['total']}",
+                f"- runtime_policy: {strategy_lab_counts['runtime_policy']}",
+                f"- shadow_backtest: {strategy_lab_counts['shadow_backtest']}",
+                f"- research_then_runtime: {strategy_lab_counts['research_then_runtime']}",
+                f"- autopromote_ready: {strategy_lab_counts['autopromote_ready']}",
+                "",
+                markdown_top(
+                    "Top Strategy Lab Candidates",
+                    strategy_lab,
+                    ["rank", "candidate", "category", "action_type", "safe_mode", "autopromote_ready", "evidence", "recommended_next_step"],
+                    limit=20,
+                ),
+            ]
+        ),
+    )
 
     raw_dir = bundle_dir / "raw"
     ensure_dir(raw_dir)
@@ -2588,6 +2860,7 @@ def main() -> int:
     shutil.copy2(analysis_dir / "auto_policy.md", bundle_dir / "auto_policy.md")
     shutil.copy2(research_dir / "research_summary.md", bundle_dir / "research_summary.md")
     shutil.copy2(research_dir / "optimizer_summary.md", bundle_dir / "optimizer_summary.md")
+    shutil.copy2(research_dir / "strategy_lab_summary.md", bundle_dir / "strategy_lab_summary.md")
     for path in [
         analysis_dir / "day_history.csv",
         analysis_dir / "by_portfolio.csv",
@@ -2603,6 +2876,7 @@ def main() -> int:
         research_dir / "policy_sweep_daily_history.csv",
         research_dir / "policy_sweep_consensus.csv",
         research_dir / "optimizer_candidates.csv",
+        research_dir / "strategy_lab_candidates.csv",
     ]:
         if path.exists():
             shutil.copy2(path, bundle_dir / path.name)
@@ -2630,6 +2904,8 @@ def main() -> int:
         "recurring_killer_families": recurring_families[:5],
         "research_consensus_top": scenario_consensus[:10],
         "optimizer_top": optimizer_candidates[:10],
+        "strategy_lab_top": strategy_lab[:10],
+        "strategy_lab_counts": strategy_lab_counts,
         "restrictions_runtime": restriction_rows,
         "roll_watch": roll_watch[:12],
         "auto_policy": auto_policy,
@@ -2643,6 +2919,7 @@ def main() -> int:
         research_all=research_all,
         research_consensus=scenario_consensus,
         optimizer_candidates=optimizer_candidates,
+        strategy_lab=strategy_lab,
         restriction_rows=restriction_rows,
         auto_policy=auto_policy,
     )

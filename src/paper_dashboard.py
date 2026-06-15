@@ -832,6 +832,8 @@ def build_state(base_dir: Path) -> dict:
             "day_history_tail": autonomy_manifest.get("day_history_tail") if isinstance(autonomy_manifest.get("day_history_tail"), list) else [],
             "research_consensus_top": autonomy_manifest.get("research_consensus_top") if isinstance(autonomy_manifest.get("research_consensus_top"), list) else [],
             "optimizer_top": autonomy_manifest.get("optimizer_top") if isinstance(autonomy_manifest.get("optimizer_top"), list) else [],
+            "strategy_lab_top": autonomy_manifest.get("strategy_lab_top") if isinstance(autonomy_manifest.get("strategy_lab_top"), list) else [],
+            "strategy_lab_counts": autonomy_manifest.get("strategy_lab_counts") if isinstance(autonomy_manifest.get("strategy_lab_counts"), dict) else {},
             "restrictions_runtime": autonomy_manifest.get("restrictions_runtime") if isinstance(autonomy_manifest.get("restrictions_runtime"), list) else [],
             "nightly_cycle_status": autonomy_manifest.get("nightly_cycle_status") if isinstance(autonomy_manifest.get("nightly_cycle_status"), dict) else {},
             "archive": autonomy_manifest.get("archive"),
@@ -857,6 +859,8 @@ def build_state(base_dir: Path) -> dict:
             "day_history_tail": [],
             "research_consensus_top": [],
             "optimizer_top": [],
+            "strategy_lab_top": [],
+            "strategy_lab_counts": {},
             "restrictions_runtime": [],
             "nightly_cycle_status": {},
             "archive": None,
@@ -1093,6 +1097,8 @@ HTML = r"""<!doctype html>
       const autoPolicy = auto.auto_policy || {};
       const autoPolicyActive = autoPolicy.active || {};
       const autoOptimizer = auto.optimizer_top || [];
+      const autoStrategyLab = auto.strategy_lab_top || [];
+      const autoStrategyCounts = auto.strategy_lab_counts || {};
       const autoRestrictions = auto.restrictions_runtime || [];
       const autoNightly = auto.nightly_cycle_status || {};
       const autoEl = document.getElementById('autonomySummary');
@@ -1117,11 +1123,14 @@ HTML = r"""<!doctype html>
         const optimizerText = autoOptimizer.length
           ? autoOptimizer.slice(0, 3).map(x => `${x.scenario} [${x.candidate_type}]`).join(' | ')
           : 'нет';
+        const strategyLabText = autoStrategyLab.length
+          ? autoStrategyLab.slice(0, 3).map(x => `${x.candidate} [${x.action_type}]`).join(' | ')
+          : 'нет';
         const restrictionsText = autoRestrictions.length
           ? autoRestrictions.filter(x => x.stage === 'active').slice(0, 4).map(x => `${x.restriction_type}: ${x.value}`).join(' | ')
           : 'нет';
         const stageMap = autoNightly.stages || {};
-        const stageNames = ['analyze', 'research', 'optimizer', 'restrictions', 'summary'];
+        const stageNames = ['analyze', 'research', 'optimizer', 'strategy_lab', 'restrictions', 'summary'];
         const nightlyText = stageNames.map(name => `${name}:${(stageMap[name] || {}).status || '-'}`).join(' | ');
         const policyBits = [];
         if ((autoPolicyActive.observe_only_portfolios || []).length) policyBits.push(`observe portfolio: ${(autoPolicyActive.observe_only_portfolios || []).join(', ')}`);
@@ -1168,6 +1177,8 @@ HTML = r"""<!doctype html>
             <div><strong>Устойчивый overlay:</strong> ${consensusText}</div>
             <div><strong>Ночной цикл:</strong> ${nightlyText}</div>
             <div><strong>Optimizer top:</strong> ${optimizerText}</div>
+            <div><strong>Strategy lab:</strong> ${strategyLabText}</div>
+            <div><strong>Strategy lab counts:</strong> всего ${autoStrategyCounts.total ?? 0}, runtime ${autoStrategyCounts.runtime_policy ?? 0}, shadow ${autoStrategyCounts.shadow_backtest ?? 0}, ready ${autoStrategyCounts.autopromote_ready ?? 0}</div>
             <div><strong>Restrictions:</strong> ${restrictionsText}</div>
             <div><strong>ГО за день:</strong> ${marginText}</div>
             <div><strong>Runtime auto-policy:</strong> ${policyText}</div>
