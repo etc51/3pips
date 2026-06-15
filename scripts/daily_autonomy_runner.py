@@ -33,6 +33,21 @@ from autonomy_common import (  # noqa: E402
 PREMIUM_FUTURES_RATE = 0.00025
 PREMIUM_FUTURES_RATE_PCT = 0.025
 PREMIUM_FEE_NOTE = "Premium futures fee model: conservative 0.025% of contract notional per side for turnover up to 12M RUB/day; real fee can be lower at higher daily turnover."
+DEFAULT_MARGIN_MODE = "leveraged_paper"
+DEFAULT_BROKER = "tbank"
+DEFAULT_TARIFF = "premium"
+DEFAULT_FEE_MODEL = {
+    "broker": DEFAULT_BROKER,
+    "tariff": DEFAULT_TARIFF,
+    "futures_rate_per_side_pct": PREMIUM_FUTURES_RATE_PCT,
+    "futures_rate_per_side_fraction": PREMIUM_FUTURES_RATE,
+    "rate_tiers_daily_turnover_rub": [
+        {"up_to_rub": 12_000_000, "rate_pct_per_side": 0.025},
+        {"up_to_rub": 17_000_000, "rate_pct_per_side": 0.020},
+        {"above_rub": 17_000_000, "rate_pct_per_side": 0.015},
+    ],
+    "note": PREMIUM_FEE_NOTE,
+}
 
 
 def trade_file_group(path: Path) -> str:
@@ -80,6 +95,23 @@ def load_portfolio_capitals(run_dir: Path) -> dict[str, float]:
         if capital > 0:
             out[str(name)] = capital
     return out
+
+
+def load_runtime_trade_model(run_dir: Path) -> dict:
+    payload = load_portfolio_config(run_dir)
+    fee_model = payload.get("fee_model")
+    if not isinstance(fee_model, dict):
+        fee_model = dict(DEFAULT_FEE_MODEL)
+    else:
+        merged = dict(DEFAULT_FEE_MODEL)
+        merged.update(fee_model)
+        fee_model = merged
+    return {
+        "broker": str(payload.get("broker") or fee_model.get("broker") or DEFAULT_BROKER),
+        "tariff": str(payload.get("tariff") or fee_model.get("tariff") or DEFAULT_TARIFF),
+        "margin_mode": str(payload.get("margin_mode") or DEFAULT_MARGIN_MODE),
+        "fee_model": fee_model,
+    }
 
 
 def normalize_trade_row(row: dict) -> dict | None:
@@ -899,7 +931,12 @@ def build_summary_markdown(
     best_research_day: list[dict],
     best_research_all: list[dict],
     best_research_consensus: list[dict],
+    runtime_trade_model: dict,
 ) -> str:
+    fee_model = runtime_trade_model.get("fee_model") if isinstance(runtime_trade_model.get("fee_model"), dict) else dict(DEFAULT_FEE_MODEL)
+    fee_note = str(fee_model.get("note") or PREMIUM_FEE_NOTE)
+    fee_pct = safe_float(fee_model.get("futures_rate_per_side_pct"))
+    fee_summary = f"{fee_pct:.3f}% per side" if fee_pct > 0 else str(runtime_trade_model.get("tariff") or DEFAULT_TARIFF)
     lines = [
         f"# 3pips daily autonomy summary: {trade_date}",
         "",
@@ -912,8 +949,10 @@ def build_summary_markdown(
         f"- avg_win_rub: {overall['avg_win_rub']}",
         f"- avg_loss_rub: {overall['avg_loss_rub']}",
         f"- profit_factor: {overall['profit_factor']}",
-        f"- margin_mode: leveraged paper",
-        f"- fee_model: Premium futures conservative {PREMIUM_FUTURES_RATE_PCT:.3f}% per side",
+        f"- broker: {runtime_trade_model.get('broker')}",
+        f"- tariff: {runtime_trade_model.get('tariff')}",
+        f"- margin_mode: {runtime_trade_model.get('margin_mode')}",
+        f"- fee_model: {fee_summary}",
         f"- open_positions_count: {open_summary.get('count')}",
         f"- open_positions_net_rub: {open_summary.get('net_rub')}",
         "",
@@ -924,7 +963,7 @@ def build_summary_markdown(
             lines.append(f"- {note}")
         lines.append("")
     lines.append("## Комиссия и ГО\n")
-    lines.append(f"- {PREMIUM_FEE_NOTE}")
+    lines.append(f"- {fee_note}")
     lines.append("- GO analysis uses actual paper portfolio logs: equity / used_margin / free headroom from runtime `PORTFOLIO` snapshots.")
     lines.append("")
     lines.append(markdown_top("By Portfolio", by_portfolio, ["group", "trades", "win_rate_pct", "net_rub", "expectancy_rub"], limit=10))
@@ -1031,6 +1070,7 @@ def main() -> int:
         if portfolio and portfolio not in existing_margin_portfolios:
             margin_timeline.append(row)
     margin_summary = summarize_margin_day(day_rows, margin_timeline, run_dir)
+    runtime_trade_model = load_runtime_trade_model(run_dir)
 
     research_day = build_research_scenarios(all_rows, day_rows, profiles)
     research_all = build_research_scenarios(all_rows, all_rows, profiles)
@@ -1058,6 +1098,7 @@ def main() -> int:
         research_day,
         research_all,
         scenario_consensus,
+        runtime_trade_model,
     )
     write_text(analysis_dir / "daily_summary.md", summary_md)
     write_json(
@@ -1069,13 +1110,8 @@ def main() -> int:
             "open_positions": open_summary,
             "recommendations": recommendations,
             "best_consensus_scenario": pick_best_consensus_scenario(scenario_consensus),
-            "margin_mode": "leveraged_paper",
-            "fee_model": {
-                "tariff": "premium",
-                "futures_rate_per_side_pct": PREMIUM_FUTURES_RATE_PCT,
-                "futures_rate_per_side_fraction": PREMIUM_FUTURES_RATE,
-                "note": PREMIUM_FEE_NOTE,
-            },
+            "margin_mode": runtime_trade_model.get("margin_mode"),
+            "fee_model": runtime_trade_model.get("fee_model"),
         },
     )
     write_csv_rows(analysis_dir / "by_portfolio.csv", by_portfolio)
@@ -1153,13 +1189,8 @@ def main() -> int:
         "generated_at": now_str(),
         "overall": overall,
         "open_positions": open_summary,
-        "margin_mode": "leveraged_paper",
-        "fee_model": {
-            "tariff": "premium",
-            "futures_rate_per_side_pct": PREMIUM_FUTURES_RATE_PCT,
-            "futures_rate_per_side_fraction": PREMIUM_FUTURES_RATE,
-            "note": PREMIUM_FEE_NOTE,
-        },
+        "margin_mode": runtime_trade_model.get("margin_mode"),
+        "fee_model": runtime_trade_model.get("fee_model"),
         "portfolio_margin_day": margin_summary,
         "recommendations": recommendations,
         "best_latest_day_scenario": research_day[0] if research_day else {},

@@ -10,6 +10,22 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+$script:MarginMode = "leveraged_paper"
+$script:Broker = "tbank"
+$script:Tariff = "premium"
+$script:FeeModel = [ordered]@{
+    broker = $script:Broker
+    tariff = $script:Tariff
+    futures_rate_per_side_pct = 0.025
+    futures_rate_per_side_fraction = 0.00025
+    rate_tiers_daily_turnover_rub = @(
+        [ordered]@{ up_to_rub = 12000000; rate_pct_per_side = 0.025 }
+        [ordered]@{ up_to_rub = 17000000; rate_pct_per_side = 0.020 }
+        [ordered]@{ above_rub = 17000000; rate_pct_per_side = 0.015 }
+    )
+    note = "Premium futures fee model: conservative 0.025% of contract notional per side for turnover up to 12M RUB/day; real fee can be lower at higher daily turnover."
+}
+
 $script:ProjectRoot = (Resolve-Path $ProjectRoot).Path
 $script:Python = $PythonExe
 $script:RuntimeDir = Join-Path $script:ProjectRoot "reports\runtime"
@@ -18,6 +34,7 @@ $script:LogPath = Join-Path $script:RuntimeDir "v7_paper_supervisor_20260525.log
 $script:SupervisorPidPath = Join-Path $script:RuntimeDir "v7_paper_supervisor_20260525.pid"
 New-Item -ItemType Directory -Force -Path $script:RuntimeDir | Out-Null
 New-Item -ItemType Directory -Force -Path $script:RunDir | Out-Null
+Write-PortfolioConfig
 
 $script:Portfolios = @(
     @{
@@ -103,6 +120,37 @@ function Ensure-OpenPositionsFile {
     }
 }
 
+function Write-PortfolioConfig {
+    $config = [ordered]@{
+        run_name = "v7_live_20260525"
+        broker = $script:Broker
+        tariff = $script:Tariff
+        margin_mode = $script:MarginMode
+        fee_model = $script:FeeModel
+        capital_per_contour = 800000
+        profiles_csv = "reports/futures_scalp_profiles_v7_paper_20260525.csv"
+        portfolios = [ordered]@{
+            classic_core = [ordered]@{
+                capital = 800000
+                tickers = @("PTZ6", "PDU6", "SiM7", "BRU6", "SVH7", "BRQ6", "PTM6", "BTN6", "BTM6", "BTK6", "PTU6", "LKU6", "BRV6")
+            }
+            gl_watch = [ordered]@{
+                capital = 800000
+                tickers = @("GLH7", "GLZ6", "GLM6")
+            }
+            neo = [ordered]@{
+                capital = 800000
+                tickers = @("AMDperpA", "COINperpA", "TSLAperpA")
+            }
+            tail_research = [ordered]@{
+                capital = 800000
+                tickers = @("BRN6", "PDM6", "MMH7", "SiH7", "MMZ6", "BMN6", "BMM6", "BMV6", "BMX6", "BMU6", "S1H7", "BRX6", "BMQ6", "S1Z6", "SVZ6")
+            }
+        }
+    }
+    $config | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path $script:RunDir "portfolio_config.json") -Encoding UTF8
+}
+
 function Backup-OpenPositionsFile {
     param([string]$Name)
     $path = Join-Path $script:RunDir "${Name}_paper_open_positions.json"
@@ -166,9 +214,10 @@ function Restart-Bot {
     Ensure-OpenPositionsFile -Name $Name
     Backup-OpenPositionsFile -Name $Name
     Stop-Existing -PidPath $pidPath -Needle "multi_futures_paper.py" -Reason $Reason
-    $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
-    $stdout = Join-Path $script:RunDir "${Name}_supervisor_${stamp}.stdout.log"
-    $stderr = Join-Path $script:RunDir "${Name}_supervisor_${stamp}.stderr.log"
+    $stdout = Join-Path $script:RunDir "${Name}_multi_paper.log"
+    $stderr = Join-Path $script:RunDir "${Name}_multi_paper.err.log"
+    if (-not (Test-Path -LiteralPath $stdout)) { New-Item -ItemType File -Path $stdout -Force | Out-Null }
+    if (-not (Test-Path -LiteralPath $stderr)) { New-Item -ItemType File -Path $stderr -Force | Out-Null }
     $args = New-BotArgs -Name $Name -Secids $Secids
     Write-SupervisorLog "start bot=$Name reason=$Reason cmd=$script:Python $($args -join ' ')"
     $proc = Start-Process -FilePath $script:Python -ArgumentList $args -WorkingDirectory $script:ProjectRoot `

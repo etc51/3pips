@@ -8,6 +8,22 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+$script:MarginMode = "leveraged_paper"
+$script:Broker = "tbank"
+$script:Tariff = "premium"
+$script:FeeModel = [ordered]@{
+    broker = $script:Broker
+    tariff = $script:Tariff
+    futures_rate_per_side_pct = 0.025
+    futures_rate_per_side_fraction = 0.00025
+    rate_tiers_daily_turnover_rub = @(
+        [ordered]@{ up_to_rub = 12000000; rate_pct_per_side = 0.025 }
+        [ordered]@{ up_to_rub = 17000000; rate_pct_per_side = 0.020 }
+        [ordered]@{ above_rub = 17000000; rate_pct_per_side = 0.015 }
+    )
+    note = "Premium futures fee model: conservative 0.025% of contract notional per side for turnover up to 12M RUB/day; real fee can be lower at higher daily turnover."
+}
+
 function Resolve-Python {
     param([string]$Requested, [string]$Root)
     if ($Requested) { return $Requested }
@@ -41,6 +57,8 @@ function Start-Portfolio {
     )
     $stdout = Join-Path $script:RunDir "${Name}_multi_paper.log"
     $stderr = Join-Path $script:RunDir "${Name}_multi_paper.err.log"
+    if (-not (Test-Path -LiteralPath $stdout)) { New-Item -ItemType File -Path $stdout -Force | Out-Null }
+    if (-not (Test-Path -LiteralPath $stderr)) { New-Item -ItemType File -Path $stderr -Force | Out-Null }
     $args = @(
         "src\multi_futures_paper.py",
         "--secids"
@@ -87,6 +105,10 @@ function Start-Portfolio {
 function Write-PortfolioConfig {
     $config = [ordered]@{
         run_name = "v7_live_20260525"
+        broker = $script:Broker
+        tariff = $script:Tariff
+        margin_mode = $script:MarginMode
+        fee_model = $script:FeeModel
         capital_per_contour = 800000
         profiles_csv = "reports/futures_scalp_profiles_v7_paper_20260525.csv"
         portfolios = [ordered]@{

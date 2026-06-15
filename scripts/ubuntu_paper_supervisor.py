@@ -13,6 +13,21 @@ from urllib.request import urlopen
 
 
 RUN_NAME = "v7_live_20260525"
+MARGIN_MODE = "leveraged_paper"
+BROKER = "tbank"
+TARIFF = "premium"
+FEE_MODEL = {
+    "broker": BROKER,
+    "tariff": TARIFF,
+    "futures_rate_per_side_pct": 0.025,
+    "futures_rate_per_side_fraction": 0.00025,
+    "rate_tiers_daily_turnover_rub": [
+        {"up_to_rub": 12_000_000, "rate_pct_per_side": 0.025},
+        {"up_to_rub": 17_000_000, "rate_pct_per_side": 0.020},
+        {"above_rub": 17_000_000, "rate_pct_per_side": 0.015},
+    ],
+    "note": "Premium futures fee model: conservative 0.025% of contract notional per side for turnover up to 12M RUB/day; real fee can be lower at higher daily turnover.",
+}
 PORTFOLIOS = {
     "classic_core": ["PTZ6", "PDU6", "SiM7", "BRU6", "SVH7", "BRQ6", "PTM6", "BTN6", "BTM6", "BTK6", "PTU6", "LKU6", "BRV6"],
     "gl_watch": ["GLH7", "GLZ6", "GLM6"],
@@ -79,6 +94,10 @@ class Supervisor:
     def write_portfolio_config(self) -> None:
         payload = {
             "run_name": RUN_NAME,
+            "broker": BROKER,
+            "tariff": TARIFF,
+            "margin_mode": MARGIN_MODE,
+            "fee_model": FEE_MODEL,
             "capital_per_contour": 800000,
             "profiles_csv": "reports/futures_scalp_profiles_v7_paper_20260525.csv",
             "portfolios": {
@@ -88,6 +107,12 @@ class Supervisor:
         }
         path = self.run_dir / "portfolio_config.json"
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def ensure_bot_runtime_logs(self, name: str) -> None:
+        for suffix in ("multi_paper.log", "multi_paper.err.log"):
+            path = self.run_dir / f"{name}_{suffix}"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch(exist_ok=True)
 
     def read_pid(self, path: Path) -> int | None:
         try:
@@ -207,6 +232,7 @@ class Supervisor:
     def restart_bot(self, name: str, reason: str) -> None:
         pid_path = self.bot_pid_path(name)
         self.ensure_open_positions_file(name)
+        self.ensure_bot_runtime_logs(name)
         self.backup_open_positions_file(name)
         self.stop_pid(self.read_pid(pid_path), reason)
         self.start_process(f"bot={name}", self.bot_args(name, PORTFOLIOS[name]), pid_path, reason)

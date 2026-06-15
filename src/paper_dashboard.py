@@ -63,6 +63,11 @@ def read_portfolio_config(base_dir: Path) -> dict:
     return {}
 
 
+def read_runtime_config(base_dir: Path) -> dict:
+    config = read_json(base_dir / "portfolio_config.json")
+    return config if isinstance(config, dict) else {}
+
+
 def portfolio_path(base_dir: Path, portfolio: str, suffix: str) -> Path:
     if portfolio == "strong":
         default_path = base_dir / suffix
@@ -434,6 +439,7 @@ def equity_stats(pnl: pd.Series) -> dict:
 
 def build_state(base_dir: Path) -> dict:
     config = read_portfolio_config(base_dir)
+    runtime_config = read_runtime_config(base_dir)
     portfolio_names = discover_portfolios(base_dir)
     trade_parts = []
     for portfolio in portfolio_names:
@@ -773,13 +779,16 @@ def build_state(base_dir: Path) -> dict:
 
     autonomy = {}
     if isinstance(autonomy_manifest, dict):
+        fee_model = autonomy_manifest.get("fee_model") if isinstance(autonomy_manifest.get("fee_model"), dict) else {}
+        if not fee_model:
+            fee_model = runtime_config.get("fee_model") if isinstance(runtime_config.get("fee_model"), dict) else {}
         autonomy = {
             "trade_date": autonomy_manifest.get("trade_date"),
             "generated_at": autonomy_manifest.get("generated_at"),
             "overall": autonomy_manifest.get("overall") if isinstance(autonomy_manifest.get("overall"), dict) else {},
             "open_positions": autonomy_manifest.get("open_positions") if isinstance(autonomy_manifest.get("open_positions"), dict) else {},
-            "margin_mode": autonomy_manifest.get("margin_mode"),
-            "fee_model": autonomy_manifest.get("fee_model") if isinstance(autonomy_manifest.get("fee_model"), dict) else {},
+            "margin_mode": autonomy_manifest.get("margin_mode") or runtime_config.get("margin_mode"),
+            "fee_model": fee_model,
             "portfolio_margin_day": autonomy_manifest.get("portfolio_margin_day") if isinstance(autonomy_manifest.get("portfolio_margin_day"), list) else [],
             "recommendations": autonomy_manifest.get("recommendations") if isinstance(autonomy_manifest.get("recommendations"), list) else [],
             "top_killer_tickers": autonomy_manifest.get("top_killer_tickers") if isinstance(autonomy_manifest.get("top_killer_tickers"), list) else [],
@@ -792,6 +801,27 @@ def build_state(base_dir: Path) -> dict:
             "research_consensus_top": autonomy_manifest.get("research_consensus_top") if isinstance(autonomy_manifest.get("research_consensus_top"), list) else [],
             "archive": autonomy_manifest.get("archive"),
             "roll_watch": autonomy_manifest.get("roll_watch") if isinstance(autonomy_manifest.get("roll_watch"), list) else [],
+        }
+    elif runtime_config:
+        autonomy = {
+            "trade_date": None,
+            "generated_at": None,
+            "overall": {},
+            "open_positions": {},
+            "margin_mode": runtime_config.get("margin_mode"),
+            "fee_model": runtime_config.get("fee_model") if isinstance(runtime_config.get("fee_model"), dict) else {},
+            "portfolio_margin_day": [],
+            "recommendations": [],
+            "top_killer_tickers": [],
+            "top_killer_families": [],
+            "recurring_killer_tickers": [],
+            "recurring_killer_families": [],
+            "best_consensus_scenario": {},
+            "day_class_counts": {},
+            "day_history_tail": [],
+            "research_consensus_top": [],
+            "archive": None,
+            "roll_watch": [],
         }
     if isinstance(autonomy_email, dict):
         autonomy["email_status"] = human_email_status(autonomy_email.get("status"))
