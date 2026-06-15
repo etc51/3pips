@@ -605,6 +605,181 @@ def pick_best_consensus_scenario(rows: list[dict]) -> dict:
     return qualified[0] if qualified else base
 
 
+def metrics_map(rows: list[dict], key_fn) -> dict[str, dict]:
+    return {str(row.get("group") or ""): row for row in grouped_metrics(rows, key_fn)}
+
+
+def build_auto_policy(
+    all_rows: list[dict],
+    profiles: dict[str, dict],
+    trade_date: str,
+    day_history: list[dict],
+    recurring_tickers: list[dict],
+    recurring_families: list[dict],
+    research_day: list[dict],
+    research_consensus: list[dict],
+) -> dict:
+    history_days = len(day_history)
+    by_ticker = metrics_map(all_rows, lambda row: str(row.get("secid") or ""))
+    by_family = metrics_map(all_rows, lambda row: family_for_row(row, profiles))
+    by_ticker_contour = metrics_map(all_rows, lambda row: f"{row.get('secid') or ''}::{row.get('contour') or ''}")
+    by_family_contour = metrics_map(all_rows, lambda row: f"{family_for_row(row, profiles)}::{row.get('contour') or ''}")
+
+    active = {
+        "observe_only_tickers": [],
+        "observe_only_families": [],
+        "strict_only_tickers": [],
+        "strict_only_families": [],
+        "notes": [],
+    }
+
+    if history_days >= 2:
+        for row in recurring_tickers:
+            ticker = str(row.get("group") or "")
+            if not ticker:
+                continue
+            if safe_int(row.get("killer_days")) < 2:
+                continue
+            if safe_float(row.get("total_bucket_net_rub")) > -2_000:
+                continue
+            active["observe_only_tickers"].append(ticker)
+            active["notes"].append(
+                f"{ticker}: повторяющийся killer по дням, переводим в observe-only до накопления новой статистики."
+            )
+
+        for row in recurring_families:
+            family = str(row.get("group") or "")
+            if not family:
+                continue
+            if safe_int(row.get("killer_days")) < 2:
+                continue
+            if safe_float(row.get("total_bucket_net_rub")) > -3_000:
+                continue
+            active["observe_only_families"].append(family)
+            active["notes"].append(
+                f"{family}: семейство повторно разрушает дни, новые входы временно только в режиме наблюдения."
+            )
+
+    for ticker, total_row in by_ticker.items():
+        if safe_int(total_row.get("trades")) < 4:
+            continue
+        aggr = by_ticker_contour.get(f"{ticker}::aggressive")
+        strict = by_ticker_contour.get(f"{ticker}::strict")
+        if not aggr or safe_int(aggr.get("trades")) < 3:
+            continue
+        aggr_net = safe_float(aggr.get("net_rub"))
+        strict_net = safe_float(strict.get("net_rub")) if strict else 0.0
+        if aggr_net <= -1_000 and (not strict or strict_net >= 0 or aggr_net < strict_net - 500):
+            active["strict_only_tickers"].append(ticker)
+            active["notes"].append(
+                f"{ticker}: aggressive слой заметно хуже strict, поэтому aggressive новые входы временно блокируются."
+            )
+
+    for family, total_row in by_family.items():
+        if safe_int(total_row.get("trades")) < 6:
+            continue
+        aggr = by_family_contour.get(f"{family}::aggressive")
+        strict = by_family_contour.get(f"{family}::strict")
+        if not aggr or safe_int(aggr.get("trades")) < 4:
+            continue
+        aggr_net = safe_float(aggr.get("net_rub"))
+        strict_net = safe_float(strict.get("net_rub")) if strict else 0.0
+        if aggr_net <= -1_500 and (not strict or strict_net >= 0 or aggr_net < strict_net - 700):
+            active["strict_only_families"].append(family)
+            active["notes"].append(
+                f"{family}: семейство лучше ведёт себя без aggressive-слоя, переводим aggressive в observe-only."
+            )
+
+    for key in ("observe_only_tickers", "observe_only_families", "strict_only_tickers", "strict_only_families"):
+        active[key] = sorted({str(value).upper() for value in active[key] if str(value).strip()})
+    active["notes"] = active["notes"][:12]
+
+    best_latest_overlay = next((row for row in research_day if row.get("scenario") != "base"), {})
+    best_consensus_overlay = pick_best_consensus_scenario(research_consensus)
+
+    proposed = {
+        "best_latest_overlay": best_latest_overlay,
+        "best_consensus_overlay": best_consensus_overlay,
+        "candidate_entry_cutoff": "",
+        "candidate_stop_cap_rub": None,
+        "notes": [],
+    }
+    for candidate in [best_consensus_overlay, best_latest_overlay]:
+        scenario = str(candidate.get("scenario") or "")
+        if scenario.startswith("no_new_after_") and not proposed["candidate_entry_cutoff"]:
+            proposed["candidate_entry_cutoff"] = scenario.removeprefix("no_new_after_")
+            proposed["notes"].append(
+                f"Сценарий {scenario} дал лучший результат в исследовательском слое: это кандидат на ранний cutoff, но пока не активируется автоматически."
+            )
+        if scenario.startswith("stop_cap_") and proposed["candidate_stop_cap_rub"] is None:
+            try:
+                proposed["candidate_stop_cap_rub"] = int(scenario.removeprefix("stop_cap_"))
+            except Exception:
+                proposed["candidate_stop_cap_rub"] = None
+            if proposed["candidate_stop_cap_rub"] is not None:
+                proposed["notes"].append(
+                    f"Сценарий {scenario} выглядит сильнее base: это кандидат на следующий тест лимита полного стопа."
+                )
+
+    return {
+        "generated_at": now_str(),
+        "trade_date": trade_date,
+        "history_days": history_days,
+        "sample_trades": len(all_rows),
+        "active": active,
+        "proposed": proposed,
+        "summary": {
+            "active_rule_count": sum(
+                len(active[key])
+                for key in ("observe_only_tickers", "observe_only_families", "strict_only_tickers", "strict_only_families")
+            ),
+            "active_notes_count": len(active["notes"]),
+            "best_consensus_scenario": str(best_consensus_overlay.get("scenario") or ""),
+        },
+    }
+
+
+def render_auto_policy_markdown(auto_policy: dict) -> str:
+    active = auto_policy.get("active") if isinstance(auto_policy.get("active"), dict) else {}
+    proposed = auto_policy.get("proposed") if isinstance(auto_policy.get("proposed"), dict) else {}
+    lines = [
+        "# Runtime auto-policy",
+        "",
+        f"- trade_date: {auto_policy.get('trade_date') or '-'}",
+        f"- generated_at: {auto_policy.get('generated_at') or '-'}",
+        f"- history_days: {auto_policy.get('history_days') or 0}",
+        f"- sample_trades: {auto_policy.get('sample_trades') or 0}",
+        "",
+        "## Active entry policy",
+        "",
+        f"- observe_only_tickers: {', '.join(active.get('observe_only_tickers') or []) or 'none'}",
+        f"- observe_only_families: {', '.join(active.get('observe_only_families') or []) or 'none'}",
+        f"- strict_only_tickers: {', '.join(active.get('strict_only_tickers') or []) or 'none'}",
+        f"- strict_only_families: {', '.join(active.get('strict_only_families') or []) or 'none'}",
+        "",
+    ]
+    notes = active.get("notes") or []
+    if notes:
+        lines.append("### Why active")
+        lines.append("")
+        for note in notes:
+            lines.append(f"- {note}")
+        lines.append("")
+    lines.append("## Proposed next overlays")
+    lines.append("")
+    best_latest = proposed.get("best_latest_overlay") if isinstance(proposed.get("best_latest_overlay"), dict) else {}
+    best_consensus = proposed.get("best_consensus_overlay") if isinstance(proposed.get("best_consensus_overlay"), dict) else {}
+    lines.append(f"- best_latest_overlay: {best_latest.get('scenario') or '-'}")
+    lines.append(f"- best_consensus_overlay: {best_consensus.get('scenario') or '-'}")
+    lines.append(f"- candidate_entry_cutoff: {proposed.get('candidate_entry_cutoff') or '-'}")
+    lines.append(f"- candidate_stop_cap_rub: {proposed.get('candidate_stop_cap_rub') or '-'}")
+    lines.append("")
+    for note in proposed.get("notes") or []:
+        lines.append(f"- {note}")
+    lines.append("")
+    return "\n".join(lines)
+
+
 def markdown_top(title: str, rows: list[dict], columns: list[str], limit: int = 10) -> str:
     if not rows:
         return f"## {title}\n\nНет данных.\n"
@@ -1075,6 +1250,16 @@ def main() -> int:
     research_day = build_research_scenarios(all_rows, day_rows, profiles)
     research_all = build_research_scenarios(all_rows, all_rows, profiles)
     recommendations = build_recommendations(overall, by_ticker, by_family, by_hour, research_day, scenario_consensus, day_history, margin_summary)
+    auto_policy = build_auto_policy(
+        all_rows=all_rows,
+        profiles=profiles,
+        trade_date=trade_date,
+        day_history=day_history,
+        recurring_tickers=recurring_tickers,
+        recurring_families=recurring_families,
+        research_day=research_day,
+        research_consensus=scenario_consensus,
+    )
 
     summary_md = build_summary_markdown(
         trade_date,
@@ -1130,6 +1315,8 @@ def main() -> int:
     write_csv_rows(analysis_dir / "margin_timeline.csv", margin_timeline)
     write_csv_rows(analysis_dir / "margin_summary.csv", margin_summary)
     write_text(analysis_dir / "recommendations.md", "\n".join(f"- {line}" for line in recommendations) + ("\n" if recommendations else ""))
+    write_json(analysis_dir / "auto_policy.json", auto_policy)
+    write_text(analysis_dir / "auto_policy.md", render_auto_policy_markdown(auto_policy))
 
     for row in research_day:
         row["sample"] = "latest_day"
@@ -1167,6 +1354,7 @@ def main() -> int:
     write_text(raw_dir / "server_watchdog.tail.log", tail_text(runtime_dir / "server_watchdog.log", lines=500))
 
     shutil.copy2(analysis_dir / "daily_summary.md", bundle_dir / "daily_summary.md")
+    shutil.copy2(analysis_dir / "auto_policy.md", bundle_dir / "auto_policy.md")
     shutil.copy2(research_dir / "research_summary.md", bundle_dir / "research_summary.md")
     for path in [
         analysis_dir / "day_history.csv",
@@ -1208,6 +1396,7 @@ def main() -> int:
         "recurring_killer_families": recurring_families[:5],
         "research_consensus_top": scenario_consensus[:10],
         "roll_watch": roll_watch[:12],
+        "auto_policy": auto_policy,
     }
     write_json(bundle_dir / "manifest.json", manifest_payload)
 
@@ -1218,6 +1407,7 @@ def main() -> int:
 
     latest_summary = manifest_root / "latest_daily_summary.md"
     write_text(latest_summary, summary_md)
+    write_json(manifest_root / "latest_auto_policy.json", auto_policy)
     latest_manifest_payload = {
         **manifest_payload,
         "archive": str(zip_path),

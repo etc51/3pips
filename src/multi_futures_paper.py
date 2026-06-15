@@ -40,6 +40,7 @@ SPREAD_WATCH_RATIO = 0.25
 SPREAD_HEAVY_RATIO = 0.40
 SPREAD_DOMINATES_RATIO = 1.00
 DEFAULT_MAX_FULL_STOP_RUB = 1_000.0
+AUTO_POLICY_RELOAD_SEC = 30.0
 
 
 @dataclass
@@ -112,6 +113,106 @@ class SizingDecision:
     full_stop_per_contract_rub: float
     full_stop_rub: float
     reason: str
+
+
+def empty_auto_policy() -> dict:
+    return {
+        "trade_date": "",
+        "generated_at": "",
+        "observe_only_tickers": [],
+        "observe_only_families": [],
+        "strict_only_tickers": [],
+        "strict_only_families": [],
+        "notes": [],
+    }
+
+
+def normalize_policy_names(values: object) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    out: list[str] = []
+    for value in values:
+        text = str(value or "").strip().upper()
+        if text:
+            out.append(text)
+    return sorted(set(out))
+
+
+def parse_auto_policy_payload(payload: object) -> dict:
+    if not isinstance(payload, dict):
+        return empty_auto_policy()
+    active = payload.get("active") if isinstance(payload.get("active"), dict) else {}
+    return {
+        "trade_date": str(payload.get("trade_date") or ""),
+        "generated_at": str(payload.get("generated_at") or ""),
+        "observe_only_tickers": normalize_policy_names(active.get("observe_only_tickers")),
+        "observe_only_families": normalize_policy_names(active.get("observe_only_families")),
+        "strict_only_tickers": normalize_policy_names(active.get("strict_only_tickers")),
+        "strict_only_families": normalize_policy_names(active.get("strict_only_families")),
+        "notes": [str(item) for item in (active.get("notes") or []) if str(item).strip()],
+    }
+
+
+def refresh_auto_policy(cache: dict, force: bool = False) -> dict:
+    now = time.monotonic()
+    reload_sec = float(cache.get("reload_sec") or AUTO_POLICY_RELOAD_SEC)
+    next_check = float(cache.get("next_check_at") or 0.0)
+    if not force and now < next_check:
+        return cache.get("payload") if isinstance(cache.get("payload"), dict) else empty_auto_policy()
+    cache["next_check_at"] = now + reload_sec
+    path = cache.get("path")
+    if not isinstance(path, Path):
+        cache["payload"] = empty_auto_policy()
+        cache["status"] = "disabled"
+        return cache["payload"]
+    if not path.exists():
+        cache["mtime"] = None
+        cache["status"] = "missing"
+        cache["last_error"] = ""
+        cache["payload"] = empty_auto_policy()
+        return cache["payload"]
+    try:
+        mtime = path.stat().st_mtime
+    except Exception as exc:
+        cache["status"] = "stat_error"
+        cache["last_error"] = f"{type(exc).__name__}: {exc}"
+        return cache.get("payload") if isinstance(cache.get("payload"), dict) else empty_auto_policy()
+    if not force and cache.get("mtime") == mtime and isinstance(cache.get("payload"), dict):
+        return cache["payload"]
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        payload = parse_auto_policy_payload(raw)
+    except Exception as exc:
+        cache["status"] = "load_error"
+        cache["last_error"] = f"{type(exc).__name__}: {exc}"
+        return cache.get("payload") if isinstance(cache.get("payload"), dict) else empty_auto_policy()
+    cache["mtime"] = mtime
+    cache["status"] = "loaded"
+    cache["last_error"] = ""
+    cache["payload"] = payload
+    observe_count = len(payload["observe_only_tickers"]) + len(payload["observe_only_families"])
+    strict_count = len(payload["strict_only_tickers"]) + len(payload["strict_only_families"])
+    print(
+        f"{now_str()} AUTO_POLICY loaded trade_date={payload.get('trade_date') or '-'} "
+        f"observe={observe_count} strict_only={strict_count} path={path}",
+        flush=True,
+    )
+    return payload
+
+
+def auto_policy_block_reason(st: State, contour: str, policy: dict) -> str | None:
+    secid = st.spec.secid.upper()
+    family = state_family(st).upper()
+    if secid in set(policy.get("observe_only_tickers") or []):
+        return "auto_policy observe_only_ticker"
+    if family in set(policy.get("observe_only_families") or []):
+        return "auto_policy observe_only_family"
+    if contour == "aggressive":
+        if secid in set(policy.get("strict_only_tickers") or []):
+            return "auto_policy strict_only_ticker"
+        if family in set(policy.get("strict_only_families") or []):
+            return "auto_policy strict_only_family"
+    return None
 
 
 def position_margin(spec: Spec, direction: Direction | str, qty: int) -> float:
@@ -1090,6 +1191,7 @@ def poll_market_fallback(
     last_stream_event: list[float],
     started: float,
     runtime_state: dict[str, object],
+    auto_policy_state: dict[str, object],
     stop_event: threading.Event,
     lock: threading.RLock,
 ) -> None:
@@ -1144,6 +1246,7 @@ def poll_market_fallback(
                             int(runtime_state.get("reconnect_count", 0)),
                             str(runtime_state.get("last_stream_error", "")),
                             "polling_fallback",
+                            refresh_auto_policy(auto_policy_state),
                         )
                     print(f"{now_str()} POLL fallback active stale_sec={time.monotonic() - last_stream_event[0]:.1f}", flush=True)
         except Exception as exc:
@@ -1408,6 +1511,7 @@ def write_bot_health(
     reconnect_count: int,
     last_stream_error: str,
     status: str,
+    auto_policy: dict | None = None,
 ) -> None:
     now = time.monotonic()
     payload = {
@@ -1431,6 +1535,7 @@ def write_bot_health(
             }
             for contour in ["strict", "aggressive"]
         },
+        "auto_policy": auto_policy if isinstance(auto_policy, dict) else empty_auto_policy(),
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -1491,6 +1596,8 @@ def main() -> None:
     parser.add_argument("--roll-observe-days", type=float, default=21.0)
     parser.add_argument("--roll-state-log", default=str(REPORTS / "paper_roll_state.json"))
     parser.add_argument("--disable-auto-roll", action="store_true")
+    parser.add_argument("--auto-policy-path", default=str(REPORTS / "autonomy" / "latest" / "latest_auto_policy.json"))
+    parser.add_argument("--auto-policy-reload-sec", type=float, default=AUTO_POLICY_RELOAD_SEC)
     args = parser.parse_args()
 
     from t_tech.invest import Client, InstrumentIdType
@@ -1653,6 +1760,7 @@ def main() -> None:
             f"max_total_margin_pct={portfolio.max_total_margin_pct:.2f} "
             f"max_position_margin_pct={portfolio.max_position_margin_pct:.2f} "
             f"max_full_stop_rub={float(args.max_full_stop_rub):.0f} "
+            f"auto_policy_path={args.auto_policy_path or '-'} "
             f"no_new_after={args.no_new_after or '-'} force_close_at={args.force_close_at or '-'}"
         )
         started = time.monotonic()
@@ -1663,6 +1771,16 @@ def main() -> None:
         force_close_at = parse_clock_time(args.force_close_at)
         last_stream_event = [time.monotonic()]
         runtime_state: dict[str, object] = {"reconnect_count": 0, "last_stream_error": ""}
+        auto_policy_state: dict[str, object] = {
+            "path": Path(args.auto_policy_path) if args.auto_policy_path else None,
+            "reload_sec": float(args.auto_policy_reload_sec),
+            "next_check_at": 0.0,
+            "mtime": None,
+            "status": "init",
+            "last_error": "",
+            "payload": empty_auto_policy(),
+        }
+        active_auto_policy = refresh_auto_policy(auto_policy_state, force=True)
         stop_event = threading.Event()
         lock = threading.RLock()
         restore_closed_totals(Path(args.log), states, portfolio)
@@ -1677,10 +1795,11 @@ def main() -> None:
             int(runtime_state["reconnect_count"]),
             str(runtime_state["last_stream_error"]),
             "starting",
+            active_auto_policy,
         )
         poll_thread = threading.Thread(
             target=poll_market_fallback,
-            args=(token, specs, state_by_uid, states, args, portfolio, last_stream_event, started, runtime_state, stop_event, lock),
+            args=(token, specs, state_by_uid, states, args, portfolio, last_stream_event, started, runtime_state, auto_policy_state, stop_event, lock),
             daemon=True,
         )
         poll_thread.start()
@@ -1688,6 +1807,7 @@ def main() -> None:
         def handle_stream_response(response) -> None:
             nonlocal next_report, next_snapshot
             now = time.monotonic()
+            active_auto_policy_local = refresh_auto_policy(auto_policy_state)
             trading_enabled = daily_trading_enabled(no_trade_before, no_new_after)
             force_close_due = daily_force_close_due(force_close_at)
             uid = ""
@@ -1743,6 +1863,10 @@ def main() -> None:
                             continue
                         if has_open_ticker(states, spec.secid):
                             st.last_reason = "duplicate_filter ticker_already_open"
+                            continue
+                        policy_reason = auto_policy_block_reason(st, contour, active_auto_policy_local)
+                        if policy_reason:
+                            st.last_reason = policy_reason
                             continue
                         family_conflict = has_roll_family_conflict(
                             states,
@@ -1828,6 +1952,7 @@ def main() -> None:
                         int(runtime_state["reconnect_count"]),
                         str(runtime_state["last_stream_error"]),
                         "running",
+                        active_auto_policy_local,
                     )
                     next_snapshot += args.snapshot_sec
 
@@ -1854,6 +1979,7 @@ def main() -> None:
                             int(runtime_state["reconnect_count"]),
                             str(runtime_state["last_stream_error"]),
                             "stream_reconnecting",
+                            refresh_auto_policy(auto_policy_state),
                         )
                     time.sleep(3)
         finally:
@@ -1867,6 +1993,7 @@ def main() -> None:
                     int(runtime_state["reconnect_count"]),
                     str(runtime_state["last_stream_error"]),
                     "stopping",
+                    refresh_auto_policy(auto_policy_state),
                 )
             stop_event.set()
         print_report(states, started)

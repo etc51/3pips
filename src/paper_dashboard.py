@@ -166,6 +166,14 @@ def human_reason(reason: object) -> str:
         return "фильтр: близко экспирация, новые входы запрещены"
     if text.startswith("roll_family_filter"):
         return "фильтр: уже есть позиция в этом семействе на переносе"
+    if text == "auto_policy observe_only_ticker":
+        return "авто-policy: тикер временно только наблюдаем"
+    if text == "auto_policy observe_only_family":
+        return "авто-policy: семейство временно только наблюдаем"
+    if text == "auto_policy strict_only_ticker":
+        return "авто-policy: aggressive выключен для тикера"
+    if text == "auto_policy strict_only_family":
+        return "авто-policy: aggressive выключен для семейства"
     if text.startswith("direction_filter"):
         return "фильтр: сигнал против направления профиля"
     if text.startswith("entry_signal long"):
@@ -477,6 +485,7 @@ def build_state(base_dir: Path) -> dict:
     heartbeat = read_csv(base_dir / "paper_monitor_heartbeat.csv")
     summary = read_csv(base_dir / "paper_execution_summary.csv")
     autonomy_manifest = read_json(REPORTS / "autonomy" / "latest" / "latest_manifest.json")
+    autonomy_policy = read_json(REPORTS / "autonomy" / "latest" / "latest_auto_policy.json")
     autonomy_email = read_json(REPORTS / "autonomy" / "latest" / "latest_email_status.json")
     open_positions = []
     for portfolio in portfolio_names:
@@ -801,6 +810,7 @@ def build_state(base_dir: Path) -> dict:
             "research_consensus_top": autonomy_manifest.get("research_consensus_top") if isinstance(autonomy_manifest.get("research_consensus_top"), list) else [],
             "archive": autonomy_manifest.get("archive"),
             "roll_watch": autonomy_manifest.get("roll_watch") if isinstance(autonomy_manifest.get("roll_watch"), list) else [],
+            "auto_policy": autonomy_manifest.get("auto_policy") if isinstance(autonomy_manifest.get("auto_policy"), dict) else (autonomy_policy if isinstance(autonomy_policy, dict) else {}),
         }
     elif runtime_config:
         autonomy = {
@@ -822,6 +832,7 @@ def build_state(base_dir: Path) -> dict:
             "research_consensus_top": [],
             "archive": None,
             "roll_watch": [],
+            "auto_policy": autonomy_policy if isinstance(autonomy_policy, dict) else {},
         }
     if isinstance(autonomy_email, dict):
         autonomy["email_status"] = human_email_status(autonomy_email.get("status"))
@@ -1050,6 +1061,8 @@ HTML = r"""<!doctype html>
       const autoRecurring = auto.recurring_killer_tickers || [];
       const autoConsensus = auto.best_consensus_scenario || {};
       const autoDayCounts = auto.day_class_counts || {};
+      const autoPolicy = auto.auto_policy || {};
+      const autoPolicyActive = autoPolicy.active || {};
       const autoEl = document.getElementById('autonomySummary');
       if (!auto.trade_date) {
         autoEl.innerHTML = '<div class="empty">Авторазбор дня ещё не собран</div>';
@@ -1069,6 +1082,12 @@ HTML = r"""<!doctype html>
         const marginText = autoMargin.length
           ? autoMargin.slice(0, 3).map(x => `${x.portfolio}: пик ГО ${fmt(x.peak_used_margin_rub, 0)} ₽, ROI ${fmt(x.return_on_peak_margin_pct, 3)}%`).join(' | ')
           : 'нет';
+        const policyBits = [];
+        if ((autoPolicyActive.observe_only_tickers || []).length) policyBits.push(`observe ticker: ${(autoPolicyActive.observe_only_tickers || []).join(', ')}`);
+        if ((autoPolicyActive.observe_only_families || []).length) policyBits.push(`observe family: ${(autoPolicyActive.observe_only_families || []).join(', ')}`);
+        if ((autoPolicyActive.strict_only_tickers || []).length) policyBits.push(`strict-only ticker: ${(autoPolicyActive.strict_only_tickers || []).join(', ')}`);
+        if ((autoPolicyActive.strict_only_families || []).length) policyBits.push(`strict-only family: ${(autoPolicyActive.strict_only_families || []).join(', ')}`);
+        const policyText = policyBits.length ? policyBits.join(' | ') : 'активных runtime-ограничений пока нет';
         const recHtml = autoRecs.length
           ? `<ul class="autonomy-list">${autoRecs.map(x => `<li>${x}</li>`).join('')}</ul>`
           : '<div class="empty">Рекомендаций пока нет</div>';
@@ -1089,6 +1108,7 @@ HTML = r"""<!doctype html>
             <div><strong>Повторяющиеся killers:</strong> ${recurringText}</div>
             <div><strong>Устойчивый overlay:</strong> ${consensusText}</div>
             <div><strong>ГО за день:</strong> ${marginText}</div>
+            <div><strong>Runtime auto-policy:</strong> ${policyText}</div>
             ${recHtml}
           </div>`;
       }
