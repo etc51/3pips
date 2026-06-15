@@ -135,6 +135,61 @@ class ServerWatchdogStabilityTest(unittest.TestCase):
             self.assertEqual(payload.get("status"), "maintenance_lock")
             self.assertIn("maintenance_lock", payload.get("last_summary", ""))
 
+    def test_dashboard_only_issue_waits_one_cycle_before_incident(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp) / "project"
+            runtime_dir = project_root / "reports" / "runtime"
+            run_dir = project_root / "reports" / "paper_runs" / "v7_live_20260525"
+            runtime_dir.mkdir(parents=True)
+            run_dir.mkdir(parents=True)
+            state_path = runtime_dir / "server_watchdog_state.json"
+            log_path = runtime_dir / "server_watchdog.log"
+            argv = [
+                "server_watchdog.py",
+                "--project-root",
+                str(project_root),
+                "--state-path",
+                str(state_path),
+                "--log-path",
+                str(log_path),
+                "--no-remediate",
+            ]
+
+            def run_once() -> int:
+                with patch.object(sw, "load_active_rollout_lock", return_value=({}, 0.0)), patch.object(
+                    sw, "refresh_intraday_killer_policy", return_value=(False, "trade_date=2026-06-15")
+                ), patch.object(
+                    sw, "should_check_daily_autonomy", return_value=False
+                ), patch.object(
+                    sw, "service_active", return_value=True
+                ), patch.object(
+                    sw, "service_age_sec", return_value=999.0
+                ), patch.object(
+                    sw, "dashboard_ok", return_value=(False, "urlerror:test")
+                ), patch.object(
+                    sw, "check_run_health", return_value=[]
+                ), patch.object(
+                    sw, "send_email", return_value=(False, "disabled_missing_smtp")
+                ), patch.object(
+                    sw.subprocess, "run", return_value=SimpleNamespace(stdout="test-host\n", returncode=0, stderr="")
+                ), patch.object(
+                    sys, "argv", argv
+                ):
+                    return sw.main()
+
+            rc1 = run_once()
+            first = __import__("json").loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(rc1, 0)
+            self.assertEqual(first.get("status"), "dashboard_unstable")
+            self.assertEqual(first.get("dashboard_fail_count"), 1)
+
+            rc2 = run_once()
+            second = __import__("json").loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(rc2, 1)
+            self.assertEqual(second.get("status"), "incident")
+            self.assertEqual(second.get("dashboard_fail_count"), 2)
+            self.assertIn("dashboard_down", second.get("last_summary", ""))
+
 
 if __name__ == "__main__":
     unittest.main()

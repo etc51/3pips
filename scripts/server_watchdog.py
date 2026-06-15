@@ -116,6 +116,10 @@ def fingerprint(issues: list[str]) -> str:
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()
 
 
+def dashboard_only_issue(issues: list[str]) -> bool:
+    return len(issues) == 1 and str(issues[0]).startswith("dashboard_down[")
+
+
 def load_state(path: Path) -> dict:
     if not path.exists():
         return {}
@@ -698,6 +702,7 @@ def main() -> int:
             merge_state(
                 state,
                 status="ok",
+                dashboard_fail_count=0,
                 fingerprint="",
                 last_email_epoch=0.0,
                 last_change=now_str(),
@@ -706,6 +711,26 @@ def main() -> int:
         )
         log(log_path, "healthy status=ok")
         return 0
+
+    if dashboard_only_issue(issues):
+        fail_count = int(state.get("dashboard_fail_count") or 0) + 1
+        if fail_count < 2:
+            save_state(
+                state_path,
+                merge_state(
+                    state,
+                    status="dashboard_unstable",
+                    dashboard_fail_count=fail_count,
+                    fingerprint="",
+                    last_change=now_str(),
+                    last_summary=f"dashboard_probe_retry count={fail_count}",
+                ),
+            )
+            log(log_path, f"dashboard_probe_retry count={fail_count} summary={issues[0]}")
+            return 0
+        state = merge_state(state, dashboard_fail_count=fail_count)
+    else:
+        state = merge_state(state, dashboard_fail_count=0)
 
     log(log_path, f"incident_detected count={len(issues)} summary={' ; '.join(issues)}")
     if not args.no_remediate:
@@ -720,6 +745,7 @@ def main() -> int:
                     merge_state(
                         state,
                         status="warming_up",
+                        dashboard_fail_count=0,
                         fingerprint="",
                         last_email_epoch=0.0,
                         last_change=now_str(),
@@ -741,6 +767,7 @@ def main() -> int:
                     merge_state(
                         state,
                         status="ok",
+                        dashboard_fail_count=0,
                         fingerprint="",
                         last_email_epoch=0.0,
                         last_change=now_str(),
@@ -766,6 +793,7 @@ def main() -> int:
         merge_state(
             state,
             status="incident",
+            dashboard_fail_count=0 if not dashboard_only_issue(issues) else int(state.get("dashboard_fail_count") or 0),
             fingerprint=fp,
             last_email_epoch=time.time() if email_ok else float(state.get("last_email_epoch") or 0.0),
             last_change=now_str(),
