@@ -142,6 +142,8 @@ def main() -> int:
             "3pips-watchdog.timer",
             "3pips-daily-autonomy.service",
             "3pips-daily-autonomy.timer",
+            "3pips-intraday-autonomy.service",
+            "3pips-intraday-autonomy.timer",
             "3pips-git-autoupdate.service",
             "3pips-git-autoupdate.timer",
         ]

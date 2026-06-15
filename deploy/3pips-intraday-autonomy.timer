@@ -1,0 +1,10 @@
+[Unit]
+Description=Run 3pips intraday autonomy refresh during MOEX session
+
+[Timer]
+OnCalendar=Mon..Fri *-*-* 10,11,12,13,14,15,16,17:20:00
+Persistent=true
+Unit=3pips-intraday-autonomy.service
+
+[Install]
+WantedBy=timers.target
