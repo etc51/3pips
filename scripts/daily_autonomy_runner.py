@@ -114,6 +114,69 @@ def load_runtime_trade_model(run_dir: Path) -> dict:
     }
 
 
+def load_json(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def normalize_upper_list(values: object) -> list[str]:
+    if not isinstance(values, (list, tuple, set)):
+        return []
+    return sorted({str(value).strip().upper() for value in values if str(value).strip()})
+
+
+def merge_watchdog_overrides(auto_policy: dict, existing_policy: dict) -> dict:
+    if not isinstance(auto_policy, dict) or not isinstance(existing_policy, dict):
+        return auto_policy
+    trade_date = str(auto_policy.get("trade_date") or "")
+    if not trade_date or str(existing_policy.get("trade_date") or "") != trade_date:
+        return auto_policy
+    overrides = existing_policy.get("watchdog_overrides")
+    if not isinstance(overrides, dict):
+        return auto_policy
+
+    active_base = auto_policy.get("active_base") if isinstance(auto_policy.get("active_base"), dict) else {}
+    merged = dict(active_base)
+    merged["observe_only_tickers"] = sorted(
+        set(normalize_upper_list(active_base.get("observe_only_tickers"))) | set(normalize_upper_list(overrides.get("observe_only_tickers")))
+    )
+    merged["observe_only_families"] = sorted(
+        set(normalize_upper_list(active_base.get("observe_only_families"))) | set(normalize_upper_list(overrides.get("observe_only_families")))
+    )
+    merged["strict_only_tickers"] = normalize_upper_list(active_base.get("strict_only_tickers"))
+    merged["strict_only_families"] = normalize_upper_list(active_base.get("strict_only_families"))
+    for key in ("entry_max_full_stop_rub", "pause_ticker_after_losses", "pause_family_after_losses", "pause_after_loss_minutes"):
+        merged[key] = active_base.get(key)
+    base_notes = [str(item) for item in (active_base.get("notes") or []) if str(item).strip()]
+    override_notes = [str(item) for item in (overrides.get("notes") or []) if str(item).strip()]
+    merged["notes"] = list(dict.fromkeys(base_notes + override_notes))[:12]
+
+    payload = dict(auto_policy)
+    payload["active_base"] = dict(active_base)
+    payload["watchdog_overrides"] = dict(overrides)
+    payload["active"] = merged
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    summary["active_rule_count"] = (
+        len(merged.get("observe_only_tickers") or [])
+        + len(merged.get("observe_only_families") or [])
+        + len(merged.get("strict_only_tickers") or [])
+        + len(merged.get("strict_only_families") or [])
+        + sum(
+            1
+            for key in ("entry_max_full_stop_rub", "pause_ticker_after_losses", "pause_family_after_losses", "pause_after_loss_minutes")
+            if merged.get(key) not in (None, "")
+        )
+    )
+    summary["active_notes_count"] = len(merged.get("notes") or [])
+    payload["summary"] = summary
+    return payload
+
+
 def normalize_trade_row(row: dict) -> dict | None:
     item = dict(row)
     item.pop(None, None)
@@ -1663,6 +1726,7 @@ def main() -> int:
         research_day=research_day,
         research_consensus=scenario_consensus,
     )
+    auto_policy = merge_watchdog_overrides(auto_policy, load_json(manifest_root / "latest_auto_policy.json"))
     optimizer_candidates = build_optimizer_candidates(research_day, research_all, scenario_consensus)
     restriction_rows = build_restriction_rows(auto_policy)
 
