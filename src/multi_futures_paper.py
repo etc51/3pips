@@ -122,6 +122,7 @@ def empty_auto_policy() -> dict:
     return {
         "trade_date": "",
         "generated_at": "",
+        "observe_only_portfolios": [],
         "observe_only_tickers": [],
         "observe_only_families": [],
         "strict_only_tickers": [],
@@ -189,6 +190,7 @@ def parse_auto_policy_payload(payload: object) -> dict:
     return {
         "trade_date": str(payload.get("trade_date") or ""),
         "generated_at": str(payload.get("generated_at") or ""),
+        "observe_only_portfolios": normalize_policy_names(active.get("observe_only_portfolios")),
         "observe_only_tickers": normalize_policy_names(active.get("observe_only_tickers")),
         "observe_only_families": normalize_policy_names(active.get("observe_only_families")),
         "strict_only_tickers": normalize_policy_names(active.get("strict_only_tickers")),
@@ -239,7 +241,7 @@ def refresh_auto_policy(cache: dict, force: bool = False) -> dict:
     cache["status"] = "loaded"
     cache["last_error"] = ""
     cache["payload"] = payload
-    observe_count = len(payload["observe_only_tickers"]) + len(payload["observe_only_families"])
+    observe_count = len(payload["observe_only_portfolios"]) + len(payload["observe_only_tickers"]) + len(payload["observe_only_families"])
     strict_count = len(payload["strict_only_tickers"]) + len(payload["strict_only_families"])
     entry_cutoff = payload.get("entry_no_new_after")
     stop_cap = payload.get("entry_max_full_stop_rub")
@@ -257,9 +259,11 @@ def refresh_auto_policy(cache: dict, force: bool = False) -> dict:
     return payload
 
 
-def auto_policy_block_reason(st: State, contour: str, policy: dict) -> str | None:
+def auto_policy_block_reason(st: State, contour: str, policy: dict, portfolio_group: str) -> str | None:
     secid = st.spec.secid.upper()
     family = state_family(st).upper()
+    if portfolio_group and portfolio_group.upper() in set(policy.get("observe_only_portfolios") or []):
+        return "auto_policy observe_only_portfolio"
     if secid in set(policy.get("observe_only_tickers") or []):
         return "auto_policy observe_only_ticker"
     if family in set(policy.get("observe_only_families") or []):
@@ -1981,6 +1985,7 @@ def main() -> None:
         no_trade_before = parse_clock_time(args.no_trade_before)
         no_new_after = parse_clock_time(args.no_new_after)
         force_close_at = parse_clock_time(args.force_close_at)
+        portfolio_group_name = trade_log_group(Path(args.log)).upper()
         last_stream_event = [time.monotonic()]
         runtime_state: dict[str, object] = {"reconnect_count": 0, "last_stream_error": ""}
         auto_policy_state: dict[str, object] = {
@@ -2099,7 +2104,7 @@ def main() -> None:
                         if spec.secid.upper() in set(external_open.get("tickers") or []):
                             st.last_reason = "duplicate_filter external_ticker_already_open"
                             continue
-                        policy_reason = auto_policy_block_reason(st, contour, active_auto_policy_local)
+                        policy_reason = auto_policy_block_reason(st, contour, active_auto_policy_local, portfolio_group_name)
                         if policy_reason:
                             st.last_reason = policy_reason
                             continue

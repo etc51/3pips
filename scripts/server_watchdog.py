@@ -234,6 +234,7 @@ def load_dashboard_state(dashboard_url: str) -> dict:
 
 def strip_watchdog_overrides(active: dict, overrides: dict) -> dict:
     base = dict(active) if isinstance(active, dict) else {}
+    base["observe_only_portfolios"] = normalize_upper_list(base.get("observe_only_portfolios"))
     for key in ("observe_only_tickers", "observe_only_families", "strict_only_tickers", "strict_only_families"):
         values = normalize_upper_list(base.get(key))
         if key in {"observe_only_tickers", "observe_only_families"}:
@@ -248,6 +249,7 @@ def strip_watchdog_overrides(active: dict, overrides: dict) -> dict:
 
 def merge_policy_views(base_active: dict, overrides: dict) -> dict:
     merged = dict(base_active) if isinstance(base_active, dict) else {}
+    merged["observe_only_portfolios"] = normalize_upper_list(base_active.get("observe_only_portfolios"))
     merged["observe_only_tickers"] = sorted(
         set(normalize_upper_list(base_active.get("observe_only_tickers"))) | set(normalize_upper_list(overrides.get("observe_only_tickers")))
     )
@@ -372,7 +374,8 @@ def refresh_intraday_killer_policy(project_root: Path, run_dir: Path, dashboard_
     payload["active"] = merged_active
     summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
     summary["active_rule_count"] = (
-        len(merged_active.get("observe_only_tickers") or [])
+        len(merged_active.get("observe_only_portfolios") or [])
+        + len(merged_active.get("observe_only_tickers") or [])
         + len(merged_active.get("observe_only_families") or [])
         + len(merged_active.get("strict_only_tickers") or [])
         + len(merged_active.get("strict_only_families") or [])
