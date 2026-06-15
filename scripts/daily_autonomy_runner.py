@@ -941,10 +941,6 @@ def build_auto_policy(
                 f"{family}: семейство лучше ведёт себя без aggressive-слоя, переводим aggressive в observe-only."
             )
 
-    for key in ("observe_only_tickers", "observe_only_families", "strict_only_tickers", "strict_only_families"):
-        active[key] = sorted({str(value).upper() for value in active[key] if str(value).strip()})
-    active["notes"] = active["notes"][:12]
-
     best_latest_overlay = next((row for row in research_day if row.get("scenario") != "base"), {})
     best_consensus_overlay = pick_best_consensus_scenario(research_consensus)
 
@@ -989,6 +985,31 @@ def build_auto_policy(
             f"Авто-тюнинг: лимит полного стопа новых входов снижен до {candidate_stop_cap} ₽, "
             f"потому что {consensus_scenario} улучшил все {consensus_days} последних дня."
         )
+
+    latest_scenario = str(best_latest_overlay.get("scenario") or "")
+    consensus_blacklist_family = consensus_scenario.removeprefix("blacklist_family_") if consensus_scenario.startswith("blacklist_family_") else ""
+    if consensus_blacklist_family:
+        family_total = by_family.get(consensus_blacklist_family) or {}
+        family_trades = safe_int(family_total.get("trades"))
+        family_net = safe_float(family_total.get("net_rub"))
+        latest_delta = safe_float(best_consensus_overlay.get("latest_day_delta_rub"))
+        latest_overlay_net = safe_float(best_latest_overlay.get("net_rub"))
+        robust_consensus = consensus_days >= 2 and consensus_beats >= consensus_days and consensus_delta >= 1_500
+        strong_latest_confirmation = (
+            latest_scenario == consensus_scenario
+            and latest_delta >= 2_000
+            and latest_overlay_net > 0
+        )
+        if family_trades >= 3 and family_net < 0 and (robust_consensus or strong_latest_confirmation):
+            active["observe_only_families"].append(consensus_blacklist_family)
+            active["notes"].append(
+                f"Авто-policy: семейство {consensus_blacklist_family} переведено в observe-only, "
+                f"потому что {consensus_scenario} устойчиво улучшает результат против base."
+            )
+
+    for key in ("observe_only_tickers", "observe_only_families", "strict_only_tickers", "strict_only_families"):
+        active[key] = sorted({str(value).upper() for value in active[key] if str(value).strip()})
+    active["notes"] = active["notes"][:12]
 
     return {
         "generated_at": now_str(),
