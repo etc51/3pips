@@ -173,6 +173,7 @@ def merge_watchdog_overrides(auto_policy: dict, existing_policy: dict) -> dict:
     active_base = auto_policy.get("active_base") if isinstance(auto_policy.get("active_base"), dict) else {}
     merged = dict(active_base)
     merged["observe_only_portfolios"] = normalize_upper_list(active_base.get("observe_only_portfolios"))
+    merged["observe_only_group_families"] = normalize_upper_list(active_base.get("observe_only_group_families"))
     merged["observe_only_tickers"] = sorted(
         set(normalize_upper_list(active_base.get("observe_only_tickers"))) | set(normalize_upper_list(overrides.get("observe_only_tickers")))
     )
@@ -194,6 +195,7 @@ def merge_watchdog_overrides(auto_policy: dict, existing_policy: dict) -> dict:
     summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
     summary["active_rule_count"] = (
         len(merged.get("observe_only_portfolios") or [])
+        + len(merged.get("observe_only_group_families") or [])
         + len(merged.get("observe_only_tickers") or [])
         + len(merged.get("observe_only_families") or [])
         + len(merged.get("strict_only_tickers") or [])
@@ -505,8 +507,17 @@ def build_research_scenarios(
         all_rows,
         lambda row: str(row.get("portfolio_group") or ""),
     )
+    group_family_rows = grouped_metrics(
+        all_rows,
+        lambda row: f"{str(row.get('portfolio_group') or '')}/{str(row.get('contour') or '').lower()}::{family_for_row(row, profiles).upper()}",
+    )
     weak_families = [row["group"] for row in family_rows if row["trades"] >= 3 and row["net_rub"] < 0]
     weak_portfolios = [row["group"] for row in portfolio_rows if row["group"] and row["trades"] >= 1 and row["net_rub"] < 0]
+    weak_group_families = [
+        row["group"]
+        for row in group_family_rows
+        if row["group"] and row["net_rub"] < 0 and (row["trades"] >= 2 or row["net_rub"] <= -1_000)
+    ]
     if weak_families:
         for family in weak_families[:8]:
             scenarios.append(
@@ -527,6 +538,25 @@ def build_research_scenarios(
                     profiles,
                     predicate=lambda row, portfolio=portfolio: str(row.get("portfolio_group") or "") != portfolio,
                     note="remove one weak portfolio group",
+                )
+            )
+    if weak_group_families:
+        for item in weak_group_families[:8]:
+            try:
+                group_key, family = item.split("::", 1)
+                portfolio_name, contour_name = group_key.split("/", 1)
+            except ValueError:
+                continue
+            scenarios.append(
+                evaluate_scenario(
+                    f"blacklist_group_family_{portfolio_name}__{contour_name}__{family}",
+                    sample_rows,
+                    profiles,
+                    predicate=lambda row, group_key=group_key, family=family: (
+                        f"{str(row.get('portfolio_group') or '')}/{str(row.get('contour') or '').lower()}" != group_key
+                        or family_for_row(row, profiles).upper() != family
+                    ),
+                    note="remove one weak portfolio/contour/family slice",
                 )
             )
 
@@ -633,6 +663,25 @@ def build_research_scenarios(
                     predicate=lambda row, portfolio=portfolio: str(row.get("portfolio_group") or "") != portfolio,
                     cap_rub=500,
                     note=f"500 RUB stop cap + remove portfolio {portfolio}",
+                )
+            )
+        for item in weak_group_families[:6]:
+            try:
+                group_key, family = item.split("::", 1)
+                portfolio_name, contour_name = group_key.split("/", 1)
+            except ValueError:
+                continue
+            scenarios.append(
+                evaluate_scenario(
+                    f"combo_stop_cap_500__blacklist_group_family_{portfolio_name}__{contour_name}__{family}",
+                    sample_rows,
+                    profiles,
+                    predicate=lambda row, group_key=group_key, family=family: (
+                        f"{str(row.get('portfolio_group') or '')}/{str(row.get('contour') or '').lower()}" != group_key
+                        or family_for_row(row, profiles).upper() != family
+                    ),
+                    cap_rub=500,
+                    note=f"500 RUB stop cap + remove slice {group_key}::{family}",
                 )
             )
 
@@ -836,6 +885,8 @@ def scenario_kind(name: str) -> str:
         return "family_blacklist"
     if name.startswith("blacklist_portfolio_"):
         return "portfolio_blacklist"
+    if name.startswith("blacklist_group_family_"):
+        return "group_family_blacklist"
     if name.startswith("whitelist_"):
         return "family_whitelist"
     return "other"
@@ -852,6 +903,7 @@ def recommended_use_for_scenario(kind: str) -> str:
         "family_pause_after_losses",
         "family_blacklist",
         "portfolio_blacklist",
+        "group_family_blacklist",
         "family_whitelist",
     }:
         return "candidate_runtime_restriction"
@@ -953,6 +1005,15 @@ def build_restriction_rows(auto_policy: dict) -> list[dict]:
             {
                 "stage": "active",
                 "restriction_type": "observe_only_portfolios",
+                "value": value,
+                "note": "",
+            }
+        )
+    for value in active.get("observe_only_group_families") or []:
+        rows.append(
+            {
+                "stage": "active",
+                "restriction_type": "observe_only_group_families",
                 "value": value,
                 "note": "",
             }
@@ -1091,7 +1152,7 @@ def build_nightly_cycle_status(
                 "status": "ok",
                 "active_rule_count": sum(
                     len(active.get(key) or [])
-                    for key in ("observe_only_portfolios", "observe_only_tickers", "observe_only_families", "strict_only_tickers", "strict_only_families")
+                    for key in ("observe_only_portfolios", "observe_only_group_families", "observe_only_tickers", "observe_only_families", "strict_only_tickers", "strict_only_families")
                 )
                 + sum(
                     1
@@ -1168,6 +1229,21 @@ def scenario_blacklist_portfolio(name: str) -> str:
     return ""
 
 
+def scenario_blacklist_group_family(name: str) -> str:
+    candidate_names = combo_components(name) if name.startswith("combo_") else [name]
+    prefix = "blacklist_group_family_"
+    for candidate in candidate_names:
+        if not candidate.startswith(prefix):
+            continue
+        payload = candidate.removeprefix(prefix)
+        parts = payload.split("__", 2)
+        if len(parts) != 3:
+            continue
+        portfolio_name, contour_name, family = parts
+        return f"{portfolio_name}/{contour_name}::{family}".upper()
+    return ""
+
+
 def scenario_has_component(name: str, component: str) -> bool:
     if not name or not component:
         return False
@@ -1191,11 +1267,16 @@ def build_auto_policy(
     by_ticker = metrics_map(all_rows, lambda row: str(row.get("secid") or ""))
     by_family = metrics_map(all_rows, lambda row: family_for_row(row, profiles))
     by_portfolio = metrics_map(all_rows, lambda row: str(row.get("portfolio_group") or ""))
+    by_group_family = metrics_map(
+        all_rows,
+        lambda row: f"{str(row.get('portfolio_group') or '').upper()}/{str(row.get('contour') or '').upper()}::{family_for_row(row, profiles).upper()}",
+    )
     by_ticker_contour = metrics_map(all_rows, lambda row: f"{row.get('secid') or ''}::{row.get('contour') or ''}")
     by_family_contour = metrics_map(all_rows, lambda row: f"{family_for_row(row, profiles)}::{row.get('contour') or ''}")
 
     active = {
         "observe_only_portfolios": [],
+        "observe_only_group_families": [],
         "observe_only_tickers": [],
         "observe_only_families": [],
         "strict_only_tickers": [],
@@ -1334,6 +1415,16 @@ def build_auto_policy(
         )
 
     latest_scenario = str(best_latest_overlay.get("scenario") or "")
+    latest_blacklist_group_family = scenario_blacklist_group_family(latest_scenario)
+    if latest_blacklist_group_family:
+        group_family_total = by_group_family.get(latest_blacklist_group_family) or {}
+        latest_group_delta = safe_float(best_latest_overlay.get("net_rub")) - safe_float(base_day_overlay.get("net_rub"))
+        if safe_float(group_family_total.get("net_rub")) <= -1_000 and latest_group_delta >= 1_500:
+            active["observe_only_group_families"].append(latest_blacklist_group_family)
+            active["notes"].append(
+                f"Авто-policy: связка {latest_blacklist_group_family} переведена в observe-only, "
+                f"потому что {latest_scenario} резко улучшает текущий день против base."
+            )
     latest_blacklist_portfolio = scenario_blacklist_portfolio(latest_scenario)
     if latest_blacklist_portfolio:
         portfolio_total = by_portfolio.get(latest_blacklist_portfolio) or {}
@@ -1419,10 +1510,27 @@ def build_auto_policy(
                 f"Авто-policy: контур {consensus_blacklist_portfolio} переведён в observe-only, "
                 f"потому что {consensus_scenario} заметно улучшает результат против base."
             )
+    consensus_blacklist_group_family = scenario_blacklist_group_family(consensus_scenario)
+    if consensus_blacklist_group_family:
+        group_family_total = by_group_family.get(consensus_blacklist_group_family) or {}
+        latest_delta = safe_float(best_consensus_overlay.get("latest_day_delta_rub"))
+        robust_group_consensus = (
+            consensus_days >= 2
+            and consensus_beats >= max(1, consensus_days - 1)
+            and consensus_delta >= 1_500
+            and latest_delta >= 1_000
+        )
+        if safe_float(group_family_total.get("net_rub")) <= -1_000 and robust_group_consensus:
+            active["observe_only_group_families"].append(consensus_blacklist_group_family)
+            active["notes"].append(
+                f"Авто-policy: связка {consensus_blacklist_group_family} переведена в observe-only, "
+                f"потому что {consensus_scenario} устойчиво улучшает результат против base."
+            )
 
     best_combo_scenario = str(best_all_combo_overlay.get("scenario") or "")
     combo_blacklist_family = scenario_blacklist_family(best_combo_scenario)
     combo_blacklist_portfolio = scenario_blacklist_portfolio(best_combo_scenario)
+    combo_blacklist_group_family = scenario_blacklist_group_family(best_combo_scenario)
     combo_entry_cutoff = scenario_entry_cutoff(best_combo_scenario)
     combo_stop_cap = scenario_stop_cap(best_combo_scenario)
     combo_has_strict = scenario_has_component(best_combo_scenario, "contour_only_strict")
@@ -1479,6 +1587,20 @@ def build_auto_policy(
                 f"Авто-policy: контур {combo_blacklist_portfolio} переведён в observe-only, "
                 f"потому что strongest combo {best_combo_scenario} убирает разрушительный слой и улучшает короткую серию."
             )
+    if combo_blacklist_group_family and combo_cap_matches_active:
+        group_family_total = by_group_family.get(combo_blacklist_group_family) or {}
+        robust_group_combo = (
+            combo_trades >= 4
+            and safe_float(group_family_total.get("net_rub")) <= -1_000
+            and all_sample_combo_delta >= 1_500
+            and latest_combo_delta >= 1_000
+        )
+        if robust_group_combo:
+            active["observe_only_group_families"].append(combo_blacklist_group_family)
+            active["notes"].append(
+                f"Авто-policy: связка {combo_blacklist_group_family} переведена в observe-only, "
+                f"потому что strongest combo {best_combo_scenario} убирает разрушительную под-логику и улучшает короткую серию."
+            )
     if combo_has_strict and combo_cap_matches_active:
         robust_strict_combo = (
             combo_trades >= 5
@@ -1524,7 +1646,7 @@ def build_auto_policy(
             f"потому что {consensus_scenario} улучшает выборку против base."
         )
 
-    for key in ("observe_only_portfolios", "observe_only_tickers", "observe_only_families", "strict_only_tickers", "strict_only_families"):
+    for key in ("observe_only_portfolios", "observe_only_group_families", "observe_only_tickers", "observe_only_families", "strict_only_tickers", "strict_only_families"):
         active[key] = sorted({str(value).upper() for value in active[key] if str(value).strip()})
     active["notes"] = active["notes"][:12]
 
@@ -1545,7 +1667,7 @@ def build_auto_policy(
         "summary": {
             "active_rule_count": sum(
                 len(active[key])
-                for key in ("observe_only_portfolios", "observe_only_tickers", "observe_only_families", "strict_only_tickers", "strict_only_families")
+                for key in ("observe_only_portfolios", "observe_only_group_families", "observe_only_tickers", "observe_only_families", "strict_only_tickers", "strict_only_families")
             )
             + sum(
                 1
@@ -1572,6 +1694,7 @@ def render_auto_policy_markdown(auto_policy: dict) -> str:
         "## Active entry policy",
         "",
         f"- observe_only_portfolios: {', '.join(active.get('observe_only_portfolios') or []) or 'none'}",
+        f"- observe_only_group_families: {', '.join(active.get('observe_only_group_families') or []) or 'none'}",
         f"- observe_only_tickers: {', '.join(active.get('observe_only_tickers') or []) or 'none'}",
         f"- observe_only_families: {', '.join(active.get('observe_only_families') or []) or 'none'}",
         f"- strict_only_tickers: {', '.join(active.get('strict_only_tickers') or []) or 'none'}",

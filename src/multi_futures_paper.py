@@ -123,6 +123,7 @@ def empty_auto_policy() -> dict:
         "trade_date": "",
         "generated_at": "",
         "observe_only_portfolios": [],
+        "observe_only_group_families": [],
         "observe_only_tickers": [],
         "observe_only_families": [],
         "strict_only_tickers": [],
@@ -191,6 +192,7 @@ def parse_auto_policy_payload(payload: object) -> dict:
         "trade_date": str(payload.get("trade_date") or ""),
         "generated_at": str(payload.get("generated_at") or ""),
         "observe_only_portfolios": normalize_policy_names(active.get("observe_only_portfolios")),
+        "observe_only_group_families": normalize_policy_names(active.get("observe_only_group_families")),
         "observe_only_tickers": normalize_policy_names(active.get("observe_only_tickers")),
         "observe_only_families": normalize_policy_names(active.get("observe_only_families")),
         "strict_only_tickers": normalize_policy_names(active.get("strict_only_tickers")),
@@ -241,7 +243,7 @@ def refresh_auto_policy(cache: dict, force: bool = False) -> dict:
     cache["status"] = "loaded"
     cache["last_error"] = ""
     cache["payload"] = payload
-    observe_count = len(payload["observe_only_portfolios"]) + len(payload["observe_only_tickers"]) + len(payload["observe_only_families"])
+    observe_count = len(payload["observe_only_portfolios"]) + len(payload["observe_only_group_families"]) + len(payload["observe_only_tickers"]) + len(payload["observe_only_families"])
     strict_count = len(payload["strict_only_tickers"]) + len(payload["strict_only_families"])
     entry_cutoff = payload.get("entry_no_new_after")
     stop_cap = payload.get("entry_max_full_stop_rub")
@@ -264,6 +266,9 @@ def auto_policy_block_reason(st: State, contour: str, policy: dict, portfolio_gr
     family = state_family(st).upper()
     if portfolio_group and portfolio_group.upper() in set(policy.get("observe_only_portfolios") or []):
         return "auto_policy observe_only_portfolio"
+    group_family_key = f"{portfolio_group.upper()}/{contour.upper()}::{family}" if portfolio_group else ""
+    if group_family_key and group_family_key in set(policy.get("observe_only_group_families") or []):
+        return "auto_policy observe_only_group_family"
     if secid in set(policy.get("observe_only_tickers") or []):
         return "auto_policy observe_only_ticker"
     if family in set(policy.get("observe_only_families") or []):

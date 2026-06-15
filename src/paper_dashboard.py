@@ -184,6 +184,8 @@ def human_reason(reason: object) -> str:
         return "авто-policy: семейство временно только наблюдаем"
     if text == "auto_policy observe_only_portfolio":
         return "авто-policy: контур временно только наблюдаем"
+    if text == "auto_policy observe_only_group_family":
+        return "авто-policy: связка контур/слой/семейство временно только наблюдаем"
     if text == "auto_policy strict_only_ticker":
         return "авто-policy: aggressive выключен для тикера"
     if text == "auto_policy strict_only_family":
@@ -1123,6 +1125,7 @@ HTML = r"""<!doctype html>
         const nightlyText = stageNames.map(name => `${name}:${(stageMap[name] || {}).status || '-'}`).join(' | ');
         const policyBits = [];
         if ((autoPolicyActive.observe_only_portfolios || []).length) policyBits.push(`observe portfolio: ${(autoPolicyActive.observe_only_portfolios || []).join(', ')}`);
+        if ((autoPolicyActive.observe_only_group_families || []).length) policyBits.push(`observe slice: ${(autoPolicyActive.observe_only_group_families || []).join(', ')}`);
         if ((autoPolicyActive.observe_only_tickers || []).length) policyBits.push(`observe ticker: ${(autoPolicyActive.observe_only_tickers || []).join(', ')}`);
         if ((autoPolicyActive.observe_only_families || []).length) policyBits.push(`observe family: ${(autoPolicyActive.observe_only_families || []).join(', ')}`);
         if ((autoPolicyActive.strict_only_tickers || []).length) policyBits.push(`strict-only ticker: ${(autoPolicyActive.strict_only_tickers || []).join(', ')}`);
