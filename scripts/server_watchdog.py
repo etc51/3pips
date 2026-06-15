@@ -414,9 +414,8 @@ def compute_intraday_watchdog_overrides(
             continue
         slice_key = group_family_slice_key(key)
         if slice_key in covered_group_blackout_slices:
-            total_net = round(float(bucket["closed_net_rub"] + bucket["open_net_rub"]), 2)
             localized_blackout_notes.append(
-                f"watchdog intraday: {key} damage {total_net:.2f} RUB stays inside active group blackout {slice_key}"
+                f"watchdog intraday: {key} stays inside active group blackout {slice_key}"
             )
             continue
         observe_group_families.append(key)
@@ -435,9 +434,8 @@ def compute_intraday_watchdog_overrides(
         if concentrated_key:
             slice_key = group_family_slice_key(concentrated_key)
             if slice_key in covered_group_blackout_slices:
-                total_net = round(float(bucket["closed_net_rub"] + bucket["open_net_rub"]), 2)
                 localized_blackout_notes.append(
-                    f"watchdog intraday: {family} damage {total_net:.2f} RUB stays local in {concentrated_key} and is already covered by group blackout"
+                    f"watchdog intraday: {family} stays local in {concentrated_key} and is already covered by group blackout"
                 )
                 continue
             observe_group_families.append(concentrated_key)
@@ -477,15 +475,12 @@ def compute_intraday_watchdog_overrides(
 
     notes: list[str] = []
     for key in observe_group_families[:6]:
-        total_net = round(float(by_group_family[key]["closed_net_rub"] + by_group_family[key]["open_net_rub"]), 2)
-        notes.append(f"watchdog intraday: {key} -> observe-only after {total_net:.2f} RUB slice damage")
+        notes.append(f"watchdog intraday: {key} -> observe-only after slice damage threshold")
     notes.extend(localized_blackout_notes[:4])
     for family in observe_families[:4]:
-        total_net = round(float(by_family[family]["closed_net_rub"] + by_family[family]["open_net_rub"]), 2)
-        notes.append(f"watchdog intraday: {family} -> observe-only after {total_net:.2f} RUB family damage")
+        notes.append(f"watchdog intraday: {family} -> observe-only after family damage threshold")
     for secid in observe_tickers[:4]:
-        total_net = round(float(by_ticker[secid]["closed_net_rub"] + by_ticker[secid]["open_net_rub"]), 2)
-        notes.append(f"watchdog intraday: {secid} -> observe-only after {total_net:.2f} RUB ticker damage")
+        notes.append(f"watchdog intraday: {secid} -> observe-only after ticker damage threshold")
     return {
         "trade_date": trade_date,
         "observe_only_group_families": observe_group_families,
