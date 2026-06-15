@@ -87,6 +87,8 @@ class State:
     last_entry_candle_count: int = -1
     cooldown_until: float = 0.0
     consecutive_losses: int = 0
+    ticker_loss_streak: int = 0
+    family_loss_streak: int = 0
     shadow_positions: dict[str, Position] = field(default_factory=dict)
     shadow_closed: dict[str, bool] = field(default_factory=dict)
 
@@ -124,6 +126,9 @@ def empty_auto_policy() -> dict:
         "strict_only_tickers": [],
         "strict_only_families": [],
         "entry_max_full_stop_rub": None,
+        "pause_ticker_after_losses": None,
+        "pause_family_after_losses": None,
+        "pause_after_loss_minutes": None,
         "notes": [],
     }
 
@@ -147,6 +152,14 @@ def normalize_rub_cap(value: object) -> int | None:
     return cap if cap > 0 else None
 
 
+def normalize_positive_int(value: object) -> int | None:
+    try:
+        parsed = int(float(value))
+    except Exception:
+        return None
+    return parsed if parsed > 0 else None
+
+
 def parse_auto_policy_payload(payload: object) -> dict:
     if not isinstance(payload, dict):
         return empty_auto_policy()
@@ -159,6 +172,9 @@ def parse_auto_policy_payload(payload: object) -> dict:
         "strict_only_tickers": normalize_policy_names(active.get("strict_only_tickers")),
         "strict_only_families": normalize_policy_names(active.get("strict_only_families")),
         "entry_max_full_stop_rub": normalize_rub_cap(active.get("entry_max_full_stop_rub")),
+        "pause_ticker_after_losses": normalize_positive_int(active.get("pause_ticker_after_losses")),
+        "pause_family_after_losses": normalize_positive_int(active.get("pause_family_after_losses")),
+        "pause_after_loss_minutes": normalize_positive_int(active.get("pause_after_loss_minutes")),
         "notes": [str(item) for item in (active.get("notes") or []) if str(item).strip()],
     }
 
@@ -203,10 +219,14 @@ def refresh_auto_policy(cache: dict, force: bool = False) -> dict:
     observe_count = len(payload["observe_only_tickers"]) + len(payload["observe_only_families"])
     strict_count = len(payload["strict_only_tickers"]) + len(payload["strict_only_families"])
     stop_cap = payload.get("entry_max_full_stop_rub")
+    pause_ticker = payload.get("pause_ticker_after_losses")
+    pause_family = payload.get("pause_family_after_losses")
     print(
         f"{now_str()} AUTO_POLICY loaded trade_date={payload.get('trade_date') or '-'} "
         f"observe={observe_count} strict_only={strict_count} "
-        f"stop_cap_rub={stop_cap if stop_cap is not None else '-'} path={path}",
+        f"stop_cap_rub={stop_cap if stop_cap is not None else '-'} "
+        f"pause_ticker={pause_ticker if pause_ticker is not None else '-'} "
+        f"pause_family={pause_family if pause_family is not None else '-'} path={path}",
         flush=True,
     )
     return payload
@@ -235,6 +255,46 @@ def effective_max_full_stop_rub(base_cap_rub: float, policy: dict) -> float:
     if cap <= 0:
         return float(policy_cap)
     return min(cap, float(policy_cap))
+
+
+def apply_auto_loss_pause(st: State, states: list[State], net: float, policy: dict) -> None:
+    ticker_limit = normalize_positive_int(policy.get("pause_ticker_after_losses") if isinstance(policy, dict) else None)
+    family_limit = normalize_positive_int(policy.get("pause_family_after_losses") if isinstance(policy, dict) else None)
+    pause_minutes = normalize_positive_int(policy.get("pause_after_loss_minutes") if isinstance(policy, dict) else None) or 120
+    if ticker_limit is None and family_limit is None:
+        return
+
+    secid = st.spec.secid.upper()
+    family = state_family(st).upper()
+    ticker_related = [other for other in states if other.spec.secid.upper() == secid]
+    family_related = [other for other in states if state_family(other).upper() == family]
+
+    if net >= 0:
+        if ticker_limit is not None:
+            for other in ticker_related:
+                other.ticker_loss_streak = 0
+        if family_limit is not None:
+            for other in family_related:
+                other.family_loss_streak = 0
+        return
+
+    if ticker_limit is not None:
+        st.ticker_loss_streak += 1
+        ticker_losses = sum(other.ticker_loss_streak for other in ticker_related)
+        if ticker_losses >= ticker_limit:
+            pause_until = time.monotonic() + pause_minutes * 60
+            for other in ticker_related:
+                other.cooldown_until = max(other.cooldown_until, pause_until)
+                other.last_reason = f"auto_policy pause_ticker_after_losses losses={ticker_losses} minutes={pause_minutes}"
+
+    if family_limit is not None:
+        st.family_loss_streak += 1
+        family_losses = sum(other.family_loss_streak for other in family_related)
+        if family_losses >= family_limit:
+            pause_until = time.monotonic() + pause_minutes * 60
+            for other in family_related:
+                other.cooldown_until = max(other.cooldown_until, pause_until)
+                other.last_reason = f"auto_policy pause_family_after_losses losses={family_losses} minutes={pause_minutes}"
 
 
 def position_margin(spec: Spec, direction: Direction | str, qty: int) -> float:
@@ -1039,6 +1099,7 @@ def process_open_state_exit(
     portfolio: Portfolio,
     states: list[State],
     candle_closed: bool,
+    auto_policy: dict | None = None,
     actual_trigger_override: float | None = None,
     actual_trigger_source_override: str | None = None,
     force_exit_reason: str | None = None,
@@ -1195,6 +1256,7 @@ def process_open_state_exit(
         f"ticks={ticks:.1f} net={net:.2f} total={st.closed_net:.2f}"
     )
     apply_br_loss_pause(st, states, net)
+    apply_auto_loss_pause(st, states, net, auto_policy if isinstance(auto_policy, dict) else empty_auto_policy())
     st.position = None
     if all_shadow_models_closed(st):
         st.shadow_positions = {}
@@ -1254,6 +1316,7 @@ def poll_market_fallback(
                                     portfolio,
                                     states,
                                     candle_closed=False,
+                                    auto_policy=refresh_auto_policy(auto_policy_state),
                                     actual_trigger_source_override="polling_fallback",
                                     force_exit_reason=force_reason,
                                 )
@@ -1870,7 +1933,14 @@ def main() -> None:
                             }
                         )
                     if st.position is None and has_active_shadow(st):
-                        process_open_state_exit(st, args, portfolio, states, candle is not None)
+                        process_open_state_exit(
+                            st,
+                            args,
+                            portfolio,
+                            states,
+                            candle is not None,
+                            auto_policy=active_auto_policy_local,
+                        )
                         if has_active_shadow(st):
                             continue
                     if st.position is None and trading_enabled and not force_close_due:
@@ -1878,7 +1948,11 @@ def main() -> None:
                             st.last_reason = "attempt_filter max_attempts_reached"
                             continue
                         if now < st.cooldown_until:
-                            st.last_reason = "cooldown_filter wait_after_close"
+                            if not (
+                                st.last_reason.startswith("auto_policy pause_")
+                                or st.last_reason.startswith("brq6_loss_pause")
+                            ):
+                                st.last_reason = "cooldown_filter wait_after_close"
                             continue
                         if st.last_entry_candle_count == len(st.candles):
                             st.last_reason = "candle_filter wait_new_candle"

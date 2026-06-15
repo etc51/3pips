@@ -186,6 +186,10 @@ def human_reason(reason: object) -> str:
         return "авто-policy: aggressive выключен для тикера"
     if text == "auto_policy strict_only_family":
         return "авто-policy: aggressive выключен для семейства"
+    if text.startswith("auto_policy pause_ticker_after_losses"):
+        return "авто-policy: тикер на паузе после серии убыточных закрытий"
+    if text.startswith("auto_policy pause_family_after_losses"):
+        return "авто-policy: семейство на паузе после серии убыточных закрытий"
     if text.startswith("direction_filter"):
         return "фильтр: сигнал против направления профиля"
     if text.startswith("entry_signal long"):
@@ -1120,6 +1124,15 @@ HTML = r"""<!doctype html>
         if ((autoPolicyActive.strict_only_families || []).length) policyBits.push(`strict-only family: ${(autoPolicyActive.strict_only_families || []).join(', ')}`);
         if (autoPolicyActive.entry_max_full_stop_rub !== undefined && autoPolicyActive.entry_max_full_stop_rub !== null && autoPolicyActive.entry_max_full_stop_rub !== '') {
           policyBits.push(`entry stop cap: ${fmt(autoPolicyActive.entry_max_full_stop_rub, 0)} ₽`);
+        }
+        if (autoPolicyActive.pause_ticker_after_losses !== undefined && autoPolicyActive.pause_ticker_after_losses !== null && autoPolicyActive.pause_ticker_after_losses !== '') {
+          policyBits.push(`pause ticker after losses: ${autoPolicyActive.pause_ticker_after_losses}`);
+        }
+        if (autoPolicyActive.pause_family_after_losses !== undefined && autoPolicyActive.pause_family_after_losses !== null && autoPolicyActive.pause_family_after_losses !== '') {
+          policyBits.push(`pause family after losses: ${autoPolicyActive.pause_family_after_losses}`);
+        }
+        if (autoPolicyActive.pause_after_loss_minutes !== undefined && autoPolicyActive.pause_after_loss_minutes !== null && autoPolicyActive.pause_after_loss_minutes !== '') {
+          policyBits.push(`pause minutes: ${autoPolicyActive.pause_after_loss_minutes}`);
         }
         const policyText = policyBits.length ? policyBits.join(' | ') : 'активных runtime-ограничений пока нет';
         const recHtml = autoRecs.length

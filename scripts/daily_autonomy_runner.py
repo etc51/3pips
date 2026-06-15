@@ -747,6 +747,16 @@ def build_restriction_rows(auto_policy: dict) -> list[dict]:
                 "note": "",
             }
         )
+    for key in ("pause_ticker_after_losses", "pause_family_after_losses", "pause_after_loss_minutes"):
+        if active.get(key) not in (None, ""):
+            rows.append(
+                {
+                    "stage": "active",
+                    "restriction_type": key,
+                    "value": active.get(key),
+                    "note": "",
+                }
+            )
     for note in active.get("notes") or []:
         rows.append(
             {
@@ -843,7 +853,12 @@ def build_nightly_cycle_status(
                 "active_rule_count": sum(
                     len(active.get(key) or [])
                     for key in ("observe_only_tickers", "observe_only_families", "strict_only_tickers", "strict_only_families")
-                ) + (1 if active.get("entry_max_full_stop_rub") not in (None, "") else 0),
+                )
+                + sum(
+                    1
+                    for key in ("entry_max_full_stop_rub", "pause_ticker_after_losses", "pause_family_after_losses", "pause_after_loss_minutes")
+                    if active.get(key) not in (None, "")
+                ),
                 "rows": len(restriction_rows),
             },
             "summary": {
@@ -857,6 +872,16 @@ def build_nightly_cycle_status(
 
 def metrics_map(rows: list[dict], key_fn) -> dict[str, dict]:
     return {str(row.get("group") or ""): row for row in grouped_metrics(rows, key_fn)}
+
+
+def scenario_loss_limit(name: str, prefix: str) -> int | None:
+    if not name.startswith(prefix):
+        return None
+    suffix = name.removeprefix(prefix)
+    try:
+        return int(suffix.split("_", 1)[0])
+    except Exception:
+        return None
 
 
 def build_auto_policy(
@@ -881,6 +906,9 @@ def build_auto_policy(
         "strict_only_tickers": [],
         "strict_only_families": [],
         "entry_max_full_stop_rub": None,
+        "pause_ticker_after_losses": None,
+        "pause_family_after_losses": None,
+        "pause_after_loss_minutes": None,
         "notes": [],
     }
 
@@ -1007,6 +1035,36 @@ def build_auto_policy(
                 f"потому что {consensus_scenario} устойчиво улучшает результат против base."
             )
 
+    pause_ticker_limit = scenario_loss_limit(consensus_scenario, "pause_ticker_after_")
+    if (
+        pause_ticker_limit is not None
+        and consensus_days >= 2
+        and consensus_delta >= 1_000
+        and consensus_beats >= 1
+        and safe_float(best_consensus_overlay.get("latest_day_delta_rub")) >= 0
+    ):
+        active["pause_ticker_after_losses"] = pause_ticker_limit
+        active["pause_after_loss_minutes"] = max(int(active.get("pause_after_loss_minutes") or 0), 120)
+        active["notes"].append(
+            f"Авто-policy: тикер ставится на паузу после {pause_ticker_limit} убыточн. закрыт., "
+            f"потому что {consensus_scenario} улучшает выборку против base."
+        )
+
+    pause_family_limit = scenario_loss_limit(consensus_scenario, "pause_family_after_")
+    if (
+        pause_family_limit is not None
+        and consensus_days >= 2
+        and consensus_delta >= 800
+        and consensus_beats >= 1
+        and safe_float(best_consensus_overlay.get("latest_day_delta_rub")) >= 0
+    ):
+        active["pause_family_after_losses"] = pause_family_limit
+        active["pause_after_loss_minutes"] = max(int(active.get("pause_after_loss_minutes") or 0), 120)
+        active["notes"].append(
+            f"Авто-policy: семейство ставится на паузу после {pause_family_limit} убыточн. закрыт., "
+            f"потому что {consensus_scenario} улучшает выборку против base."
+        )
+
     for key in ("observe_only_tickers", "observe_only_families", "strict_only_tickers", "strict_only_families"):
         active[key] = sorted({str(value).upper() for value in active[key] if str(value).strip()})
     active["notes"] = active["notes"][:12]
@@ -1022,7 +1080,12 @@ def build_auto_policy(
             "active_rule_count": sum(
                 len(active[key])
                 for key in ("observe_only_tickers", "observe_only_families", "strict_only_tickers", "strict_only_families")
-            ) + (1 if active.get("entry_max_full_stop_rub") not in (None, "") else 0),
+            )
+            + sum(
+                1
+                for key in ("entry_max_full_stop_rub", "pause_ticker_after_losses", "pause_family_after_losses", "pause_after_loss_minutes")
+                if active.get(key) not in (None, "")
+            ),
             "active_notes_count": len(active["notes"]),
             "best_consensus_scenario": str(best_consensus_overlay.get("scenario") or ""),
         },
@@ -1047,6 +1110,9 @@ def render_auto_policy_markdown(auto_policy: dict) -> str:
         f"- strict_only_tickers: {', '.join(active.get('strict_only_tickers') or []) or 'none'}",
         f"- strict_only_families: {', '.join(active.get('strict_only_families') or []) or 'none'}",
         f"- entry_max_full_stop_rub: {active.get('entry_max_full_stop_rub') or '-'}",
+        f"- pause_ticker_after_losses: {active.get('pause_ticker_after_losses') or '-'}",
+        f"- pause_family_after_losses: {active.get('pause_family_after_losses') or '-'}",
+        f"- pause_after_loss_minutes: {active.get('pause_after_loss_minutes') or '-'}",
         "",
     ]
     notes = active.get("notes") or []
