@@ -135,6 +135,19 @@ def merge_state(base: dict, **updates) -> dict:
     return merged
 
 
+def load_active_rollout_lock(path: Path, max_age_sec: int) -> tuple[dict, float]:
+    if not path.exists():
+        return {}, 0.0
+    age_sec = max(0.0, time.time() - path.stat().st_mtime)
+    if age_sec > max_age_sec:
+        return {}, age_sec
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {"reason": "unreadable_lock"}, age_sec
+    return (payload if isinstance(payload, dict) else {}), age_sec
+
+
 def latest_log_excerpt(runtime_dir: Path) -> str:
     parts = []
     for name in ["v7_paper_supervisor_20260525.log", "server_watchdog.log"]:
@@ -605,6 +618,8 @@ def main() -> int:
     parser.add_argument("--daily-autonomy-wait-sec", type=int, default=20)
     parser.add_argument("--state-path", default="")
     parser.add_argument("--log-path", default="")
+    parser.add_argument("--maintenance-lock-path", default="")
+    parser.add_argument("--maintenance-lock-max-sec", type=int, default=1800)
     parser.add_argument("--email-to", default="etc00051@yandex.ru")
     parser.add_argument("--no-remediate", action="store_true")
     args = parser.parse_args()
@@ -614,10 +629,29 @@ def main() -> int:
     run_dir = project_root / "reports" / "paper_runs" / args.run_name
     state_path = Path(args.state_path) if args.state_path else runtime_dir / "server_watchdog_state.json"
     log_path = Path(args.log_path) if args.log_path else runtime_dir / "server_watchdog.log"
+    maintenance_lock_path = Path(args.maintenance_lock_path) if args.maintenance_lock_path else runtime_dir / "git_autoupdate_rollout_lock.json"
     hostname = subprocess.run(["hostname"], capture_output=True, text=True).stdout.strip() or "unknown-host"
     state = load_state(state_path)
 
     log(log_path, f"watchdog_start run_name={args.run_name} service={args.service_name} dashboard={args.dashboard_url} health_stale_sec={args.health_stale_sec} startup_grace_sec={args.startup_grace_sec} no_remediate={args.no_remediate}")
+
+    rollout_lock, rollout_lock_age_sec = load_active_rollout_lock(maintenance_lock_path, args.maintenance_lock_max_sec)
+    if rollout_lock:
+        lock_reason = str(rollout_lock.get("reason") or "rollout_lock")
+        save_state(
+            state_path,
+            merge_state(
+                state,
+                status="maintenance_lock",
+                fingerprint="",
+                last_change=now_str(),
+                last_summary=f"maintenance_lock age={rollout_lock_age_sec:.1f}s reason={lock_reason}",
+            ),
+        )
+        log(log_path, f"maintenance_lock active age={rollout_lock_age_sec:.1f}s reason={lock_reason}")
+        return 0
+    if maintenance_lock_path.exists() and rollout_lock_age_sec > args.maintenance_lock_max_sec:
+        log(log_path, f"maintenance_lock stale age={rollout_lock_age_sec:.1f}s path={maintenance_lock_path}")
 
     changed, summary = refresh_intraday_killer_policy(project_root, run_dir, args.dashboard_url)
     log(log_path, f"intraday_policy_refresh changed={changed} {summary}")

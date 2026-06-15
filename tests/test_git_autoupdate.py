@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -54,6 +55,14 @@ class GitAutoupdateWindowTest(unittest.TestCase):
             allowed, reason = gau.restart_allowed_now(ROOT, "v7_live_20260525")
         self.assertTrue(allowed)
         self.assertTrue(reason.startswith("safe_window "))
+
+    def test_rollout_lock_roundtrip(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            lock_path = Path(tmp) / "rollout_lock.json"
+            gau.write_rollout_lock(lock_path, {"reason": "apply_remote_update", "new_head": "abc123"})
+            self.assertTrue(lock_path.exists())
+            gau.clear_rollout_lock(lock_path)
+            self.assertFalse(lock_path.exists())
 
 
 if __name__ == "__main__":

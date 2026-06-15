@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -84,6 +85,14 @@ class ServerWatchdogStabilityTest(unittest.TestCase):
             "watchdog intraday: GLZ6 -> observe-only after ticker damage threshold",
             overrides_a.get("notes") or [],
         )
+
+    def test_fresh_rollout_lock_is_detected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            lock_path = Path(tmp) / "git_autoupdate_rollout_lock.json"
+            lock_path.write_text('{"reason":"apply_remote_update"}', encoding="utf-8")
+            payload, age_sec = sw.load_active_rollout_lock(lock_path, max_age_sec=60)
+        self.assertEqual(payload.get("reason"), "apply_remote_update")
+        self.assertGreaterEqual(age_sec, 0.0)
 
 
 if __name__ == "__main__":
