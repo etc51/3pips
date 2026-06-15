@@ -1200,27 +1200,56 @@ def make_handler(base_dir: Path):
         def log_message(self, fmt: str, *args) -> None:
             return
 
-        def send(self, status: int, body: bytes, content_type: str) -> None:
+        def send(self, status: int, body: bytes, content_type: str, *, include_body: bool = True) -> None:
             self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
-            self.wfile.write(body)
+            if include_body:
+                self.wfile.write(body)
 
-        def do_GET(self) -> None:
+        def resolve_selected(self, parsed) -> Path:
+            qs = parse_qs(parsed.query)
+            selected = Path(qs.get("dir", [str(base_dir)])[0])
+            if not selected.is_absolute():
+                selected = ROOT / selected
+            return selected
+
+        def handle_request(self, *, include_body: bool) -> None:
             parsed = urlparse(self.path)
             if parsed.path == "/":
-                self.send(200, HTML.encode("utf-8"), "text/html; charset=utf-8")
+                self.send(200, HTML.encode("utf-8"), "text/html; charset=utf-8", include_body=include_body)
+                return
+            if parsed.path == "/healthz":
+                payload = {
+                    "ok": True,
+                    "dir": str(self.resolve_selected(parsed)),
+                    "ts": datetime.now().isoformat(timespec="seconds"),
+                }
+                self.send(
+                    200,
+                    json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                    "application/json; charset=utf-8",
+                    include_body=include_body,
+                )
                 return
             if parsed.path == "/api/state":
-                qs = parse_qs(parsed.query)
-                selected = Path(qs.get("dir", [str(base_dir)])[0])
-                if not selected.is_absolute():
-                    selected = ROOT / selected
+                selected = self.resolve_selected(parsed)
                 state = build_state(selected)
-                self.send(200, json.dumps(state, ensure_ascii=False, default=str).encode("utf-8"), "application/json; charset=utf-8")
+                self.send(
+                    200,
+                    json.dumps(state, ensure_ascii=False, default=str).encode("utf-8"),
+                    "application/json; charset=utf-8",
+                    include_body=include_body,
+                )
                 return
-            self.send(404, b"not found", "text/plain; charset=utf-8")
+            self.send(404, b"not found", "text/plain; charset=utf-8", include_body=include_body)
+
+        def do_GET(self) -> None:
+            self.handle_request(include_body=True)
+
+        def do_HEAD(self) -> None:
+            self.handle_request(include_body=False)
 
     return Handler
 

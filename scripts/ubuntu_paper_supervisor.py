@@ -276,7 +276,7 @@ class Supervisor:
 
     def dashboard_http_ok(self) -> bool:
         try:
-            with urlopen(f"http://127.0.0.1:{self.dashboard_port}/", timeout=3) as response:
+            with urlopen(f"http://127.0.0.1:{self.dashboard_port}/healthz", timeout=3) as response:
                 return 200 <= response.status < 500
         except Exception:
             return False

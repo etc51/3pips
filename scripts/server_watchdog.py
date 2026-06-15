@@ -60,7 +60,7 @@ def service_age_sec(service_name: str) -> float | None:
 
 def dashboard_ok(url: str) -> tuple[bool, str]:
     try:
-        with urlopen(url, timeout=5) as response:
+        with urlopen(dashboard_health_url(url), timeout=5) as response:
             return True, f"http_{response.status}"
     except URLError as exc:
         return False, f"urlerror:{exc}"
@@ -305,6 +305,20 @@ def api_state_url(dashboard_url: str) -> str:
     else:
         clean = path[:-1] if path.endswith("/") else path
     return urlunsplit((parts.scheme, parts.netloc, f"{clean}/api/state", "", ""))
+
+
+def dashboard_health_url(dashboard_url: str) -> str:
+    parts = urlsplit(dashboard_url)
+    path = parts.path or ""
+    if path.endswith("/healthz") or path == "/healthz":
+        return dashboard_url
+    if path.endswith("/api/state") or path == "/api/state":
+        clean = path[: -len("/api/state")]
+    elif path in {"", "/"}:
+        clean = ""
+    else:
+        clean = path[:-1] if path.endswith("/") else path
+    return urlunsplit((parts.scheme, parts.netloc, f"{clean}/healthz", "", ""))
 
 
 def load_dashboard_state(dashboard_url: str) -> dict:
