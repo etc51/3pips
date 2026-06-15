@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sys
+import tempfile
+import types
 import unittest
 from collections import deque
 from pathlib import Path
@@ -12,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC_DIR = ROOT / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
+sys.modules.setdefault("requests", types.SimpleNamespace())
 
 import multi_futures_paper as mfp  # noqa: E402
 
@@ -129,6 +132,130 @@ class EntryShadowModelsTest(unittest.TestCase):
 
         self.assertFalse(by_model["tv_early_vwap_volume_breakout"]["allow"])
         self.assertIn("outside_1015_1159", by_model["tv_early_vwap_volume_breakout"]["decision_reason"])
+
+    @patch("multi_futures_paper.clock_seconds_now", return_value=13 * 3600 + 30 * 60)
+    def test_entry_shadow_gate_blocks_when_required_model_denies(self, _mock_clock: object) -> None:
+        state = self.make_state()
+        sizing = mfp.SizingDecision(
+            qty=1,
+            margin_qty=1,
+            risk_qty=1,
+            gross_stop_per_contract_rub=20.0,
+            round_turn_fee_per_contract_rub=0.4,
+            full_stop_per_contract_rub=20.4,
+            full_stop_rub=20.4,
+            reason="test",
+        )
+
+        decisions = mfp.evaluate_entry_shadow_models(
+            state=state,
+            portfolio_group="classic_core",
+            direction="long",
+            entry_price=110.0,
+            qty=1,
+            sizing=sizing,
+            aggressive=False,
+        )
+        reason = mfp.entry_shadow_gate_block_reason(
+            decisions,
+            {"entry_shadow_gate_group_models": {"CLASSIC_CORE/STRICT": "tv_early_vwap_volume_breakout"}},
+            "classic_core",
+            "strict",
+        )
+
+        self.assertIsNotNone(reason)
+        self.assertIn("entry_shadow_gate", str(reason))
+
+    @patch("multi_futures_paper.clock_seconds_now", return_value=10 * 3600 + 30 * 60)
+    def test_entry_shadow_gate_allows_when_required_model_passes(self, _mock_clock: object) -> None:
+        state = self.make_state()
+        sizing = mfp.SizingDecision(
+            qty=1,
+            margin_qty=1,
+            risk_qty=1,
+            gross_stop_per_contract_rub=20.0,
+            round_turn_fee_per_contract_rub=0.4,
+            full_stop_per_contract_rub=20.4,
+            full_stop_rub=20.4,
+            reason="test",
+        )
+
+        decisions = mfp.evaluate_entry_shadow_models(
+            state=state,
+            portfolio_group="classic_core",
+            direction="long",
+            entry_price=110.0,
+            qty=1,
+            sizing=sizing,
+            aggressive=False,
+        )
+        reason = mfp.entry_shadow_gate_block_reason(
+            decisions,
+            {"entry_shadow_gate_group_models": {"CLASSIC_CORE/STRICT": "tv_early_vwap_volume_breakout"}},
+            "classic_core",
+            "strict",
+        )
+
+        self.assertIsNone(reason)
+
+    @patch("multi_futures_paper.clock_seconds_now", return_value=10 * 3600 + 30 * 60)
+    def test_blocked_entry_shadow_tracking_writes_outcome_rows(self, _mock_clock: object) -> None:
+        state = self.make_state()
+        sizing = mfp.SizingDecision(
+            qty=1,
+            margin_qty=1,
+            risk_qty=1,
+            gross_stop_per_contract_rub=20.0,
+            round_turn_fee_per_contract_rub=0.4,
+            full_stop_per_contract_rub=20.4,
+            full_stop_rub=20.4,
+            reason="test",
+        )
+        decisions = mfp.evaluate_entry_shadow_models(
+            state=state,
+            portfolio_group="classic_core",
+            direction="long",
+            entry_price=110.0,
+            qty=1,
+            sizing=sizing,
+            aggressive=False,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            args = SimpleNamespace(
+                log=str(Path(tmp) / "classic_core_multi_futures_paper_trades.csv"),
+                entry_shadow_log="",
+                actual_exit_model="candle_like",
+            )
+            mfp.activate_blocked_entry_shadow_tracking(
+                state,
+                direction="long",
+                entry_price=110.0,
+                qty=1,
+                spec=state.spec,
+                actual_exit_model="candle_like",
+                decisions=decisions,
+            )
+            state.shadow_close_details["candle_like"] = {
+                "closed_at": "2026-06-16 10:45:00",
+                "minutes_held": 15,
+                "exit_price": 111.2,
+                "exit_source": "candle_like_stop_fill",
+                "net_rub": 123.45,
+                "ticks": 12.0,
+            }
+
+            mfp.finalize_shadow_only_entry_tracking(state, args)
+
+            path = Path(tmp) / "classic_core_entry_shadow_models.csv"
+            self.assertTrue(path.exists())
+            rows = path.read_text(encoding="utf-8").strip().splitlines()
+            self.assertGreater(len(rows), 1)
+            self.assertEqual(state.entry_shadow_decisions, [])
+            self.assertEqual(state.shadow_entry_mode, "")
+            self.assertEqual(state.shadow_entry_anchor_model, "")
+            self.assertEqual(state.shadow_close_details, {})
+            self.assertIn("shadow_only::candle_like_stop_fill", path.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

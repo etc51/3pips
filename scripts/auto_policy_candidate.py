@@ -3,7 +3,15 @@ from __future__ import annotations
 import json
 
 from autonomy_common import now_str, safe_float, safe_int
-from auto_policy_utils import merge_blackout_windows, merge_group_blackout_windows, normalize_blackout_windows, normalize_clock_hhmm, normalize_group_blackout_windows
+from auto_policy_utils import (
+    merge_blackout_windows,
+    merge_group_blackout_windows,
+    normalize_blackout_windows,
+    normalize_clock_hhmm,
+    normalize_entry_shadow_gate_group_models,
+    normalize_group_blackout_windows,
+    normalize_shadow_model_name,
+)
 
 
 def _earlier_clock_hhmm(left: object, right: object) -> str:
@@ -27,7 +35,7 @@ def _later_clock_hhmm(left: object, right: object) -> str:
 
 
 def _value_token(policy_key: str, value: object) -> str:
-    if policy_key in {"entry_blackout_windows", "entry_blackout_group_windows"}:
+    if policy_key in {"entry_blackout_windows", "entry_blackout_group_windows", "entry_shadow_gate_group_models"}:
         return json.dumps(value, ensure_ascii=False, sort_keys=True)
     return str(value)
 
@@ -58,6 +66,12 @@ def _policy_contains_value(active: dict, policy_key: str, value: object) -> bool
         except Exception:
             return False
         return active_cap <= candidate_cap
+    if policy_key == "entry_shadow_gate_group_models":
+        active_models = normalize_entry_shadow_gate_group_models(active.get(policy_key))
+        candidate_models = normalize_entry_shadow_gate_group_models(value)
+        if not candidate_models:
+            return False
+        return all(active_models.get(group_key) == model for group_key, model in candidate_models.items())
     return False
 
 
@@ -143,10 +157,73 @@ def build_candidate_entries(auto_policy: dict, trade_date: str, promote_after_da
         note="candidate full-stop cap from nightly research",
         min_total_delta_rub=1_000.0,
     )
+    for row in proposed.get("candidate_entry_shadow_gate_rows") or []:
+        portfolio_group = str(row.get("portfolio_group") or "").strip().upper()
+        contour = str(row.get("contour") or "").strip().upper()
+        model = normalize_shadow_model_name(row.get("model"))
+        if not portfolio_group or contour not in {"STRICT", "AGGRESSIVE"} or not model:
+            continue
+        value = {f"{portfolio_group}/{contour}": model}
+        if _policy_contains_value(active, "entry_shadow_gate_group_models", value):
+            continue
+        anchor = str(row.get("candidate") or f"entry_shadow_gate::{portfolio_group}/{contour}/{model}")
+        try:
+            promote_after = max(1, int(row.get("promote_after_days") or 2))
+        except Exception:
+            promote_after = 2
+        delta_floor = max(500.0, safe_float(row.get("min_total_delta_rub"), 0.0))
+        out.append(
+            {
+                "candidate_id": f"entry_shadow_gate_group_models|{anchor}|{_value_token('entry_shadow_gate_group_models', value)}",
+                "policy_key": "entry_shadow_gate_group_models",
+                "value": value,
+                "source_scenario": anchor,
+                "scope": "new_entries_only",
+                "created_trade_date": trade_date,
+                "promote_after_days": promote_after,
+                "min_total_delta_rub": delta_floor,
+                "note": str(row.get("note") or f"candidate entry shadow gate {portfolio_group}/{contour} -> {model}"),
+            }
+        )
     return out
 
 
-def evaluate_candidate_days(candidate: dict, scenario_history: list[dict]) -> list[dict]:
+def evaluate_entry_shadow_candidate_days(candidate: dict, strategy_review_history: list[dict]) -> list[dict]:
+    source_scenario = str(candidate.get("source_scenario") or "")
+    created_trade_date = str(candidate.get("created_trade_date") or "")
+    value = normalize_entry_shadow_gate_group_models(candidate.get("value"))
+    if not created_trade_date or len(value) != 1:
+        return []
+    group_key, model_name = next(iter(value.items()))
+    rows_by_date: dict[str, dict] = {}
+    for row in strategy_review_history:
+        trade_date = str(row.get("trade_date") or "")
+        if not trade_date or trade_date <= created_trade_date:
+            continue
+        portfolio_group = str(row.get("portfolio_group") or "").strip().upper()
+        contour = str(row.get("contour") or "").strip().upper()
+        row_group_key = f"{portfolio_group}/{contour}" if portfolio_group and contour else ""
+        row_model_name = normalize_shadow_model_name(row.get("model"))
+        row_candidate = str(row.get("candidate") or "")
+        if row_group_key != group_key or row_model_name != model_name:
+            continue
+        if source_scenario and row_candidate and row_candidate != source_scenario:
+            continue
+        delta = round(safe_float(row.get("delta_vs_base_rub")), 2)
+        model_net = round(safe_float(row.get("model_net_rub")), 2)
+        rows_by_date[trade_date] = {
+            "trade_date": trade_date,
+            "candidate_net_rub": model_net,
+            "base_net_rub": round(model_net - delta, 2),
+            "delta_rub": delta,
+            "beat_base": delta > 0 and model_net > 0,
+        }
+    return [rows_by_date[key] for key in sorted(rows_by_date)]
+
+
+def evaluate_candidate_days(candidate: dict, scenario_history: list[dict], strategy_review_history: list[dict] | None = None) -> list[dict]:
+    if str(candidate.get("policy_key") or "") == "entry_shadow_gate_group_models":
+        return evaluate_entry_shadow_candidate_days(candidate, strategy_review_history or [])
     source_scenario = str(candidate.get("source_scenario") or "")
     created_trade_date = str(candidate.get("created_trade_date") or "")
     if not source_scenario or not created_trade_date:
@@ -178,7 +255,13 @@ def evaluate_candidate_days(candidate: dict, scenario_history: list[dict]) -> li
     return out
 
 
-def advance_candidate_gate(existing_state: dict, auto_policy: dict, scenario_history: list[dict], trade_date: str) -> dict:
+def advance_candidate_gate(
+    existing_state: dict,
+    auto_policy: dict,
+    scenario_history: list[dict],
+    trade_date: str,
+    strategy_review_history: list[dict] | None = None,
+) -> dict:
     existing_state = existing_state if isinstance(existing_state, dict) else {}
     pending_by_id = {
         str(item.get("candidate_id") or ""): item
@@ -221,7 +304,7 @@ def advance_candidate_gate(existing_state: dict, auto_policy: dict, scenario_his
             for item in (previous.get("evaluations") or [])
             if str(item.get("trade_date") or "")
         }
-        for item in evaluate_candidate_days(previous or current, scenario_history):
+        for item in evaluate_candidate_days(previous or current, scenario_history, strategy_review_history):
             evaluations_by_date.setdefault(str(item.get("trade_date") or ""), item)
         evaluations = [evaluations_by_date[key] for key in sorted(evaluations_by_date)]
         evaluation_days = len(evaluations)
@@ -325,6 +408,12 @@ def apply_promoted_candidates(active: dict, promoted_candidates: list[dict]) -> 
                     payload[policy_key] = candidate_value
                 else:
                     payload[policy_key] = min(current_value, candidate_value)
+        elif policy_key == "entry_shadow_gate_group_models":
+            current_models = normalize_entry_shadow_gate_group_models(payload.get(policy_key))
+            candidate_models = normalize_entry_shadow_gate_group_models(value)
+            if candidate_models:
+                current_models.update(candidate_models)
+                payload[policy_key] = {key: current_models[key] for key in sorted(current_models)}
         else:
             continue
         notes.append(

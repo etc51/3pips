@@ -167,7 +167,7 @@ def copy_bundle_outputs(
     for pattern in ["*_health.json", "*_paper_open_positions.json", "*_instrument_specs.csv", "*_startup_status.csv", "*_roll_state.json"]:
         for path in run_dir.glob(pattern):
             shutil.copy2(path, raw_dir / path.name)
-    for pattern in ["*_wide_spread_review.csv", "*_shadow_exit_models.csv"]:
+    for pattern in ["*_wide_spread_review.csv", "*_shadow_exit_models.csv", "*_entry_shadow_models.csv"]:
         for path in run_dir.glob(pattern):
             shutil.copy2(path, raw_dir / path.name)
 
@@ -180,6 +180,8 @@ def copy_bundle_outputs(
     shutil.copy2(research_dir / "optimizer_summary.md", bundle_dir / "optimizer_summary.md")
     shutil.copy2(research_dir / "strategy_lab_summary.md", bundle_dir / "strategy_lab_summary.md")
     for path in [
+        research_dir / "strategy_review_summary.md",
+        research_dir / "strategy_review_candidates.csv",
         analysis_dir / "day_history.csv",
         analysis_dir / "by_portfolio.csv",
         analysis_dir / "microstructure_summary.csv",

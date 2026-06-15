@@ -24,10 +24,12 @@ from autonomy_common import (  # noqa: E402
     safe_int,
     send_email,
     smtp_settings,
+    write_csv_rows,
     write_json,
     write_text,
 )
 from auto_policy_utils import (  # noqa: E402
+    format_entry_shadow_gate_group_models,
     count_group_blackout_rules,
     format_group_blackout_windows,
     merge_blackout_windows,
@@ -35,8 +37,10 @@ from auto_policy_utils import (  # noqa: E402
     normalize_blackout_window,
     normalize_blackout_windows,
     normalize_clock_hhmm,
+    normalize_entry_shadow_gate_group_models,
     normalize_group_blackout_slice,
     normalize_group_blackout_windows,
+    normalize_shadow_model_name,
     normalize_upper_list,
     policy_group_blackout_windows,
 )
@@ -85,6 +89,14 @@ def shadow_file_group(path: Path) -> str:
     for suffix in suffixes:
         if name.endswith(suffix):
             return name[: -len(suffix)]
+    return name
+
+
+def entry_shadow_file_group(path: Path) -> str:
+    name = path.stem
+    suffix = "_entry_shadow_models"
+    if name.endswith(suffix):
+        return name[: -len(suffix)]
     return name
 
 
@@ -210,6 +222,50 @@ def load_shadow_trades(run_dir: Path) -> list[dict]:
     return rows
 
 
+def load_entry_shadow_rows(run_dir: Path) -> list[dict]:
+    rows: list[dict] = []
+    for path in sorted(run_dir.glob("*_entry_shadow_models.csv")):
+        group = entry_shadow_file_group(path)
+        for row in read_csv_rows(path):
+            item = dict(row)
+            item.pop(None, None)
+            if not parse_dt(str(item.get("closed_at") or "")):
+                continue
+            if not str(item.get("model") or "").strip():
+                continue
+            if item.get("net_rub") in (None, ""):
+                continue
+            item.setdefault("portfolio_group", group)
+            item["portfolio_group"] = str(item.get("portfolio_group") or group).upper()
+            item["contour"] = str(item.get("contour") or "").upper()
+            item["model"] = str(item.get("model") or "").strip()
+            item["_source_file"] = path.name
+            rows.append(item)
+    return rows
+
+
+def load_strategy_review_candidate_history(research_root: Path) -> list[dict]:
+    rows: list[dict] = []
+    for path in sorted(research_root.glob("*/strategy_review_candidates.csv")):
+        trade_date = path.parent.name
+        for row in read_csv_rows(path):
+            item = dict(row)
+            item.pop(None, None)
+            item["trade_date"] = str(item.get("trade_date") or trade_date)
+            rows.append(item)
+    return rows
+
+
+def format_candidate_entry_shadow_gate_rows(rows: list[dict], empty: str = "-") -> str:
+    normalized: dict[str, str] = {}
+    for row in rows:
+        group_key = normalize_group_blackout_slice(f"{row.get('portfolio_group') or ''}/{row.get('contour') or ''}")
+        model_name = normalize_shadow_model_name(row.get("model"))
+        if group_key and model_name:
+            normalized[group_key] = model_name
+    return format_entry_shadow_gate_group_models(normalized, empty=empty)
+
+
 def load_wide_spread_reviews(run_dir: Path) -> list[dict]:
     rows: list[dict] = []
     suffix = "_wide_spread_review"
@@ -231,12 +287,22 @@ def load_wide_spread_reviews(run_dir: Path) -> list[dict]:
 
 
 def latest_trade_date(rows: list[dict]) -> str | None:
-    dates = sorted({str(row.get("closed_at") or "")[:10] for row in rows if row.get("closed_at")})
+    dates = sorted(
+        {
+            str(row.get("closed_at") or row.get("trade_date") or "")[:10]
+            for row in rows
+            if row.get("closed_at") or row.get("trade_date")
+        }
+    )
     return dates[-1] if dates else None
 
 
 def filter_trade_date(rows: list[dict], trade_date: str) -> list[dict]:
-    return [row for row in rows if str(row.get("closed_at") or "").startswith(trade_date)]
+    return [
+        row
+        for row in rows
+        if str(row.get("closed_at") or row.get("trade_date") or "").startswith(trade_date)
+    ]
 
 
 def filter_snapshot_date(rows: list[dict], trade_date: str) -> list[dict]:
@@ -1274,6 +1340,15 @@ def build_restriction_rows(auto_policy: dict) -> list[dict]:
                     "note": "",
                 }
             )
+    for group_key, model_name in normalize_entry_shadow_gate_group_models(active.get("entry_shadow_gate_group_models")).items():
+        rows.append(
+            {
+                "stage": "active",
+                "restriction_type": "entry_shadow_gate_group_model",
+                "value": f"{group_key}::{model_name}",
+                "note": "",
+            }
+        )
     for key in ("pause_ticker_after_losses", "pause_family_after_losses", "pause_after_loss_minutes"):
         if active.get(key) not in (None, ""):
             rows.append(
@@ -1339,6 +1414,18 @@ def build_restriction_rows(auto_policy: dict) -> list[dict]:
                 "note": "",
             }
         )
+    for row in proposed.get("candidate_entry_shadow_gate_rows") or []:
+        group_key = normalize_group_blackout_slice(f"{row.get('portfolio_group') or ''}/{row.get('contour') or ''}")
+        model_name = normalize_shadow_model_name(row.get("model"))
+        if group_key and model_name:
+            rows.append(
+                {
+                    "stage": "proposed",
+                    "restriction_type": "candidate_entry_shadow_gate_group_model",
+                    "value": f"{group_key}::{model_name}",
+                    "note": str(row.get("note") or ""),
+                }
+            )
     best_latest = proposed.get("best_latest_overlay") if isinstance(proposed.get("best_latest_overlay"), dict) else {}
     best_consensus = proposed.get("best_consensus_overlay") if isinstance(proposed.get("best_consensus_overlay"), dict) else {}
     best_latest_group_blackout = proposed.get("best_latest_group_blackout_overlay") if isinstance(proposed.get("best_latest_group_blackout_overlay"), dict) else {}
@@ -1403,10 +1490,17 @@ def build_nightly_cycle_status(
     auto_policy: dict,
     email_to: str,
     candidate_gate: dict | None = None,
+    strategy_review: dict | None = None,
 ) -> dict:
     active = auto_policy.get("active") if isinstance(auto_policy.get("active"), dict) else {}
     email_settings = smtp_settings(default_recipient=email_to)
-    candidate_summary = summarize_candidate_gate(candidate_gate or {})
+    candidate_summary = (
+        candidate_gate.get("summary")
+        if isinstance(candidate_gate, dict) and isinstance(candidate_gate.get("summary"), dict)
+        else summarize_candidate_gate(candidate_gate or {})
+    )
+    review = strategy_review if isinstance(strategy_review, dict) else {}
+    review_generated = bool(review.get("generated"))
     return {
         "trade_date": trade_date,
         "generated_at": now_str(),
@@ -1432,6 +1526,12 @@ def build_nightly_cycle_status(
                 "status": "ok",
                 "candidates": len(strategy_lab),
                 "top_candidate": str(strategy_lab[0].get("candidate") or "") if strategy_lab else "",
+            },
+            "strategy_review": {
+                "status": "ok" if review_generated else "not_generated",
+                "generated": review_generated,
+                "summary_path": str(review.get("summary_path") or ""),
+                "artifacts": list(review.get("artifacts") or []),
             },
             "restrictions": {
                 "status": "ok",
@@ -1753,6 +1853,7 @@ def build_auto_policy(
         "strict_only_families": [],
         "entry_blackout_windows": [],
         "entry_blackout_group_windows": {},
+        "entry_shadow_gate_group_models": {},
         "entry_no_trade_before": None,
         "entry_no_new_after": None,
         "entry_max_full_stop_rub": None,
@@ -1854,6 +1955,10 @@ def build_auto_policy(
         (row for row in research_day if scenario_kind(str(row.get("scenario") or "")) == "group_blackout"),
         {},
     )
+    best_all_entry_window_overlay = next(
+        (row for row in research_all if scenario_kind(str(row.get("scenario") or "")) == "entry_window"),
+        {},
+    )
     best_consensus_overlay = pick_best_consensus_scenario(research_consensus)
     best_consensus_blackout_overlay = next(
         (row for row in research_consensus if scenario_kind(str(row.get("scenario") or "")) == "entry_blackout"),
@@ -1880,6 +1985,8 @@ def build_auto_policy(
     )
     research_all_by_scenario = {str(row.get("scenario") or ""): row for row in research_all}
     research_day_by_scenario = {str(row.get("scenario") or ""): row for row in research_day}
+    best_all_entry_window_scenario = str(best_all_entry_window_overlay.get("scenario") or "")
+    best_day_same_entry_window = research_day_by_scenario.get(best_all_entry_window_scenario) if best_all_entry_window_scenario else {}
 
     proposed = {
         "best_latest_overlay": best_latest_overlay,
@@ -2096,6 +2203,32 @@ def build_auto_policy(
         active["notes"].append(
             f"Авто-policy: новые входы блокируются в окне {', '.join(latest_blackout_windows)}, "
             f"потому что {latest_blackout_scenario} переворачивает текущий день из минуса в плюс и остаётся положительным по общей выборке."
+        )
+    best_entry_window_start = scenario_entry_start(best_all_entry_window_scenario)
+    best_entry_window_cutoff = scenario_entry_cutoff(best_all_entry_window_scenario)
+    best_entry_window_all_net = safe_float(best_all_entry_window_overlay.get("net_rub")) if isinstance(best_all_entry_window_overlay, dict) else 0.0
+    best_entry_window_all_trades = safe_int(best_all_entry_window_overlay.get("trades")) if isinstance(best_all_entry_window_overlay, dict) else 0
+    best_entry_window_all_delta = best_entry_window_all_net - safe_float(base_all_overlay.get("net_rub"))
+    best_entry_window_day_net = safe_float(best_day_same_entry_window.get("net_rub")) if isinstance(best_day_same_entry_window, dict) else 0.0
+    best_entry_window_day_trades = safe_int(best_day_same_entry_window.get("trades")) if isinstance(best_day_same_entry_window, dict) else 0
+    best_entry_window_day_delta = best_entry_window_day_net - base_day_net
+    if (
+        best_all_entry_window_scenario
+        and (best_entry_window_start or best_entry_window_cutoff)
+        and best_entry_window_all_trades >= 8
+        and best_entry_window_day_trades >= 6
+        and best_entry_window_all_net > 0
+        and best_entry_window_day_net > 0
+        and best_entry_window_all_delta >= 1_500
+        and best_entry_window_day_delta >= 1_500
+    ):
+        if best_entry_window_start:
+            active["entry_no_trade_before"] = later_clock_hhmm(active.get("entry_no_trade_before"), best_entry_window_start)
+        if best_entry_window_cutoff:
+            active["entry_no_new_after"] = earlier_clock_hhmm(active.get("entry_no_new_after"), best_entry_window_cutoff)
+        active["notes"].append(
+            f"Авто-policy: активировано окно входов {best_entry_window_start or '-'}..{best_entry_window_cutoff or '-'}, "
+            f"потому что {best_all_entry_window_scenario} даёт положительный результат и на последнем дне, и по общей выборке."
         )
     latest_group_blackout_scenario = str(best_latest_group_blackout_overlay.get("scenario") or "")
     latest_group_blackout_windows = scenario_group_blackout_windows(latest_group_blackout_scenario)
@@ -2630,6 +2763,7 @@ def render_auto_policy_markdown(auto_policy: dict) -> str:
         f"- strict_only_families: {', '.join(active.get('strict_only_families') or []) or 'none'}",
         f"- entry_blackout_windows: {', '.join(active.get('entry_blackout_windows') or []) or 'none'}",
         f"- entry_blackout_group_windows: {format_group_blackout_windows(policy_group_blackout_windows(active), empty='none')}",
+        f"- entry_shadow_gate_group_models: {format_entry_shadow_gate_group_models(active.get('entry_shadow_gate_group_models'), empty='none')}",
         f"- entry_no_trade_before: {active.get('entry_no_trade_before') or '-'}",
         f"- entry_no_new_after: {active.get('entry_no_new_after') or '-'}",
         f"- entry_max_full_stop_rub: {active.get('entry_max_full_stop_rub') or '-'}",
@@ -2661,6 +2795,7 @@ def render_auto_policy_markdown(auto_policy: dict) -> str:
     lines.append(f"- candidate_entry_blackout_windows: {', '.join(proposed.get('candidate_entry_blackout_windows') or []) or '-'}")
     lines.append(f"- candidate_group_blackout_windows: {format_group_blackout_windows(proposed.get('candidate_group_blackout_windows'), empty='-')}")
     lines.append(f"- candidate_stop_cap_rub: {proposed.get('candidate_stop_cap_rub') or '-'}")
+    lines.append(f"- candidate_entry_shadow_gate_rows: {format_candidate_entry_shadow_gate_rows(proposed.get('candidate_entry_shadow_gate_rows') or [], empty='-')}")
     lines.append("")
     for note in proposed.get("notes") or []:
         lines.append(f"- {note}")
@@ -2688,6 +2823,330 @@ def markdown_top(title: str, rows: list[dict], columns: list[str], limit: int = 
             values.append("" if value is None else str(value))
         body.append("| " + " | ".join(values) + " |")
     return "\n".join([f"## {title}", "", head, sep, *body, ""])
+
+
+def entry_shadow_allow_value(row: dict) -> bool:
+    value = str(row.get("allow") or "").strip().lower()
+    return value in {"1", "true", "yes", "y"}
+
+
+def build_entry_shadow_review(rows: list[dict], scope_key) -> list[dict]:
+    grouped: dict[str, list[dict]] = defaultdict(list)
+    for row in rows:
+        scope = str(scope_key(row) or "").strip()
+        if scope:
+            grouped[scope].append(row)
+    review_rows: list[dict] = []
+    for scope, items in grouped.items():
+        trades = len(items)
+        allowed_rows = [item for item in items if entry_shadow_allow_value(item)]
+        denied_rows = [item for item in items if not entry_shadow_allow_value(item)]
+        base_net_rub = round(sum(safe_float(item.get("net_rub")) for item in items), 2)
+        model_net_rub = round(sum(safe_float(item.get("net_rub")) for item in allowed_rows), 2)
+        delta_vs_base_rub = round(model_net_rub - base_net_rub, 2)
+        allowed_trades = len(allowed_rows)
+        denied_trades = len(denied_rows)
+        allow_wins = sum(1 for item in allowed_rows if safe_float(item.get("net_rub")) > 0)
+        skipped_losses = sum(1 for item in denied_rows if safe_float(item.get("net_rub")) < 0)
+        skipped_wins = sum(1 for item in denied_rows if safe_float(item.get("net_rub")) > 0)
+        review_rows.append(
+            {
+                "scope": scope,
+                "trades": trades,
+                "allowed_trades": allowed_trades,
+                "denied_trades": denied_trades,
+                "allow_rate_pct": round((allowed_trades / trades) * 100.0, 2) if trades else 0.0,
+                "base_net_rub": base_net_rub,
+                "model_net_rub": model_net_rub,
+                "delta_vs_base_rub": delta_vs_base_rub,
+                "allowed_expectancy_rub": round(model_net_rub / allowed_trades, 2) if allowed_trades else 0.0,
+                "allowed_win_rate_pct": round((allow_wins / allowed_trades) * 100.0, 2) if allowed_trades else 0.0,
+                "skipped_losses": skipped_losses,
+                "skipped_wins": skipped_wins,
+                "denied_net_rub": round(sum(safe_float(item.get("net_rub")) for item in denied_rows), 2),
+            }
+        )
+    review_rows.sort(
+        key=lambda row: (
+            safe_float(row.get("delta_vs_base_rub")),
+            safe_float(row.get("model_net_rub")),
+            safe_float(row.get("allow_rate_pct")),
+        ),
+        reverse=True,
+    )
+    return review_rows
+
+
+def build_strategy_review(
+    *,
+    trade_date: str,
+    research_dir: Path,
+    run_dir: Path,
+    strategy_lab: list[dict],
+    research_day: list[dict],
+    research_all: list[dict],
+    research_consensus: list[dict],
+    auto_policy: dict,
+    restriction_rows: list[dict],
+    runtime_trade_model: dict,
+) -> dict:
+    del strategy_lab, research_day, research_all, research_consensus, auto_policy, restriction_rows, runtime_trade_model
+    all_rows = load_entry_shadow_rows(run_dir)
+    day_rows = filter_trade_date(all_rows, trade_date)
+    summary_path = research_dir / "strategy_review_summary.md"
+    candidates_path = research_dir / "strategy_review_candidates.csv"
+    project_root = research_dir.parents[3]
+    summary_rel = summary_path.relative_to(project_root).as_posix()
+    candidates_rel = candidates_path.relative_to(project_root).as_posix()
+    candidate_fields = [
+        "candidate",
+        "portfolio_group",
+        "contour",
+        "model",
+        "trades",
+        "allowed_trades",
+        "denied_trades",
+        "allow_rate_pct",
+        "base_net_rub",
+        "model_net_rub",
+        "delta_vs_base_rub",
+        "skipped_losses",
+        "skipped_wins",
+        "recommended_action",
+        "note",
+    ]
+
+    if not all_rows:
+        write_text(
+            summary_path,
+            "\n".join(
+                [
+                    "# Strategy Review",
+                    "",
+                    f"- trade_date: {trade_date}",
+                    "- entry_shadow_rows_day: 0",
+                    "- entry_shadow_rows_all: 0",
+                    "- candidate_count: 0",
+                    "",
+                    "No closed entry shadow rows yet. Runtime first needs to write `*_entry_shadow_models.csv`.",
+                    "",
+                ]
+            ),
+        )
+        write_csv_rows(candidates_path, [], fieldnames=candidate_fields)
+        return {
+            "generated": True,
+            "summary_path": summary_rel,
+            "artifacts": [summary_rel, candidates_rel],
+            "top_models": [],
+            "top_slices": [],
+            "candidates": [],
+            "candidate_count": 0,
+        }
+
+    day_by_model = build_entry_shadow_review(day_rows, lambda row: str(row.get("model") or ""))
+    all_by_model = build_entry_shadow_review(all_rows, lambda row: str(row.get("model") or ""))
+    all_by_slice = build_entry_shadow_review(
+        all_rows,
+        lambda row: f"{str(row.get('portfolio_group') or '').upper()}/{str(row.get('contour') or '').upper()}/{str(row.get('model') or '')}",
+    )
+
+    candidates: list[dict] = []
+    for row in all_by_slice:
+        scope = str(row.get("scope") or "")
+        parts = scope.split("/", 2)
+        if len(parts) != 3:
+            continue
+        portfolio_group, contour, model = parts
+        trades = safe_int(row.get("trades"))
+        delta_vs_base_rub = safe_float(row.get("delta_vs_base_rub"))
+        model_net_rub = safe_float(row.get("model_net_rub"))
+        skipped_losses = safe_int(row.get("skipped_losses"))
+        skipped_wins = safe_int(row.get("skipped_wins"))
+        if trades < 3 or delta_vs_base_rub < 500 or model_net_rub <= 0 or skipped_losses < max(1, skipped_wins):
+            continue
+        candidates.append(
+            {
+                "candidate": f"entry_shadow_gate::{scope}",
+                "portfolio_group": portfolio_group,
+                "contour": contour,
+                "model": model,
+                "trades": trades,
+                "allowed_trades": safe_int(row.get("allowed_trades")),
+                "denied_trades": safe_int(row.get("denied_trades")),
+                "allow_rate_pct": row.get("allow_rate_pct"),
+                "base_net_rub": row.get("base_net_rub"),
+                "model_net_rub": row.get("model_net_rub"),
+                "delta_vs_base_rub": row.get("delta_vs_base_rub"),
+                "skipped_losses": skipped_losses,
+                "skipped_wins": skipped_wins,
+                "recommended_action": "research_then_runtime",
+                "note": f"{model} improves expectancy for {portfolio_group}/{contour} by skipping {skipped_losses} losing trades vs {skipped_wins} skipped winners.",
+            }
+        )
+    candidates.sort(
+        key=lambda row: (
+            safe_float(row.get("delta_vs_base_rub")),
+            safe_float(row.get("model_net_rub")),
+            safe_int(row.get("trades")),
+        ),
+        reverse=True,
+    )
+
+    summary_lines = [
+        "# Strategy Review",
+        "",
+        f"- trade_date: {trade_date}",
+        f"- entry_shadow_rows_day: {len(day_rows)}",
+        f"- entry_shadow_rows_all: {len(all_rows)}",
+        f"- candidate_count: {len(candidates)}",
+        "",
+        markdown_top(
+            "Entry Shadow: Latest Day by Model",
+            day_by_model,
+            [
+                "scope",
+                "trades",
+                "allow_rate_pct",
+                "base_net_rub",
+                "model_net_rub",
+                "delta_vs_base_rub",
+                "allowed_expectancy_rub",
+                "skipped_losses",
+                "skipped_wins",
+            ],
+            limit=10,
+        ),
+        markdown_top(
+            "Entry Shadow: All Sample by Model",
+            all_by_model,
+            [
+                "scope",
+                "trades",
+                "allow_rate_pct",
+                "base_net_rub",
+                "model_net_rub",
+                "delta_vs_base_rub",
+                "allowed_expectancy_rub",
+                "skipped_losses",
+                "skipped_wins",
+            ],
+            limit=10,
+        ),
+        markdown_top(
+            "Entry Shadow: Best Slices",
+            all_by_slice,
+            [
+                "scope",
+                "trades",
+                "allow_rate_pct",
+                "model_net_rub",
+                "delta_vs_base_rub",
+                "allowed_expectancy_rub",
+                "skipped_losses",
+                "skipped_wins",
+            ],
+            limit=15,
+        ),
+        markdown_top(
+            "Entry Shadow: Runtime Candidates",
+            candidates,
+            [
+                "candidate",
+                "trades",
+                "delta_vs_base_rub",
+                "model_net_rub",
+                "skipped_losses",
+                "skipped_wins",
+                "recommended_action",
+            ],
+            limit=10,
+        ),
+    ]
+    write_text(summary_path, "\n".join(summary_lines))
+    write_csv_rows(candidates_path, candidates, fieldnames=candidate_fields)
+    return {
+        "generated": True,
+        "summary_path": summary_rel,
+        "artifacts": [summary_rel, candidates_rel],
+        "top_models": all_by_model[:10],
+        "top_slices": all_by_slice[:10],
+        "candidates": candidates[:20],
+        "candidate_count": len(candidates),
+    }
+
+
+def select_entry_shadow_gate_candidates(strategy_review: dict) -> list[dict]:
+    if not isinstance(strategy_review, dict):
+        return []
+    best_by_group: dict[str, dict] = {}
+    for row in strategy_review.get("candidates") or []:
+        portfolio_group = str(row.get("portfolio_group") or "").strip().upper()
+        contour = str(row.get("contour") or "").strip().upper()
+        model_name = normalize_shadow_model_name(row.get("model"))
+        group_key = normalize_group_blackout_slice(f"{portfolio_group}/{contour}")
+        trades = safe_int(row.get("trades"))
+        delta_vs_base_rub = safe_float(row.get("delta_vs_base_rub"))
+        model_net_rub = safe_float(row.get("model_net_rub"))
+        skipped_losses = safe_int(row.get("skipped_losses"))
+        skipped_wins = safe_int(row.get("skipped_wins"))
+        if not group_key or not model_name:
+            continue
+        if trades < 4 or delta_vs_base_rub < 1_000 or model_net_rub <= 0 or skipped_losses < max(2, skipped_wins + 1):
+            continue
+        payload = {
+            "candidate": str(row.get("candidate") or f"entry_shadow_gate::{group_key}/{model_name}"),
+            "portfolio_group": portfolio_group,
+            "contour": contour,
+            "model": model_name,
+            "trades": trades,
+            "delta_vs_base_rub": round(delta_vs_base_rub, 2),
+            "model_net_rub": round(model_net_rub, 2),
+            "skipped_losses": skipped_losses,
+            "skipped_wins": skipped_wins,
+            "recommended_action": "candidate_runtime_entry_shadow_gate",
+            "promote_after_days": 2,
+            "min_total_delta_rub": max(750.0, round(delta_vs_base_rub * 0.6, 2)),
+            "note": str(
+                row.get("note")
+                or f"{model_name} stays positive for {group_key} and skips {skipped_losses} losing trades against {skipped_wins} skipped winners."
+            ),
+        }
+        score = (
+            payload["delta_vs_base_rub"],
+            payload["model_net_rub"],
+            payload["skipped_losses"] - payload["skipped_wins"],
+            payload["trades"],
+        )
+        prev = best_by_group.get(group_key)
+        if prev is None or score > prev["score"]:
+            payload["score"] = score
+            best_by_group[group_key] = payload
+    selected = sorted(best_by_group.values(), key=lambda item: item["score"], reverse=True)[:4]
+    for item in selected:
+        item.pop("score", None)
+    return selected
+
+
+def apply_strategy_review_candidates(auto_policy: dict, strategy_review: dict) -> dict:
+    payload = dict(auto_policy) if isinstance(auto_policy, dict) else {}
+    proposed = dict(payload.get("proposed") if isinstance(payload.get("proposed"), dict) else {})
+    active = dict(payload.get("active") if isinstance(payload.get("active"), dict) else {})
+    active_base = dict(payload.get("active_base") if isinstance(payload.get("active_base"), dict) else {})
+    candidate_rows = select_entry_shadow_gate_candidates(strategy_review)
+    proposed["candidate_entry_shadow_gate_rows"] = candidate_rows
+    notes = [str(item) for item in (proposed.get("notes") or []) if str(item).strip()]
+    if candidate_rows:
+        notes.append(
+            f"Entry-shadow runtime gate candidates: {format_candidate_entry_shadow_gate_rows(candidate_rows, empty='-')}."
+        )
+    proposed["notes"] = list(dict.fromkeys(notes))[:12]
+    active["entry_shadow_gate_group_models"] = normalize_entry_shadow_gate_group_models(active.get("entry_shadow_gate_group_models"))
+    active_base["entry_shadow_gate_group_models"] = normalize_entry_shadow_gate_group_models(active_base.get("entry_shadow_gate_group_models"))
+    payload["active"] = active
+    payload["active_base"] = active_base
+    payload["proposed"] = proposed
+    return payload
 
 
 def load_open_position_snapshot(run_dir: Path) -> list[dict]:
@@ -3414,8 +3873,33 @@ def main() -> int:
         research_all=research_all,
         research_consensus=scenario_consensus,
     )
+    strategy_review_builder = globals().get("build_strategy_review")
+    strategy_review = {}
+    if callable(strategy_review_builder):
+        built_strategy_review = strategy_review_builder(
+            trade_date=trade_date,
+            research_dir=research_dir,
+            run_dir=run_dir,
+            strategy_lab=[],
+            research_day=research_day,
+            research_all=research_all,
+            research_consensus=scenario_consensus,
+            auto_policy=auto_policy,
+            restriction_rows=[],
+            runtime_trade_model=runtime_trade_model,
+        )
+        if isinstance(built_strategy_review, dict):
+            strategy_review = built_strategy_review
+    auto_policy = apply_strategy_review_candidates(auto_policy, strategy_review)
     candidate_state_path = manifest_root / "candidate_auto_policy.json"
-    candidate_gate = advance_candidate_gate(load_json(candidate_state_path), auto_policy, scenario_history, trade_date)
+    strategy_review_history = load_strategy_review_candidate_history(research_root)
+    candidate_gate = advance_candidate_gate(
+        load_json(candidate_state_path),
+        auto_policy,
+        scenario_history,
+        trade_date,
+        strategy_review_history=strategy_review_history,
+    )
     promoted_candidates = list(candidate_gate.get("promoted_now") or [])
     if promoted_candidates:
         active_base = auto_policy.get("active_base") if isinstance(auto_policy.get("active_base"), dict) else {}
@@ -3551,6 +4035,10 @@ def main() -> int:
         roll_watch=roll_watch,
         auto_policy=auto_policy,
     )
+    if strategy_review:
+        manifest_payload["strategy_review"] = strategy_review
+        if isinstance(strategy_review.get("top_models"), list):
+            manifest_payload["entry_shadow_top"] = strategy_review.get("top_models")[:10]
     manifest_payload["candidate_gate"] = candidate_gate.get("summary") if isinstance(candidate_gate.get("summary"), dict) else {}
     write_json(bundle_dir / "manifest.json", manifest_payload)
 
@@ -3566,6 +4054,7 @@ def main() -> int:
         auto_policy=auto_policy,
         email_to=args.email_to,
         candidate_gate=candidate_gate,
+        strategy_review=strategy_review,
     )
     persist_nightly_cycle_status(
         nightly_cycle_status,

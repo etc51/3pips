@@ -102,6 +102,33 @@ def format_group_blackout_windows(values: object, empty: str = "none") -> str:
     return "; ".join(f"{key}={', '.join(windows)}" for key, windows in normalized.items())
 
 
+def normalize_shadow_model_name(value: object) -> str:
+    return str(value or "").strip().lower()
+
+
+def normalize_entry_shadow_gate_group_models(values: object) -> dict[str, str]:
+    if not isinstance(values, dict):
+        return {}
+    out: dict[str, str] = {}
+    for key, model in values.items():
+        group_key = normalize_group_blackout_slice(key)
+        model_name = normalize_shadow_model_name(model)
+        if group_key and model_name:
+            out[group_key] = model_name
+    return {key: out[key] for key in sorted(out)}
+
+
+def count_entry_shadow_gate_rules(values: object) -> int:
+    return len(normalize_entry_shadow_gate_group_models(values))
+
+
+def format_entry_shadow_gate_group_models(values: object, empty: str = "none") -> str:
+    normalized = normalize_entry_shadow_gate_group_models(values)
+    if not normalized:
+        return empty
+    return "; ".join(f"{key}={model}" for key, model in normalized.items())
+
+
 def policy_group_blackout_windows(values: object) -> dict[str, list[str]]:
     if not isinstance(values, dict):
         return {}

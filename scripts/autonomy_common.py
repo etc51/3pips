@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import csv
+import io
 import json
 import os
 import smtplib
 import ssl
+import tempfile
 import zipfile
 from datetime import datetime
 from email.message import EmailMessage
@@ -17,6 +19,24 @@ def now_str() -> str:
 
 def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
+
+
+def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8", newline: str | None = None) -> None:
+    ensure_dir(path.parent)
+    fd, tmp_name = tempfile.mkstemp(prefix=f"{path.name}.tmp.", dir=path.parent)
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding=encoding, newline=newline) as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        tmp_path.replace(path)
+    except Exception:
+        try:
+            tmp_path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def parse_dt(value: str | None) -> datetime | None:
@@ -66,20 +86,19 @@ def write_csv_rows(path: Path, rows: list[dict], fieldnames: list[str] | None = 
                     seen.add(key)
                     ordered.append(key)
         fieldnames = ordered
-    with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames or [])
-        writer.writeheader()
-        writer.writerows(rows)
+    buffer = io.StringIO(newline="")
+    writer = csv.DictWriter(buffer, fieldnames=fieldnames or [])
+    writer.writeheader()
+    writer.writerows(rows)
+    atomic_write_text(path, buffer.getvalue(), encoding="utf-8", newline="")
 
 
 def write_json(path: Path, payload: object) -> None:
-    ensure_dir(path.parent)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def write_text(path: Path, text: str) -> None:
-    ensure_dir(path.parent)
-    path.write_text(text, encoding="utf-8")
+    atomic_write_text(path, text, encoding="utf-8")
 
 
 def tail_text(path: Path, lines: int = 300) -> str:

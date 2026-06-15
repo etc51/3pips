@@ -21,6 +21,7 @@ class AutoPolicyCandidateGateTest(unittest.TestCase):
                 "entry_no_new_after": None,
                 "entry_blackout_windows": [],
                 "entry_blackout_group_windows": {},
+                "entry_shadow_gate_group_models": {},
                 "entry_max_full_stop_rub": None,
                 "notes": [],
             },
@@ -66,6 +67,86 @@ class AutoPolicyCandidateGateTest(unittest.TestCase):
         promoted_active = apc.apply_promoted_candidates(auto_policy["active_base"], advanced["promoted_now"])
         self.assertEqual(promoted_active["entry_no_new_after"], "17:45")
         self.assertTrue(any("Candidate gate:" in note for note in promoted_active["notes"]))
+
+    def test_promotes_entry_shadow_gate_after_positive_future_days(self) -> None:
+        auto_policy = {
+            "active_base": {
+                "entry_no_trade_before": None,
+                "entry_no_new_after": None,
+                "entry_blackout_windows": [],
+                "entry_blackout_group_windows": {},
+                "entry_shadow_gate_group_models": {},
+                "entry_max_full_stop_rub": None,
+                "notes": [],
+            },
+            "proposed": {
+                "candidate_entry_start": "",
+                "candidate_entry_start_anchor": "",
+                "candidate_entry_cutoff": "",
+                "candidate_entry_cutoff_anchor": "",
+                "candidate_entry_blackout_windows": [],
+                "candidate_entry_blackout_anchor": "",
+                "candidate_group_blackout_windows": {},
+                "candidate_group_blackout_anchor": "",
+                "candidate_stop_cap_rub": None,
+                "candidate_stop_cap_anchor": "",
+                "candidate_entry_shadow_gate_rows": [
+                    {
+                        "candidate": "entry_shadow_gate::CLASSIC_CORE/STRICT/tv_ema_rsi_adx_trend",
+                        "portfolio_group": "CLASSIC_CORE",
+                        "contour": "STRICT",
+                        "model": "tv_ema_rsi_adx_trend",
+                        "promote_after_days": 2,
+                        "min_total_delta_rub": 900.0,
+                        "note": "positive entry-shadow gate candidate",
+                    }
+                ],
+            },
+        }
+
+        initial = apc.advance_candidate_gate({}, auto_policy, [], "2026-06-15", strategy_review_history=[])
+        self.assertEqual(initial["summary"]["pending_count"], 1)
+
+        future_history = [
+            {
+                "trade_date": "2026-06-16",
+                "candidate": "entry_shadow_gate::CLASSIC_CORE/STRICT/tv_ema_rsi_adx_trend",
+                "portfolio_group": "CLASSIC_CORE",
+                "contour": "STRICT",
+                "model": "tv_ema_rsi_adx_trend",
+                "delta_vs_base_rub": 650.0,
+                "model_net_rub": 1200.0,
+            },
+            {
+                "trade_date": "2026-06-17",
+                "candidate": "entry_shadow_gate::CLASSIC_CORE/STRICT/tv_ema_rsi_adx_trend",
+                "portfolio_group": "CLASSIC_CORE",
+                "contour": "STRICT",
+                "model": "tv_ema_rsi_adx_trend",
+                "delta_vs_base_rub": 700.0,
+                "model_net_rub": 1100.0,
+            },
+        ]
+        advanced = apc.advance_candidate_gate(
+            initial,
+            auto_policy,
+            [],
+            "2026-06-17",
+            strategy_review_history=future_history,
+        )
+
+        self.assertEqual(advanced["summary"]["promoted_now_count"], 1)
+        promoted = advanced["promoted_now"][0]
+        self.assertEqual(promoted["policy_key"], "entry_shadow_gate_group_models")
+        self.assertEqual(promoted["evaluation_days"], 2)
+        self.assertEqual(promoted["beat_base_days"], 2)
+        self.assertGreaterEqual(promoted["total_delta_rub"], 900.0)
+
+        promoted_active = apc.apply_promoted_candidates(auto_policy["active_base"], advanced["promoted_now"])
+        self.assertEqual(
+            promoted_active["entry_shadow_gate_group_models"],
+            {"CLASSIC_CORE/STRICT": "tv_ema_rsi_adx_trend"},
+        )
 
 
 if __name__ == "__main__":

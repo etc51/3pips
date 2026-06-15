@@ -12,7 +12,7 @@ from urllib.parse import urlsplit, urlunsplit
 from urllib.request import urlopen
 from zoneinfo import ZoneInfo
 
-from autonomy_common import now_str
+from autonomy_common import now_str, write_json
 
 
 MSK = ZoneInfo("Europe/Moscow")
@@ -44,13 +44,15 @@ def changed_paths(project_root: Path, old_rev: str, new_rev: str) -> set[str]:
 
 
 def write_pending_restart(path: Path, payload: dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_json(path, payload)
 
 
 def write_rollout_lock(path: Path, payload: dict[str, object]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_json(path, payload)
+
+
+def write_status(path: Path, payload: dict[str, object]) -> None:
+    write_json(path, payload)
 
 
 def clear_rollout_lock(path: Path) -> None:
@@ -172,6 +174,7 @@ def main() -> int:
     parser.add_argument("--health-stale-sec", type=int, default=180)
     parser.add_argument("--pending-restart-path", default="")
     parser.add_argument("--rollout-lock-path", default="")
+    parser.add_argument("--status-path", default="")
     args = parser.parse_args()
 
     project_root = Path(args.project_root).resolve()
@@ -179,24 +182,56 @@ def main() -> int:
     log_path = Path(args.log_path) if args.log_path else runtime_dir / "git_autoupdate.log"
     pending_restart_path = Path(args.pending_restart_path) if args.pending_restart_path else runtime_dir / "git_autoupdate_pending_restart.json"
     rollout_lock_path = Path(args.rollout_lock_path) if args.rollout_lock_path else runtime_dir / "git_autoupdate_rollout_lock.json"
+    status_path = Path(args.status_path) if args.status_path else runtime_dir / "git_autoupdate_status.json"
+
+    head_sha = ""
+    remote_sha = ""
+
+    def emit_status(outcome: str, reason: str, **extra: object) -> None:
+        payload: dict[str, object] = {
+            "updated_at": now_str(),
+            "outcome": outcome,
+            "reason": reason,
+            "project_root": str(project_root),
+            "branch": args.branch,
+            "remote": args.remote,
+            "service_name": args.service_name,
+            "run_name": args.run_name,
+            "head": head_sha,
+            "remote_head": remote_sha,
+            "pending_restart_exists": pending_restart_path.exists(),
+            "rollout_lock_exists": rollout_lock_path.exists(),
+        }
+        for key, value in extra.items():
+            payload[key] = value
+        write_status(status_path, payload)
 
     status = run(git_cmd(project_root, "status", "--porcelain", "--untracked-files=no"), project_root)
     if status.returncode != 0:
         log(log_path, f"skip reason=status_failed rc={status.returncode} stderr={status.stderr.strip()[:300]}")
+        emit_status("skipped", "status_failed", rc=status.returncode, stderr=status.stderr.strip()[:300])
         return 0
     if status.stdout.strip():
         log(log_path, "skip reason=dirty_worktree")
+        emit_status("skipped", "dirty_worktree")
         return 0
 
     fetch = run(git_cmd(project_root, "fetch", args.remote, args.branch), project_root)
     if fetch.returncode != 0:
         log(log_path, f"skip reason=fetch_failed rc={fetch.returncode} stderr={fetch.stderr.strip()[:300]}")
+        emit_status("skipped", "fetch_failed", rc=fetch.returncode, stderr=fetch.stderr.strip()[:300])
         return 0
 
     head = run(git_cmd(project_root, "rev-parse", "HEAD"), project_root)
     remote_head = run(git_cmd(project_root, "rev-parse", f"{args.remote}/{args.branch}"), project_root)
     if head.returncode != 0 or remote_head.returncode != 0:
         log(log_path, "skip reason=rev_parse_failed")
+        emit_status(
+            "skipped",
+            "rev_parse_failed",
+            head_rc=head.returncode,
+            remote_head_rc=remote_head.returncode,
+        )
         return 0
     head_sha = head.stdout.strip()
     remote_sha = remote_head.stdout.strip()
@@ -247,11 +282,21 @@ def main() -> int:
                 }
                 write_pending_restart(pending_restart_path, pending)
                 log(log_path, f"defer reason={why} update_available old={previous_head} new={remote_sha}")
+                emit_status(
+                    "deferred",
+                    "remote_update_available",
+                    old_head=previous_head,
+                    new_head=remote_sha,
+                    deferred_because=why,
+                    deps_ready=not requirements_changed,
+                    merged=False,
+                )
                 return 0
             acquire_rollout_lock("apply_remote_update", previous_head, remote_sha)
             ff = run(git_cmd(project_root, "merge", "--ff-only", remote_sha), project_root)
             if ff.returncode != 0:
                 log(log_path, f"fail reason=ff_merge_failed rc={ff.returncode} stderr={ff.stderr.strip()[:300]}")
+                emit_status("failed", "ff_merge_failed", rc=ff.returncode, stderr=ff.stderr.strip()[:300], old_head=previous_head, new_head=remote_sha)
                 return 1
 
             needs_dependency_refresh = requirements_changed
@@ -287,6 +332,7 @@ def main() -> int:
             needs_dependency_refresh = not bool(pending_payload.get("deps_ready", True))
         else:
             log(log_path, f"skip reason=up_to_date head={head_sha}")
+            emit_status("ok", "up_to_date", old_head=head_sha, new_head=remote_sha)
             return 0
 
         if needs_dependency_refresh:
@@ -308,6 +354,14 @@ def main() -> int:
                     log_path,
                     f"fail reason=dependency_install rc={pip_install.returncode} stderr={pip_install.stderr.strip()[:300]}",
                 )
+                emit_status(
+                    "failed",
+                    "dependency_install_failed",
+                    rc=pip_install.returncode,
+                    stderr=pip_install.stderr.strip()[:300],
+                    old_head=pending_payload.get("old_head", previous_head),
+                    new_head=remote_sha if remote_sha else head_sha,
+                )
                 return 1
 
         allowed, why = restart_allowed_now(project_root, args.run_name)
@@ -323,6 +377,15 @@ def main() -> int:
             }
             write_pending_restart(pending_restart_path, pending)
             log(log_path, f"defer reason={why} {pending['reason']}")
+            emit_status(
+                "deferred",
+                "restart_pending_runtime",
+                old_head=pending_payload.get("old_head", previous_head),
+                new_head=remote_sha if remote_sha else head_sha,
+                deferred_because=why,
+                deps_ready=True,
+                merged=True,
+            )
             return 0
 
         if not lock_acquired:
@@ -330,12 +393,21 @@ def main() -> int:
         restart = run(["systemctl", "restart", args.service_name], project_root)
         if restart.returncode != 0:
             log(log_path, f"fail reason=service_restart rc={restart.returncode} stderr={restart.stderr.strip()[:300]}")
+            emit_status("failed", "service_restart_failed", rc=restart.returncode, stderr=restart.stderr.strip()[:300], old_head=previous_head, new_head=target_sha)
             return 1
         time.sleep(max(5, args.restart_wait_sec))
 
         active = run(["systemctl", "is-active", args.service_name], project_root)
         if active.returncode != 0 or active.stdout.strip() != "active":
             log(log_path, f"fail reason=service_not_active status={active.stdout.strip()} stderr={active.stderr.strip()[:300]}")
+            emit_status(
+                "failed",
+                "service_not_active",
+                status=active.stdout.strip(),
+                stderr=active.stderr.strip()[:300],
+                old_head=previous_head,
+                new_head=target_sha,
+            )
             return 1
 
         issues = verify_runtime_ready(project_root, args.run_name, args.dashboard_url, args.health_stale_sec)
@@ -351,11 +423,26 @@ def main() -> int:
             }
             write_pending_restart(pending_restart_path, pending)
             log(log_path, f"fail reason=post_restart_verification summary={' ; '.join(issues)}")
+            emit_status(
+                "failed",
+                "post_restart_verification_failed",
+                old_head=pending_payload.get("old_head", previous_head),
+                new_head=target_sha,
+                issues=issues,
+            )
             return 1
 
         if pending_restart_path.exists():
             pending_restart_path.unlink()
         log(log_path, f"{update_reason} service={args.service_name} restart={why}")
+        emit_status(
+            "updated",
+            "restart_completed",
+            old_head=pending_payload.get("old_head", previous_head),
+            new_head=target_sha,
+            restart_window=why,
+            update_reason=update_reason,
+        )
         return 0
     finally:
         if lock_acquired:

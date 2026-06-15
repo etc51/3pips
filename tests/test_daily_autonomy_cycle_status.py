@@ -17,7 +17,7 @@ import daily_autonomy_runner as dar  # noqa: E402
 
 
 class DailyAutonomyCycleStatusTest(unittest.TestCase):
-    def test_stage_map_includes_email_and_archive_starts_pending(self) -> None:
+    def test_stage_map_includes_strategy_review_email_and_archive_starts_pending(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             status = dar.build_nightly_cycle_status(
                 trade_date="2026-06-15",
@@ -27,6 +27,14 @@ class DailyAutonomyCycleStatusTest(unittest.TestCase):
                 research_consensus=[{"scenario": "base"}],
                 optimizer_candidates=[{"scenario": "no_new_after_1745"}],
                 strategy_lab=[{"candidate": "strict_plus_aggressive"}],
+                strategy_review={
+                    "generated": True,
+                    "summary_path": r"reports\autonomy\research\2026-06-15\strategy_review_summary.md",
+                    "artifacts": [
+                        r"reports\autonomy\research\2026-06-15\strategy_review_summary.md",
+                        r"reports\autonomy\research\2026-06-15\strategy_review_candidates.csv",
+                    ],
+                },
                 restriction_rows=[{"restriction_type": "entry_no_new_after"}],
                 auto_policy={"active": {"entry_no_new_after": "17:45"}},
                 email_to="etc00051@yandex.ru",
@@ -35,10 +43,33 @@ class DailyAutonomyCycleStatusTest(unittest.TestCase):
         stages = status["stages"]
         self.assertEqual(
             set(stages),
-            {"analyze", "research", "optimizer", "strategy_lab", "restrictions", "candidate_gate", "summary", "email"},
+            {
+                "analyze",
+                "research",
+                "optimizer",
+                "strategy_lab",
+                "strategy_review",
+                "restrictions",
+                "candidate_gate",
+                "summary",
+                "email",
+            },
         )
         self.assertEqual(stages["candidate_gate"]["status"], "ok")
         self.assertEqual(stages["candidate_gate"]["pending"], 0)
+        self.assertEqual(stages["strategy_review"]["status"], "ok")
+        self.assertTrue(stages["strategy_review"]["generated"])
+        self.assertEqual(
+            stages["strategy_review"]["summary_path"],
+            r"reports\autonomy\research\2026-06-15\strategy_review_summary.md",
+        )
+        self.assertEqual(
+            stages["strategy_review"]["artifacts"],
+            [
+                r"reports\autonomy\research\2026-06-15\strategy_review_summary.md",
+                r"reports\autonomy\research\2026-06-15\strategy_review_candidates.csv",
+            ],
+        )
         self.assertFalse(stages["summary"]["archive_ready"])
         self.assertEqual(stages["summary"]["archive_path"], "")
         self.assertEqual(stages["email"]["status"], "disabled_missing_smtp")

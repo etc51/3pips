@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from auto_policy_utils import (
+    count_entry_shadow_gate_rules,
     count_group_blackout_rules,
+    normalize_entry_shadow_gate_group_models,
     merge_group_blackout_windows,
     normalize_blackout_windows,
     normalize_upper_list,
@@ -37,6 +39,7 @@ def normalize_policy_view(view: dict | None) -> dict:
         "strict_only_families": normalize_upper_list(view.get("strict_only_families")),
         "entry_blackout_windows": normalize_blackout_windows(view.get("entry_blackout_windows")),
         "entry_blackout_group_windows": policy_group_blackout_windows(view),
+        "entry_shadow_gate_group_models": normalize_entry_shadow_gate_group_models(view.get("entry_shadow_gate_group_models")),
         "notes": normalize_notes(view.get("notes")),
     }
     for key in NUMERIC_POLICY_KEYS:
@@ -73,6 +76,7 @@ def merge_policy_views(base_active: dict, overrides: dict) -> dict:
         policy_group_blackout_windows(base_active),
         policy_group_blackout_windows(overrides),
     )
+    merged["entry_shadow_gate_group_models"] = normalize_entry_shadow_gate_group_models(base_active.get("entry_shadow_gate_group_models"))
     for key in NUMERIC_POLICY_KEYS:
         merged[key] = base_active.get(key)
     base_notes = [str(item) for item in (base_active.get("notes") or []) if str(item).strip()]
@@ -115,6 +119,7 @@ def summarize_active_policy(active: dict) -> dict[str, int]:
             + len(active.get("strict_only_families") or [])
             + len(active.get("entry_blackout_windows") or [])
             + count_group_blackout_rules(policy_group_blackout_windows(active))
+            + count_entry_shadow_gate_rules(active.get("entry_shadow_gate_group_models"))
             + sum(1 for key in NUMERIC_POLICY_KEYS if active.get(key) not in (None, ""))
         ),
         "active_notes_count": len(active.get("notes") or []),

@@ -83,6 +83,7 @@ class GitAutoupdateWindowTest(unittest.TestCase):
             runtime_dir = project_root / "reports" / "runtime"
             runtime_dir.mkdir(parents=True)
             pending_path = runtime_dir / "git_autoupdate_pending_restart.json"
+            status_path = runtime_dir / "git_autoupdate_status.json"
             calls: list[tuple[list[str], Path]] = []
 
             def fake_run(cmd: list[str], cwd: Path):
@@ -131,6 +132,10 @@ class GitAutoupdateWindowTest(unittest.TestCase):
             self.assertEqual(rc, 1)
             self.assertTrue(pending_path.exists())
             self.assertTrue(any(cmd[:2] == ["systemctl", "restart"] for cmd, _cwd in calls))
+            payload = __import__("json").loads(status_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload.get("outcome"), "failed")
+            self.assertEqual(payload.get("reason"), "post_restart_verification_failed")
+            self.assertEqual(payload.get("new_head"), "newsha")
 
     def test_main_defers_before_merge_when_window_is_unsafe(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -138,6 +143,7 @@ class GitAutoupdateWindowTest(unittest.TestCase):
             runtime_dir = project_root / "reports" / "runtime"
             runtime_dir.mkdir(parents=True)
             pending_path = runtime_dir / "git_autoupdate_pending_restart.json"
+            status_path = runtime_dir / "git_autoupdate_status.json"
 
             calls: list[tuple[list[str], Path]] = []
 
@@ -180,6 +186,36 @@ class GitAutoupdateWindowTest(unittest.TestCase):
             self.assertEqual(payload.get("merged"), False)
             self.assertEqual(payload.get("deferred_because"), "entry_window 11:00")
             self.assertFalse(any("merge" in cmd for cmd, _cwd in calls))
+            status_payload = __import__("json").loads(status_path.read_text(encoding="utf-8"))
+            self.assertEqual(status_payload.get("outcome"), "deferred")
+            self.assertEqual(status_payload.get("reason"), "remote_update_available")
+            self.assertEqual(status_payload.get("deferred_because"), "entry_window 11:00")
+            self.assertEqual(status_payload.get("new_head"), "newsha")
+
+    def test_main_writes_status_when_worktree_is_dirty(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp) / "project"
+            runtime_dir = project_root / "reports" / "runtime"
+            runtime_dir.mkdir(parents=True)
+            status_path = runtime_dir / "git_autoupdate_status.json"
+
+            def fake_run(cmd: list[str], cwd: Path):
+                if cmd[:4] == ["git", "-c", f"safe.directory={project_root}", "status"]:
+                    return SimpleNamespace(returncode=0, stdout=" M src/multi_futures_paper.py\n", stderr="")
+                raise AssertionError(f"unexpected command: {cmd}")
+
+            argv = [
+                "git_autoupdate.py",
+                "--project-root",
+                str(project_root),
+            ]
+            with patch.object(gau, "run", side_effect=fake_run), patch.object(sys, "argv", argv):
+                rc = gau.main()
+
+            self.assertEqual(rc, 0)
+            payload = __import__("json").loads(status_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload.get("outcome"), "skipped")
+            self.assertEqual(payload.get("reason"), "dirty_worktree")
 
 
 if __name__ == "__main__":

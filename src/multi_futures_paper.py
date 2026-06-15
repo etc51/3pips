@@ -5,6 +5,8 @@ import csv
 import json
 import math
 import os
+import re
+import tempfile
 import threading
 import time
 from collections import deque
@@ -43,6 +45,24 @@ SPREAD_DOMINATES_RATIO = 1.00
 DEFAULT_MAX_FULL_STOP_RUB = 1_000.0
 AUTO_POLICY_RELOAD_SEC = 30.0
 EXTERNAL_OPEN_POSITIONS_RELOAD_SEC = 2.0
+
+
+def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8", newline: str | None = None) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f"{path.name}.tmp.", dir=path.parent)
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding=encoding, newline=newline) as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        tmp_path.replace(path)
+    except Exception:
+        try:
+            tmp_path.unlink()
+        except FileNotFoundError:
+            pass
+        raise
 
 
 @dataclass
@@ -93,6 +113,9 @@ class State:
     family_loss_streak: int = 0
     shadow_positions: dict[str, Position] = field(default_factory=dict)
     shadow_closed: dict[str, bool] = field(default_factory=dict)
+    shadow_close_details: dict[str, dict] = field(default_factory=dict)
+    shadow_entry_mode: str = ""
+    shadow_entry_anchor_model: str = ""
     entry_shadow_decisions: list[dict] = field(default_factory=list)
 
 
@@ -133,6 +156,7 @@ def empty_auto_policy() -> dict:
         "strict_only_families": [],
         "entry_blackout_windows": [],
         "entry_blackout_group_windows": {},
+        "entry_shadow_gate_group_models": {},
         "entry_no_trade_before": None,
         "entry_no_new_after": None,
         "entry_max_full_stop_rub": None,
@@ -241,6 +265,26 @@ def normalize_group_blackout_windows(values: object) -> dict[str, list[str]]:
     return out
 
 
+def normalize_shadow_model_name(value: object) -> str:
+    return str(value or "").strip().lower()
+
+
+def normalize_entry_shadow_gate_group_models(values: object) -> dict[str, str]:
+    if not isinstance(values, dict):
+        return {}
+    out: dict[str, str] = {}
+    for raw_key, raw_model in values.items():
+        key_text = str(raw_key or "").strip().upper()
+        if "/" not in key_text:
+            continue
+        portfolio, contour = key_text.split("/", 1)
+        key = normalize_group_blackout_key(portfolio, contour)
+        model_name = normalize_shadow_model_name(raw_model)
+        if key and model_name:
+            out[key] = model_name
+    return {key: out[key] for key in sorted(out)}
+
+
 def parse_auto_policy_payload(payload: object) -> dict:
     if not isinstance(payload, dict):
         return empty_auto_policy()
@@ -257,6 +301,7 @@ def parse_auto_policy_payload(payload: object) -> dict:
         "strict_only_families": normalize_policy_names(active.get("strict_only_families")),
         "entry_blackout_windows": normalize_blackout_windows(active.get("entry_blackout_windows")),
         "entry_blackout_group_windows": normalize_group_blackout_windows(active.get("entry_blackout_group_windows")),
+        "entry_shadow_gate_group_models": normalize_entry_shadow_gate_group_models(active.get("entry_shadow_gate_group_models")),
         "entry_no_trade_before": normalize_clock_hhmm(active.get("entry_no_trade_before")),
         "entry_no_new_after": normalize_clock_hhmm(active.get("entry_no_new_after")),
         "entry_max_full_stop_rub": normalize_rub_cap(active.get("entry_max_full_stop_rub")),
@@ -309,6 +354,7 @@ def refresh_auto_policy(cache: dict, force: bool = False) -> dict:
     strict_count = len(payload["strict_only_tickers"]) + len(payload["strict_only_families"])
     blackout_windows = payload.get("entry_blackout_windows") or []
     blackout_group_windows = payload.get("entry_blackout_group_windows") or {}
+    entry_shadow_gate_count = len(payload.get("entry_shadow_gate_group_models") or {})
     entry_start = payload.get("entry_no_trade_before")
     entry_cutoff = payload.get("entry_no_new_after")
     stop_cap = payload.get("entry_max_full_stop_rub")
@@ -319,6 +365,7 @@ def refresh_auto_policy(cache: dict, force: bool = False) -> dict:
         f"observe={observe_count} allow_aggressive={allow_aggressive_count} strict_only={strict_count} "
         f"entry_blackout_windows={','.join(blackout_windows) if blackout_windows else '-'} "
         f"entry_blackout_groups={len(blackout_group_windows)} "
+        f"entry_shadow_gates={entry_shadow_gate_count} "
         f"entry_no_trade_before={entry_start or '-'} "
         f"entry_no_new_after={entry_cutoff or '-'} "
         f"stop_cap_rub={stop_cap if stop_cap is not None else '-'} "
@@ -394,6 +441,32 @@ def effective_entry_blackout_windows(
         if group_key:
             windows |= set(group_windows.get(group_key) or [])
     return sorted(windows)
+
+
+def entry_shadow_gate_block_reason(
+    decisions: list[dict],
+    policy: dict,
+    portfolio_group: str = "",
+    contour: str = "",
+) -> str | None:
+    if not isinstance(policy, dict):
+        return None
+    group_models = normalize_entry_shadow_gate_group_models(policy.get("entry_shadow_gate_group_models"))
+    group_key = normalize_group_blackout_key(portfolio_group, contour)
+    if not group_key:
+        return None
+    required_model = group_models.get(group_key)
+    if not required_model:
+        return None
+    for row in decisions:
+        model_name = normalize_shadow_model_name(row.get("model"))
+        if model_name != required_model:
+            continue
+        if bool(row.get("allow")):
+            return None
+        reason = str(row.get("decision_reason") or "blocked")
+        return f"auto_policy entry_shadow_gate {group_key}::{required_model} {reason}"
+    return f"auto_policy entry_shadow_gate_missing {group_key}::{required_model}"
 
 
 def apply_auto_loss_pause(st: State, states: list[State], net: float, policy: dict) -> None:
@@ -1624,6 +1697,32 @@ def clone_position(pos: Position) -> Position:
     )
 
 
+def shadow_entry_anchor_model(actual_exit_model: str) -> str:
+    return "candle_like" if str(actual_exit_model or "").strip() == "candle_like" else "stream_stoplimit"
+
+
+def activate_blocked_entry_shadow_tracking(
+    state: State,
+    *,
+    direction: Direction,
+    entry_price: float,
+    qty: int,
+    spec: Spec,
+    actual_exit_model: str,
+    decisions: list[dict],
+) -> None:
+    synthetic = open_position(direction, entry_price, qty, state.profile.stop_ticks, state.profile.trail_ticks, spec)
+    state.shadow_positions = {
+        "stream_stoplimit": clone_position(synthetic),
+        "candle_like": clone_position(synthetic),
+    }
+    state.shadow_closed = {}
+    state.shadow_close_details = {}
+    state.shadow_entry_mode = "blocked_entry"
+    state.shadow_entry_anchor_model = shadow_entry_anchor_model(actual_exit_model)
+    state.entry_shadow_decisions = list(decisions)
+
+
 def has_active_shadow(state: State) -> bool:
     return any(not state.shadow_closed.get(model) for model in state.shadow_positions)
 
@@ -1646,38 +1745,44 @@ def close_shadow(
 ) -> None:
     ticks, gross, net = pnl_rub(pos, exit_price, state.spec, state.side_fee)
     closed_at = now_str()
-    append_trade(
-        path,
-        {
-            "closed_at": closed_at,
-            "opened_at": pos.opened_at,
-            "minutes_held": position_minutes_held(pos, closed_at),
-            "model": model,
-            "contour": state.contour,
-            "family": state.profile.family or contract_family(state.spec.secid),
-            "profile_source": state.profile.source_secid or state.profile.secid,
-            "secid": state.spec.secid,
-            "direction": pos.direction,
-            "qty": pos.qty,
-            "entry_price": pos.entry_price,
-            "exit_price": exit_price,
-            "exit_source": exit_source,
-            "trigger_price": trigger_price,
-            "trigger_source": trigger_source,
-            "stop_limit_qty": stop_limit_qty,
-            "stop_overrun_ticks": stop_overrun_ticks,
-            "ticks": round(ticks, 3),
-            "gross_rub": round(gross, 2),
-            "fees_rub": round(2 * state.side_fee * pos.qty, 2),
-            "net_rub": round(net, 2),
-            "stop_ticks": state.profile.stop_ticks,
-            "trail_ticks": state.profile.trail_ticks,
-            "trail_arm_ticks": state.profile.trail_arm_ticks,
-            "target_min_ticks": state.profile.target_min_ticks,
-            "full_stop_1lot_rub": round(full_stop_risk_rub(state.profile, state.spec, state.side_fee, 1), 2),
-            "full_stop_risk_rub": round(full_stop_risk_rub(state.profile, state.spec, state.side_fee, pos.qty), 2),
-        },
-    )
+    row = {
+        "closed_at": closed_at,
+        "opened_at": pos.opened_at,
+        "minutes_held": position_minutes_held(pos, closed_at),
+        "model": model,
+        "contour": state.contour,
+        "family": state.profile.family or contract_family(state.spec.secid),
+        "profile_source": state.profile.source_secid or state.profile.secid,
+        "secid": state.spec.secid,
+        "direction": pos.direction,
+        "qty": pos.qty,
+        "entry_price": pos.entry_price,
+        "exit_price": exit_price,
+        "exit_source": exit_source,
+        "trigger_price": trigger_price,
+        "trigger_source": trigger_source,
+        "stop_limit_qty": stop_limit_qty,
+        "stop_overrun_ticks": stop_overrun_ticks,
+        "ticks": round(ticks, 3),
+        "gross_rub": round(gross, 2),
+        "fees_rub": round(2 * state.side_fee * pos.qty, 2),
+        "net_rub": round(net, 2),
+        "stop_ticks": state.profile.stop_ticks,
+        "trail_ticks": state.profile.trail_ticks,
+        "trail_arm_ticks": state.profile.trail_arm_ticks,
+        "target_min_ticks": state.profile.target_min_ticks,
+        "full_stop_1lot_rub": round(full_stop_risk_rub(state.profile, state.spec, state.side_fee, 1), 2),
+        "full_stop_risk_rub": round(full_stop_risk_rub(state.profile, state.spec, state.side_fee, pos.qty), 2),
+    }
+    append_trade(path, row)
+    state.shadow_close_details[model] = {
+        "closed_at": closed_at,
+        "minutes_held": row["minutes_held"],
+        "exit_price": exit_price,
+        "exit_source": exit_source,
+        "net_rub": row["net_rub"],
+        "ticks": row["ticks"],
+    }
     state.shadow_closed[model] = True
 
 
@@ -1745,6 +1850,73 @@ def update_shadow_models(
             close_shadow(path, state, "candle_like", candle_pos, candle_pos.stop_price, "candle_like_stop_fill", candle_exit, "closed_1m_candle")
 
 
+def close_all_shadow_positions(
+    state: State,
+    path: Path,
+    exit_price: float,
+    exit_source: str,
+) -> None:
+    fill_price = round_to_step(exit_price, state.spec.min_step)
+    for model, pos in list(state.shadow_positions.items()):
+        if state.shadow_closed.get(model):
+            continue
+        close_shadow(path, state, model, pos, fill_price, exit_source, exit_price, exit_source)
+
+
+def write_entry_shadow_decisions(
+    path: Path,
+    decisions: list[dict],
+    *,
+    closed_at: str,
+    minutes_held: int | None,
+    exit_price: float,
+    exit_source: str,
+    net_rub: float,
+    ticks: float,
+) -> None:
+    for row in decisions:
+        out = dict(row)
+        out["closed_at"] = closed_at
+        out["minutes_held"] = minutes_held
+        out["exit_price"] = exit_price
+        out["exit_source"] = exit_source
+        out["net_rub"] = round(net_rub, 2)
+        out["ticks"] = round(ticks, 3)
+        append_schema_stable_csv(path, out)
+
+
+def finalize_shadow_only_entry_tracking(state: State, args: argparse.Namespace) -> None:
+    if state.shadow_entry_mode != "blocked_entry" or not state.entry_shadow_decisions:
+        return
+    anchor_model = state.shadow_entry_anchor_model or shadow_entry_anchor_model(str(getattr(args, "actual_exit_model", "")))
+    details = state.shadow_close_details.get(anchor_model)
+    if not isinstance(details, dict):
+        details = next(iter(state.shadow_close_details.values()), {})
+    if not isinstance(details, dict) or not details:
+        state.entry_shadow_decisions = []
+        state.shadow_entry_mode = ""
+        state.shadow_entry_anchor_model = ""
+        state.shadow_close_details = {}
+        return
+    write_entry_shadow_decisions(
+        entry_shadow_log_path(args),
+        state.entry_shadow_decisions,
+        closed_at=str(details.get("closed_at") or ""),
+        minutes_held=position_minutes_held(
+            next(iter(state.shadow_positions.values())),
+            str(details.get("closed_at") or ""),
+        ) if state.shadow_positions else details.get("minutes_held"),
+        exit_price=float(details.get("exit_price") or 0.0),
+        exit_source=f"shadow_only::{details.get('exit_source') or anchor_model}",
+        net_rub=float(details.get("net_rub") or 0.0),
+        ticks=float(details.get("ticks") or 0.0),
+    )
+    state.entry_shadow_decisions = []
+    state.shadow_entry_mode = ""
+    state.shadow_entry_anchor_model = ""
+    state.shadow_close_details = {}
+
+
 def process_open_state_exit(
     st: State,
     args: argparse.Namespace,
@@ -1758,21 +1930,34 @@ def process_open_state_exit(
 ) -> None:
     if st.position is None:
         if has_active_shadow(st):
-            shadow_pos = next(iter(st.shadow_positions.values()))
+            anchor = st.shadow_entry_anchor_model or shadow_entry_anchor_model(str(getattr(args, "actual_exit_model", "")))
+            shadow_pos = st.shadow_positions.get(anchor) or next(iter(st.shadow_positions.values()))
             shadow_exit_price, shadow_exit_source = executable_price(st, shadow_pos.direction, "exit")
             if shadow_exit_price is not None:
-                update_shadow_models(
-                    st,
-                    Path(args.shadow_log),
-                    shadow_exit_price,
-                    shadow_exit_source,
-                    candle_closed,
-                    float(args.stop_limit_emergency_ticks),
-                )
-            st.last_reason = "shadow_compare_active"
+                if force_exit_reason:
+                    close_all_shadow_positions(
+                        st,
+                        Path(args.shadow_log),
+                        shadow_exit_price,
+                        force_exit_reason,
+                    )
+                else:
+                    update_shadow_models(
+                        st,
+                        Path(args.shadow_log),
+                        shadow_exit_price,
+                        shadow_exit_source,
+                        candle_closed,
+                        float(args.stop_limit_emergency_ticks),
+                    )
+            st.last_reason = "blocked_entry_shadow_active" if st.shadow_entry_mode == "blocked_entry" else "shadow_compare_active"
             if all_shadow_models_closed(st):
+                finalize_shadow_only_entry_tracking(st, args)
                 st.shadow_positions = {}
                 st.shadow_closed = {}
+                st.shadow_close_details = {}
+                st.shadow_entry_mode = ""
+                st.shadow_entry_anchor_model = ""
         return
 
     pos = st.position
@@ -1871,16 +2056,16 @@ def process_open_state_exit(
     st.closed_net += net
     portfolio.closed_net += net
     if st.entry_shadow_decisions:
-        entry_shadow_path = entry_shadow_log_path(args)
-        for row in st.entry_shadow_decisions:
-            out = dict(row)
-            out["closed_at"] = closed_at
-            out["minutes_held"] = position_minutes_held(st.position, closed_at)
-            out["exit_price"] = fill_price
-            out["exit_source"] = fill_source
-            out["net_rub"] = round(net, 2)
-            out["ticks"] = round(ticks, 3)
-            append_schema_stable_csv(entry_shadow_path, out)
+        write_entry_shadow_decisions(
+            entry_shadow_log_path(args),
+            st.entry_shadow_decisions,
+            closed_at=closed_at,
+            minutes_held=position_minutes_held(st.position, closed_at),
+            exit_price=fill_price,
+            exit_source=fill_source,
+            net_rub=net,
+            ticks=ticks,
+        )
         st.entry_shadow_decisions = []
     append_trade(
         Path(args.log),
@@ -2004,7 +2189,8 @@ def poll_market_fallback(
                                     st.last_price = round_to_step(price_by_uid[spec.uid], spec.min_step)
                                 if orderbook is not None:
                                     st.last_order_book = orderbook
-                                force_reason = "scheduled_force_close" if st.position is not None and daily_force_close_due(parse_clock_time(getattr(args, "force_close_at", ""))) else None
+                                force_close_due = daily_force_close_due(parse_clock_time(getattr(args, "force_close_at", "")))
+                                force_reason = "scheduled_force_close" if force_close_due and (st.position is not None or has_active_shadow(st)) else None
                                 process_open_state_exit(
                                     st,
                                     args,
@@ -2207,8 +2393,7 @@ def write_roll_state(path: Path, roll_events: list[dict], specs: list[Spec], arg
         ],
         "roll_events": roll_events,
     }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def write_open_positions(path: Path, states: list[State]) -> None:
@@ -2235,7 +2420,7 @@ def write_open_positions(path: Path, states: list[State]) -> None:
                 "opened_at": st.position.opened_at,
             }
         )
-    path.write_text(json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_text(path, json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def restore_open_positions(path: Path, states: list[State]) -> int:
@@ -2351,8 +2536,7 @@ def write_bot_health(
         },
         "auto_policy": auto_policy if isinstance(auto_policy, dict) else empty_auto_policy(),
     }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def append_schema_stable_csv(path: Path, row: dict) -> None:
@@ -2518,7 +2702,18 @@ def main() -> None:
                 f"profile_source={profile.source_secid or profile.secid}{dte_text}",
                 flush=True,
             )
-            seeded = seed_candles(client, spec.figi, args.seed_minutes)
+            try:
+                seeded = seed_candles(client, spec.figi, args.seed_minutes)
+            except Exception as exc:
+                seeded = deque(maxlen=180)
+                if is_resource_exhausted_error(exc):
+                    backoff_sec = rate_limit_backoff_sec(exc, 15.0)
+                    print(
+                        f"{now_str()} SEED {secid} resource_exhausted wait_sec={backoff_sec:.1f} fallback=empty_candles",
+                        flush=True,
+                    )
+                else:
+                    print(f"{now_str()} SEED {secid} error={type(exc).__name__}: {exc} fallback=empty_candles", flush=True)
             for contour in ["strict", "aggressive"]:
                 states.append(
                     State(
@@ -2707,6 +2902,7 @@ def main() -> None:
                             states,
                             candle is not None,
                             auto_policy=active_auto_policy_local,
+                            force_exit_reason="scheduled_force_close" if force_close_due else None,
                         )
                         if has_active_shadow(st):
                             continue
@@ -2778,14 +2974,7 @@ def main() -> None:
                                 else:
                                     st.last_reason = f"risk_filter full_stop_gt_limit {sizing.reason}"
                                 continue
-                            st.attempts += 1
-                            st.position = open_position(direction, entry_price, qty, st.profile.stop_ticks, st.profile.trail_ticks, spec)
-                            st.shadow_positions = {
-                                "stream_stoplimit": clone_position(st.position),
-                                "candle_like": clone_position(st.position),
-                            }
-                            st.shadow_closed = {}
-                            st.entry_shadow_decisions = evaluate_entry_shadow_models(
+                            entry_shadow_decisions = evaluate_entry_shadow_models(
                                 st,
                                 portfolio_group_name,
                                 direction,
@@ -2794,6 +2983,36 @@ def main() -> None:
                                 sizing,
                                 contour == "aggressive",
                             )
+                            entry_shadow_gate_reason = entry_shadow_gate_block_reason(
+                                entry_shadow_decisions,
+                                active_auto_policy_local,
+                                portfolio_group_name,
+                                contour,
+                            )
+                            if entry_shadow_gate_reason:
+                                activate_blocked_entry_shadow_tracking(
+                                    st,
+                                    direction=direction,
+                                    entry_price=entry_price,
+                                    qty=qty,
+                                    spec=spec,
+                                    actual_exit_model=str(getattr(args, "actual_exit_model", "")),
+                                    decisions=entry_shadow_decisions,
+                                )
+                                st.last_entry_candle_count = len(st.candles)
+                                st.last_reason = f"{entry_shadow_gate_reason} shadow_only_tracking"
+                                continue
+                            st.attempts += 1
+                            st.position = open_position(direction, entry_price, qty, st.profile.stop_ticks, st.profile.trail_ticks, spec)
+                            st.shadow_positions = {
+                                "stream_stoplimit": clone_position(st.position),
+                                "candle_like": clone_position(st.position),
+                            }
+                            st.shadow_closed = {}
+                            st.shadow_close_details = {}
+                            st.shadow_entry_mode = ""
+                            st.shadow_entry_anchor_model = ""
+                            st.entry_shadow_decisions = entry_shadow_decisions
                             st.last_entry_candle_count = len(st.candles)
                             write_open_positions(Path(args.open_positions_log), states)
                             print(

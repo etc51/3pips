@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import signal
 import subprocess
@@ -10,6 +9,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 from urllib.request import urlopen
+
+from autonomy_common import write_json, write_text
 
 
 RUN_NAME = "v7_live_20260525"
@@ -82,7 +83,7 @@ class Supervisor:
     def ensure_open_positions_file(self, name: str) -> None:
         path = self.run_dir / f"{name}_paper_open_positions.json"
         if not path.exists():
-            path.write_text("[]\n", encoding="utf-8")
+            write_text(path, "[]\n")
 
     def backup_open_positions_file(self, name: str) -> None:
         path = self.run_dir / f"{name}_paper_open_positions.json"
@@ -107,7 +108,7 @@ class Supervisor:
             },
         }
         path = self.run_dir / "portfolio_config.json"
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        write_json(path, payload)
 
     def ensure_bot_runtime_logs(self, name: str) -> None:
         for suffix in ("multi_paper.log", "multi_paper.err.log"):
