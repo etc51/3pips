@@ -198,6 +198,8 @@ class Supervisor:
             "--startup-status-log", f"reports/paper_runs/{RUN_NAME}/{name}_startup_status.csv",
             "--shadow-log", f"reports/paper_runs/{RUN_NAME}/{name}_shadow_exit_models.csv",
             "--health-log", f"reports/paper_runs/{RUN_NAME}/{name}_health.json",
+            "--auto-policy-path", "reports/autonomy/latest/latest_auto_policy.json",
+            "--auto-policy-reload-sec", "30",
         ]
         if name == "neo":
             args = [arg for arg in args if arg not in {"--no-trade-before", "10:15", "--no-new-after", "17:45"}]
