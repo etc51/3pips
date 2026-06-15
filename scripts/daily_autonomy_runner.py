@@ -535,6 +535,19 @@ def build_research_scenarios(
                     note="500 RUB stop cap + remove one weak family",
                 )
             )
+            scenarios.append(
+                evaluate_scenario(
+                    f"combo_stop_cap_500__contour_only_strict__blacklist_family_{family}",
+                    sample_rows,
+                    profiles,
+                    predicate=lambda row, family=family: (
+                        str(row.get("contour") or "") == "strict"
+                        and family_for_row(row, profiles) != family
+                    ),
+                    cap_rub=500,
+                    note=f"strict only + 500 RUB stop cap + remove family {family}",
+                )
+            )
 
     scenarios.sort(key=lambda row: (row["net_rub"], row["expectancy_rub"], row["trades"]), reverse=True)
     return scenarios
@@ -1029,6 +1042,14 @@ def scenario_blacklist_family(name: str) -> str:
     return ""
 
 
+def scenario_has_component(name: str, component: str) -> bool:
+    if not name or not component:
+        return False
+    if name == component:
+        return True
+    return component in combo_components(name)
+
+
 def build_auto_policy(
     all_rows: list[dict],
     profiles: dict[str, dict],
@@ -1226,9 +1247,11 @@ def build_auto_policy(
     best_combo_scenario = str(best_all_combo_overlay.get("scenario") or "")
     combo_blacklist_family = scenario_blacklist_family(best_combo_scenario)
     combo_stop_cap = scenario_stop_cap(best_combo_scenario)
+    combo_has_strict = scenario_has_component(best_combo_scenario, "contour_only_strict")
     best_day_same_combo = next((row for row in research_day if str(row.get("scenario") or "") == best_combo_scenario), {})
     all_sample_combo_delta = safe_float(best_all_combo_overlay.get("net_rub")) - safe_float(base_all_overlay.get("net_rub"))
     latest_combo_delta = safe_float(best_day_same_combo.get("net_rub")) - safe_float(base_day_overlay.get("net_rub"))
+    latest_combo_net = safe_float(best_day_same_combo.get("net_rub"))
     active_stop_cap = int(active.get("entry_max_full_stop_rub") or 0) if active.get("entry_max_full_stop_rub") not in (None, "") else 0
     combo_cap_matches_active = bool(combo_stop_cap and active_stop_cap and combo_stop_cap == active_stop_cap)
     if combo_blacklist_family and combo_cap_matches_active:
@@ -1246,6 +1269,22 @@ def build_auto_policy(
             active["notes"].append(
                 f"Авто-policy: семейство {combo_blacklist_family} переведено в observe-only, "
                 f"потому что strongest combo {best_combo_scenario} резко улучшает и последний день, и всю короткую выборку."
+            )
+    if combo_has_strict and combo_cap_matches_active:
+        combo_trades = safe_int(best_all_combo_overlay.get("trades"))
+        combo_net = safe_float(best_all_combo_overlay.get("net_rub"))
+        robust_strict_combo = (
+            combo_trades >= 5
+            and combo_net > 0
+            and latest_combo_net > 0
+            and all_sample_combo_delta >= 2_000
+            and latest_combo_delta >= 1_000
+        )
+        if robust_strict_combo:
+            active["strict_only_families"].extend(futures_families)
+            active["notes"].append(
+                f"Авто-policy: все фьючерсные семьи переведены в strict-only для новых входов, "
+                f"потому что strongest combo {best_combo_scenario} уже даёт положительный результат на общей и последней выборке."
             )
 
     pause_ticker_limit = scenario_loss_limit(consensus_scenario, "pause_ticker_after_")
