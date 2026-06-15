@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.error import URLError
 from urllib.request import urlopen
+from urllib.parse import urlsplit, urlunsplit
 
 CURRENT_DIR = Path(__file__).resolve().parent
 if str(CURRENT_DIR) not in sys.path:
@@ -174,6 +175,13 @@ def family_from_ticker(ticker: str) -> str:
     return (head or secid).upper()
 
 
+def watchdog_candidate_ticker(ticker: str) -> bool:
+    secid = str(ticker or "").strip().upper()
+    if not secid:
+        return False
+    return not secid.endswith("PERPA")
+
+
 def load_closed_trade_rows(run_dir: Path, trade_date: str) -> list[dict]:
     rows: list[dict] = []
     for path in sorted(run_dir.glob("*_multi_futures_paper_trades.csv")):
@@ -185,7 +193,7 @@ def load_closed_trade_rows(run_dir: Path, trade_date: str) -> list[dict]:
                     if trade_date and not closed_at.startswith(trade_date):
                         continue
                     secid = str(row.get("secid") or row.get("ticker") or "").upper()
-                    if not secid:
+                    if not secid or not watchdog_candidate_ticker(secid):
                         continue
                     try:
                         net = float(row.get("net_rub") or 0.0)
@@ -201,6 +209,24 @@ def load_closed_trade_rows(run_dir: Path, trade_date: str) -> list[dict]:
         except Exception:
             continue
     return rows
+
+
+def api_state_url(dashboard_url: str) -> str:
+    parts = urlsplit(dashboard_url)
+    path = parts.path or ""
+    if path.endswith("/api/state") or path == "/api/state":
+        return dashboard_url
+    clean = path[:-1] if path.endswith("/") and path != "/" else path
+    return urlunsplit((parts.scheme, parts.netloc, f"{clean}/api/state", "", ""))
+
+
+def load_dashboard_state(dashboard_url: str) -> dict:
+    try:
+        with urlopen(api_state_url(dashboard_url), timeout=5) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def strip_watchdog_overrides(active: dict, overrides: dict) -> dict:
@@ -233,7 +259,7 @@ def merge_policy_views(base_active: dict, overrides: dict) -> dict:
     return merged
 
 
-def compute_intraday_watchdog_overrides(run_dir: Path, trade_date: str) -> dict:
+def compute_intraday_watchdog_overrides(run_dir: Path, trade_date: str, dashboard_state: dict | None = None) -> dict:
     rows = load_closed_trade_rows(run_dir, trade_date)
     by_ticker: dict[str, dict[str, float]] = {}
     by_family: dict[str, dict[str, float]] = {}
@@ -241,35 +267,61 @@ def compute_intraday_watchdog_overrides(run_dir: Path, trade_date: str) -> dict:
         secid = row["secid"]
         family = row["family"]
         net = float(row["net_rub"])
-        ticker_bucket = by_ticker.setdefault(secid, {"net_rub": 0.0, "losses": 0.0, "trades": 0.0})
-        family_bucket = by_family.setdefault(family, {"net_rub": 0.0, "losses": 0.0, "trades": 0.0})
-        ticker_bucket["net_rub"] += net
+        ticker_bucket = by_ticker.setdefault(secid, {"closed_net_rub": 0.0, "open_net_rub": 0.0, "losses": 0.0, "trades": 0.0, "open_positions": 0.0})
+        family_bucket = by_family.setdefault(family, {"closed_net_rub": 0.0, "open_net_rub": 0.0, "losses": 0.0, "trades": 0.0, "open_positions": 0.0})
+        ticker_bucket["closed_net_rub"] += net
         ticker_bucket["trades"] += 1
-        family_bucket["net_rub"] += net
+        family_bucket["closed_net_rub"] += net
         family_bucket["trades"] += 1
         if net < 0:
             ticker_bucket["losses"] += 1
             family_bucket["losses"] += 1
 
+    if isinstance(dashboard_state, dict):
+        for row in dashboard_state.get("open_positions") or []:
+            if not isinstance(row, dict):
+                continue
+            secid = str(row.get("ticker") or row.get("secid") or "").upper()
+            if not secid or not watchdog_candidate_ticker(secid):
+                continue
+            try:
+                open_net = float(row.get("unrealized_net_rub"))
+            except Exception:
+                continue
+            family = family_from_ticker(secid)
+            ticker_bucket = by_ticker.setdefault(secid, {"closed_net_rub": 0.0, "open_net_rub": 0.0, "losses": 0.0, "trades": 0.0, "open_positions": 0.0})
+            family_bucket = by_family.setdefault(family, {"closed_net_rub": 0.0, "open_net_rub": 0.0, "losses": 0.0, "trades": 0.0, "open_positions": 0.0})
+            ticker_bucket["open_net_rub"] += open_net
+            ticker_bucket["open_positions"] += 1
+            family_bucket["open_net_rub"] += open_net
+            family_bucket["open_positions"] += 1
+
     observe_families = sorted(
         family
         for family, bucket in by_family.items()
-        if bucket["losses"] >= 1 and bucket["net_rub"] <= -3000.0
+        if (
+            (bucket["losses"] >= 1 and bucket["closed_net_rub"] <= -3000.0)
+            or (bucket["closed_net_rub"] + bucket["open_net_rub"] <= -3000.0 and bucket["open_positions"] >= 1)
+            or (bucket["open_net_rub"] <= -2000.0 and bucket["open_positions"] >= 2)
+        )
     )
     observe_tickers = sorted(
         secid
         for secid, bucket in by_ticker.items()
-        if bucket["losses"] >= 1
-        and bucket["net_rub"] <= -2000.0
+        if (
+            (bucket["losses"] >= 1 and bucket["closed_net_rub"] <= -2000.0)
+            or (bucket["closed_net_rub"] + bucket["open_net_rub"] <= -2000.0 and bucket["open_positions"] >= 1)
+            or (bucket["open_net_rub"] <= -1200.0 and bucket["open_positions"] >= 1 and bucket["losses"] >= 1)
+        )
         and family_from_ticker(secid) not in set(observe_families)
     )
     notes: list[str] = []
     for family in observe_families[:4]:
-        net = round(float(by_family[family]["net_rub"]), 2)
-        notes.append(f"watchdog intraday: {family} -> observe-only after {net:.2f} RUB daily family damage")
+        total_net = round(float(by_family[family]["closed_net_rub"] + by_family[family]["open_net_rub"]), 2)
+        notes.append(f"watchdog intraday: {family} -> observe-only after {total_net:.2f} RUB family damage")
     for secid in observe_tickers[:4]:
-        net = round(float(by_ticker[secid]["net_rub"]), 2)
-        notes.append(f"watchdog intraday: {secid} -> observe-only after {net:.2f} RUB daily ticker damage")
+        total_net = round(float(by_ticker[secid]["closed_net_rub"] + by_ticker[secid]["open_net_rub"]), 2)
+        notes.append(f"watchdog intraday: {secid} -> observe-only after {total_net:.2f} RUB ticker damage")
     return {
         "trade_date": trade_date,
         "observe_only_tickers": observe_tickers,
@@ -278,7 +330,7 @@ def compute_intraday_watchdog_overrides(run_dir: Path, trade_date: str) -> dict:
     }
 
 
-def refresh_intraday_killer_policy(project_root: Path, run_dir: Path) -> tuple[bool, str]:
+def refresh_intraday_killer_policy(project_root: Path, run_dir: Path, dashboard_url: str = "") -> tuple[bool, str]:
     policy_path = project_root / "reports" / "autonomy" / "latest" / "latest_auto_policy.json"
     if not policy_path.exists():
         return False, "policy_missing"
@@ -294,7 +346,7 @@ def refresh_intraday_killer_policy(project_root: Path, run_dir: Path) -> tuple[b
     if not trade_date:
         overrides = {"trade_date": "", "observe_only_tickers": [], "observe_only_families": [], "notes": []}
     else:
-        overrides = compute_intraday_watchdog_overrides(run_dir, trade_date)
+        overrides = compute_intraday_watchdog_overrides(run_dir, trade_date, load_dashboard_state(dashboard_url) if dashboard_url else {})
 
     active = payload.get("active") if isinstance(payload.get("active"), dict) else {}
     active_base = payload.get("active_base") if isinstance(payload.get("active_base"), dict) else strip_watchdog_overrides(active, current_overrides)
@@ -399,7 +451,7 @@ def main() -> int:
 
     log(log_path, f"watchdog_start run_name={args.run_name} service={args.service_name} dashboard={args.dashboard_url} health_stale_sec={args.health_stale_sec} startup_grace_sec={args.startup_grace_sec} no_remediate={args.no_remediate}")
 
-    changed, summary = refresh_intraday_killer_policy(project_root, run_dir)
+    changed, summary = refresh_intraday_killer_policy(project_root, run_dir, args.dashboard_url)
     log(log_path, f"intraday_policy_refresh changed={changed} {summary}")
 
     now_local = datetime.now()
