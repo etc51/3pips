@@ -65,14 +65,14 @@ def restart_allowed_now(project_root: Path, run_name: str) -> tuple[bool, str]:
     now_msk = datetime.now(MSK)
     weekday = now_msk.weekday() < 5
     current = now_msk.time()
-    # Keep the runtime untouched through the active session and late neo handling window.
-    if weekday and dt_time(10, 0) <= current <= dt_time(23, 55):
+    # Keep the runtime untouched while any contour can still open new trades.
+    # After the entry windows close, the bot can restore open positions from disk,
+    # so delayed updates should be allowed to land the same evening.
+    if weekday and dt_time(10, 0) <= current <= dt_time(19, 5):
         return False, f"trading_window {now_msk.strftime('%H:%M')}"
     open_count, details = runtime_open_positions(project_root, run_name)
-    if open_count > 0:
-        suffix = f" {' '.join(details[:6])}" if details else ""
-        return False, f"open_positions={open_count}{suffix}"
-    return True, f"safe_window {now_msk.strftime('%H:%M')}"
+    suffix = f" open_positions={open_count} {' '.join(details[:6])}" if open_count > 0 and details else ""
+    return True, f"safe_window {now_msk.strftime('%H:%M')}{suffix}"
 
 
 def main() -> int:
