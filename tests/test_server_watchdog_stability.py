@@ -4,6 +4,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -93,6 +94,46 @@ class ServerWatchdogStabilityTest(unittest.TestCase):
             payload, age_sec = sw.load_active_rollout_lock(lock_path, max_age_sec=60)
         self.assertEqual(payload.get("reason"), "apply_remote_update")
         self.assertGreaterEqual(age_sec, 0.0)
+
+    def test_main_exits_early_under_maintenance_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp) / "project"
+            runtime_dir = project_root / "reports" / "runtime"
+            run_dir = project_root / "reports" / "paper_runs" / "v7_live_20260525"
+            runtime_dir.mkdir(parents=True)
+            run_dir.mkdir(parents=True)
+            state_path = runtime_dir / "server_watchdog_state.json"
+            log_path = runtime_dir / "server_watchdog.log"
+
+            argv = [
+                "server_watchdog.py",
+                "--project-root",
+                str(project_root),
+                "--state-path",
+                str(state_path),
+                "--log-path",
+                str(log_path),
+            ]
+            with patch.object(
+                sw,
+                "load_active_rollout_lock",
+                return_value=({"reason": "apply_remote_update"}, 3.0),
+            ), patch.object(
+                sw.subprocess,
+                "run",
+                return_value=SimpleNamespace(stdout="test-host\n", returncode=0, stderr=""),
+            ), patch.object(
+                sys,
+                "argv",
+                argv,
+            ):
+                rc = sw.main()
+
+            self.assertEqual(rc, 0)
+            self.assertTrue(state_path.exists())
+            payload = __import__("json").loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload.get("status"), "maintenance_lock")
+            self.assertIn("maintenance_lock", payload.get("last_summary", ""))
 
 
 if __name__ == "__main__":

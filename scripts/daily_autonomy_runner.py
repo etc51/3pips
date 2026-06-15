@@ -23,8 +23,7 @@ from autonomy_common import (  # noqa: E402
     safe_float,
     safe_int,
     send_email,
-    tail_text,
-    write_csv_rows,
+    smtp_settings,
     write_json,
     write_text,
 )
@@ -42,6 +41,13 @@ from auto_policy_utils import (  # noqa: E402
     policy_group_blackout_windows,
 )
 from auto_policy_merge import merge_watchdog_overrides, summarize_active_policy  # noqa: E402
+from daily_autonomy_outputs import (  # noqa: E402
+    build_manifest_payload,
+    copy_bundle_outputs,
+    persist_nightly_cycle_status,
+    write_analysis_outputs,
+    write_research_outputs,
+)
 
 
 PREMIUM_FUTURES_RATE = 0.00025
@@ -302,6 +308,12 @@ def entry_dt(row: dict):
 def hour_bucket(row: dict) -> str:
     dt = entry_dt(row)
     return f"{dt.hour:02d}:00" if dt else "unknown"
+
+
+def annotate_trade_rows(rows: list[dict], profiles: dict[str, dict]) -> None:
+    for row in rows:
+        row["family"] = family_for_row(row, profiles)
+        row["group_key"] = f"{row.get('portfolio_group', '')}/{row.get('contour', '')}"
 
 
 def trade_date_value(row: dict) -> str:
@@ -1388,8 +1400,10 @@ def build_nightly_cycle_status(
     strategy_lab: list[dict],
     restriction_rows: list[dict],
     auto_policy: dict,
+    email_to: str,
 ) -> dict:
     active = auto_policy.get("active") if isinstance(auto_policy.get("active"), dict) else {}
+    email_settings = smtp_settings(default_recipient=email_to)
     return {
         "trade_date": trade_date,
         "generated_at": now_str(),
@@ -1423,8 +1437,14 @@ def build_nightly_cycle_status(
             },
             "summary": {
                 "status": "ok",
-                "archive_ready": True,
+                "archive_ready": False,
                 "archive_path": "",
+            },
+            "email": {
+                "status": "ready" if email_settings["enabled"] else "disabled_missing_smtp",
+                "configured": bool(email_settings["enabled"]),
+                "recipient": str(email_settings.get("recipient") or email_to),
+                "sent": False,
             },
         },
     }
@@ -3305,13 +3325,8 @@ def main() -> int:
     profiles = load_profiles(profiles_path)
     all_wide_spread_rows = load_wide_spread_reviews(run_dir)
 
-    for row in all_rows:
-        row["family"] = family_for_row(row, profiles)
-        row["group_key"] = f"{row.get('portfolio_group','')}/{row.get('contour','')}"
-
-    for row in day_rows:
-        row["family"] = family_for_row(row, profiles)
-        row["group_key"] = f"{row.get('portfolio_group','')}/{row.get('contour','')}"
+    annotate_trade_rows(all_rows, profiles)
+    annotate_trade_rows(day_rows, profiles)
 
     day_history = build_day_history(all_rows, profiles)
     recurring_tickers = build_recurring_killers(day_history, "worst_ticker")
@@ -3414,173 +3429,83 @@ def main() -> int:
         strategy_lab,
         runtime_trade_model,
     )
-    write_text(analysis_dir / "daily_summary.md", summary_md)
-    write_json(
-        analysis_dir / "daily_summary.json",
-        {
-            "trade_date": trade_date,
-            "generated_at": now_str(),
-            "overall": overall,
-            "open_positions": open_summary,
-            "recommendations": recommendations,
-            "best_consensus_scenario": pick_best_consensus_scenario(scenario_consensus),
-            "strategy_lab_top": strategy_lab[:10],
-            "microstructure_top": microstructure_summary[:10],
-            "margin_mode": runtime_trade_model.get("margin_mode"),
-            "fee_model": runtime_trade_model.get("fee_model"),
-        },
+    best_consensus_scenario = pick_best_consensus_scenario(scenario_consensus)
+    write_analysis_outputs(
+        analysis_dir,
+        trade_date=trade_date,
+        overall=overall,
+        open_summary=open_summary,
+        recommendations=recommendations,
+        best_consensus_scenario=best_consensus_scenario,
+        strategy_lab=strategy_lab,
+        microstructure_summary=microstructure_summary,
+        runtime_trade_model=runtime_trade_model,
+        summary_md=summary_md,
+        by_portfolio=by_portfolio,
+        by_group=by_group,
+        by_ticker=by_ticker,
+        by_family=by_family,
+        by_hour=by_hour,
+        worst_trades=worst_trades,
+        best_tickers=best_tickers,
+        worst_tickers=worst_tickers,
+        worst_families=worst_families,
+        roll_watch=roll_watch,
+        day_history=day_history,
+        recurring_tickers=recurring_tickers,
+        recurring_families=recurring_families,
+        margin_timeline=margin_timeline,
+        margin_summary=margin_summary,
+        auto_policy=auto_policy,
+        restriction_rows=restriction_rows,
+        render_auto_policy_markdown=render_auto_policy_markdown,
     )
-    write_csv_rows(analysis_dir / "by_portfolio.csv", by_portfolio)
-    write_csv_rows(analysis_dir / "by_group.csv", by_group)
-    write_csv_rows(analysis_dir / "by_ticker.csv", by_ticker)
-    write_csv_rows(analysis_dir / "by_family.csv", by_family)
-    write_csv_rows(analysis_dir / "by_hour.csv", by_hour)
-    write_csv_rows(analysis_dir / "worst_trades.csv", worst_trades)
-    write_csv_rows(analysis_dir / "best_tickers.csv", best_tickers)
-    write_csv_rows(analysis_dir / "worst_tickers.csv", worst_tickers)
-    write_csv_rows(analysis_dir / "worst_families.csv", worst_families)
-    write_csv_rows(analysis_dir / "roll_watch.csv", roll_watch)
-    write_csv_rows(analysis_dir / "day_history.csv", day_history)
-    write_csv_rows(analysis_dir / "recurring_killer_tickers.csv", recurring_tickers)
-    write_csv_rows(analysis_dir / "recurring_killer_families.csv", recurring_families)
-    write_csv_rows(analysis_dir / "microstructure_summary.csv", microstructure_summary)
-    write_csv_rows(analysis_dir / "margin_timeline.csv", margin_timeline)
-    write_csv_rows(analysis_dir / "margin_summary.csv", margin_summary)
-    write_text(analysis_dir / "recommendations.md", "\n".join(f"- {line}" for line in recommendations) + ("\n" if recommendations else ""))
-    write_json(analysis_dir / "auto_policy.json", auto_policy)
-    write_text(analysis_dir / "auto_policy.md", render_auto_policy_markdown(auto_policy))
-    write_csv_rows(analysis_dir / "restrictions_runtime.csv", restriction_rows)
-
-    for row in research_day:
-        row["sample"] = "latest_day"
-    for row in research_all:
-        row["sample"] = "all_sample"
-    write_csv_rows(research_dir / "policy_sweep_latest_day.csv", research_day)
-    write_csv_rows(research_dir / "policy_sweep_all_sample.csv", research_all)
-    write_csv_rows(research_dir / "policy_sweep_daily_history.csv", scenario_history)
-    write_csv_rows(research_dir / "policy_sweep_consensus.csv", scenario_consensus)
-    write_text(
-        research_dir / "research_summary.md",
-        markdown_top("Research Top: Latest Day", research_day, ["scenario", "trades", "win_rate_pct", "net_rub", "expectancy_rub", "note"], limit=15)
-        + "\n"
-        + markdown_top("Research Top: All Sample", research_all, ["scenario", "trades", "win_rate_pct", "net_rub", "expectancy_rub", "note"], limit=15)
-        + "\n"
-        + markdown_top("Research Top: Consensus", scenario_consensus, ["scenario", "days", "beat_base_days", "delta_total_rub", "median_daily_net_rub", "worst_day_rub", "note"], limit=15),
+    strategy_lab_counts = write_research_outputs(
+        research_dir,
+        research_day=research_day,
+        research_all=research_all,
+        scenario_history=scenario_history,
+        scenario_consensus=scenario_consensus,
+        optimizer_candidates=optimizer_candidates,
+        strategy_lab=strategy_lab,
+        markdown_top=markdown_top,
     )
-    write_csv_rows(research_dir / "optimizer_candidates.csv", optimizer_candidates)
-    write_text(
-        research_dir / "optimizer_summary.md",
-        markdown_top(
-            "Optimizer Candidates",
-            optimizer_candidates,
-            ["source", "scenario", "candidate_type", "recommended_use", "net_rub", "expectancy_rub", "delta_total_rub", "beat_base_days", "note"],
-            limit=20,
-        ),
-    )
-    strategy_lab_counts = {
-        "total": len(strategy_lab),
-        "runtime_policy": sum(1 for row in strategy_lab if str(row.get("action_type") or "") == "runtime_policy"),
-        "shadow_backtest": sum(1 for row in strategy_lab if str(row.get("action_type") or "") == "shadow_backtest"),
-        "research_then_runtime": sum(1 for row in strategy_lab if str(row.get("action_type") or "") == "research_then_runtime"),
-        "autopromote_ready": sum(1 for row in strategy_lab if bool(row.get("autopromote_ready"))),
-    }
-    write_csv_rows(research_dir / "strategy_lab_candidates.csv", strategy_lab)
-    write_text(
-        research_dir / "strategy_lab_summary.md",
-        "\n".join(
-            [
-                "# Strategy Lab",
-                "",
-                f"- total_candidates: {strategy_lab_counts['total']}",
-                f"- runtime_policy: {strategy_lab_counts['runtime_policy']}",
-                f"- shadow_backtest: {strategy_lab_counts['shadow_backtest']}",
-                f"- research_then_runtime: {strategy_lab_counts['research_then_runtime']}",
-                f"- autopromote_ready: {strategy_lab_counts['autopromote_ready']}",
-                "",
-                markdown_top(
-                    "Top Strategy Lab Candidates",
-                    strategy_lab,
-                    ["rank", "candidate", "category", "action_type", "safe_mode", "autopromote_ready", "evidence", "recommended_next_step"],
-                    limit=20,
-                ),
-            ]
-        ),
-    )
-
-    raw_dir = bundle_dir / "raw"
-    ensure_dir(raw_dir)
-    write_csv_rows(raw_dir / "day_primary_trades.csv", day_rows)
-    shadow_rows = filter_trade_date(load_shadow_trades(run_dir), trade_date)
-    if shadow_rows:
-        write_csv_rows(raw_dir / "day_shadow_trades.csv", shadow_rows)
-
-    for pattern in ["*_health.json", "*_paper_open_positions.json", "*_instrument_specs.csv", "*_startup_status.csv", "*_roll_state.json"]:
-        for path in run_dir.glob(pattern):
-            shutil.copy2(path, raw_dir / path.name)
-    for pattern in ["*_wide_spread_review.csv", "*_shadow_exit_models.csv"]:
-        for path in run_dir.glob(pattern):
-            shutil.copy2(path, raw_dir / path.name)
 
     runtime_dir = project_root / "reports" / "runtime"
-    write_text(raw_dir / "v7_paper_supervisor_20260525.tail.log", tail_text(runtime_dir / "v7_paper_supervisor_20260525.log", lines=500))
-    write_text(raw_dir / "server_watchdog.tail.log", tail_text(runtime_dir / "server_watchdog.log", lines=500))
-
-    shutil.copy2(analysis_dir / "daily_summary.md", bundle_dir / "daily_summary.md")
-    shutil.copy2(analysis_dir / "auto_policy.md", bundle_dir / "auto_policy.md")
-    shutil.copy2(research_dir / "research_summary.md", bundle_dir / "research_summary.md")
-    shutil.copy2(research_dir / "optimizer_summary.md", bundle_dir / "optimizer_summary.md")
-    shutil.copy2(research_dir / "strategy_lab_summary.md", bundle_dir / "strategy_lab_summary.md")
-    for path in [
-        analysis_dir / "day_history.csv",
-        analysis_dir / "by_portfolio.csv",
-        analysis_dir / "microstructure_summary.csv",
-        analysis_dir / "margin_timeline.csv",
-        analysis_dir / "margin_summary.csv",
-        analysis_dir / "restrictions_runtime.csv",
-        analysis_dir / "recurring_killer_tickers.csv",
-        analysis_dir / "recurring_killer_families.csv",
-        analysis_dir / "worst_tickers.csv",
-        analysis_dir / "worst_families.csv",
-        research_dir / "policy_sweep_latest_day.csv",
-        research_dir / "policy_sweep_all_sample.csv",
-        research_dir / "policy_sweep_daily_history.csv",
-        research_dir / "policy_sweep_consensus.csv",
-        research_dir / "optimizer_candidates.csv",
-        research_dir / "strategy_lab_candidates.csv",
-    ]:
-        if path.exists():
-            shutil.copy2(path, bundle_dir / path.name)
-    manifest_payload = {
-        "trade_date": trade_date,
-        "generated_at": now_str(),
-        "overall": overall,
-        "open_positions": open_summary,
-        "margin_mode": runtime_trade_model.get("margin_mode"),
-        "fee_model": runtime_trade_model.get("fee_model"),
-        "portfolio_margin_day": margin_summary,
-        "recommendations": recommendations,
-        "best_latest_day_scenario": research_day[0] if research_day else {},
-        "best_all_sample_scenario": research_all[0] if research_all else {},
-        "best_consensus_scenario": pick_best_consensus_scenario(scenario_consensus),
-        "day_history_tail": day_history[-10:],
-        "day_class_counts": {
-            "good_day": sum(1 for row in day_history if row.get("day_class") == "good_day"),
-            "bad_day": sum(1 for row in day_history if row.get("day_class") == "bad_day"),
-            "killer_day": sum(1 for row in day_history if row.get("day_class") == "killer_day"),
-        },
-        "top_killer_tickers": worst_tickers[:3],
-        "top_killer_families": worst_families[:3],
-        "recurring_killer_tickers": recurring_tickers[:5],
-        "recurring_killer_families": recurring_families[:5],
-        "microstructure_top": microstructure_summary[:10],
-        "research_consensus_top": scenario_consensus[:10],
-        "optimizer_top": optimizer_candidates[:10],
-        "strategy_lab_top": strategy_lab[:10],
-        "strategy_lab_counts": strategy_lab_counts,
-        "restrictions_runtime": restriction_rows,
-        "roll_watch": roll_watch[:12],
-        "auto_policy": auto_policy,
-    }
+    shadow_rows = filter_trade_date(load_shadow_trades(run_dir), trade_date)
+    copy_bundle_outputs(
+        bundle_dir,
+        day_rows=day_rows,
+        shadow_rows=shadow_rows,
+        run_dir=run_dir,
+        runtime_dir=runtime_dir,
+        analysis_dir=analysis_dir,
+        research_dir=research_dir,
+    )
+    manifest_payload = build_manifest_payload(
+        trade_date=trade_date,
+        overall=overall,
+        open_summary=open_summary,
+        runtime_trade_model=runtime_trade_model,
+        margin_summary=margin_summary,
+        recommendations=recommendations,
+        research_day=research_day,
+        research_all=research_all,
+        best_consensus_scenario=best_consensus_scenario,
+        day_history=day_history,
+        worst_tickers=worst_tickers,
+        worst_families=worst_families,
+        recurring_tickers=recurring_tickers,
+        recurring_families=recurring_families,
+        microstructure_summary=microstructure_summary,
+        scenario_consensus=scenario_consensus,
+        optimizer_candidates=optimizer_candidates,
+        strategy_lab=strategy_lab,
+        strategy_lab_counts=strategy_lab_counts,
+        restriction_rows=restriction_rows,
+        roll_watch=roll_watch,
+        auto_policy=auto_policy,
+    )
     write_json(bundle_dir / "manifest.json", manifest_payload)
 
     nightly_cycle_status = build_nightly_cycle_status(
@@ -3593,29 +3518,25 @@ def main() -> int:
         strategy_lab=strategy_lab,
         restriction_rows=restriction_rows,
         auto_policy=auto_policy,
+        email_to=args.email_to,
     )
-    write_json(analysis_dir / "nightly_cycle_status.json", nightly_cycle_status)
-    write_json(bundle_dir / "nightly_cycle_status.json", nightly_cycle_status)
+    persist_nightly_cycle_status(
+        nightly_cycle_status,
+        analysis_dir / "nightly_cycle_status.json",
+        bundle_dir / "nightly_cycle_status.json",
+    )
 
     zip_path = archive_root / f"3pips_daily_{trade_date}.zip"
     if zip_path.exists():
         zip_path.unlink()
     build_zip(zip_path, bundle_dir)
+    nightly_cycle_status["stages"]["summary"]["archive_ready"] = True
     nightly_cycle_status["stages"]["summary"]["archive_path"] = str(zip_path)
-    write_json(analysis_dir / "nightly_cycle_status.json", nightly_cycle_status)
-    write_json(bundle_dir / "nightly_cycle_status.json", nightly_cycle_status)
-
-    latest_summary = manifest_root / "latest_daily_summary.md"
-    write_text(latest_summary, summary_md)
-    write_json(manifest_root / "latest_auto_policy.json", auto_policy)
-    write_json(manifest_root / "latest_nightly_cycle_status.json", nightly_cycle_status)
-    latest_manifest_payload = {
-        **manifest_payload,
-        "archive": str(zip_path),
-        "nightly_cycle_status": nightly_cycle_status,
-    }
-    write_json(manifest_root / "latest_daily_manifest.json", latest_manifest_payload)
-    write_json(manifest_root / "latest_manifest.json", latest_manifest_payload)
+    persist_nightly_cycle_status(
+        nightly_cycle_status,
+        analysis_dir / "nightly_cycle_status.json",
+        bundle_dir / "nightly_cycle_status.json",
+    )
 
     subject = f"[3pips] daily {trade_date} net={overall['net_rub']} trades={overall['trades']}"
     body_lines = [
@@ -3644,6 +3565,26 @@ def main() -> int:
         ok, email_status = False, "skipped_already_sent"
     else:
         ok, email_status = send_email(subject, "\n".join(body_lines), recipient=args.email_to, attachments=[zip_path])
+    email_stage = nightly_cycle_status["stages"].setdefault("email", {})
+    email_stage["status"] = email_status
+    email_stage["sent"] = bool(ok)
+    email_stage["archive"] = str(zip_path)
+    persist_nightly_cycle_status(
+        nightly_cycle_status,
+        analysis_dir / "nightly_cycle_status.json",
+        bundle_dir / "nightly_cycle_status.json",
+        manifest_root / "latest_nightly_cycle_status.json",
+    )
+    latest_summary = manifest_root / "latest_daily_summary.md"
+    write_text(latest_summary, summary_md)
+    write_json(manifest_root / "latest_auto_policy.json", auto_policy)
+    latest_manifest_payload = {
+        **manifest_payload,
+        "archive": str(zip_path),
+        "nightly_cycle_status": nightly_cycle_status,
+    }
+    write_json(manifest_root / "latest_daily_manifest.json", latest_manifest_payload)
+    write_json(manifest_root / "latest_manifest.json", latest_manifest_payload)
     write_json(
         manifest_root / "latest_email_status.json",
         {

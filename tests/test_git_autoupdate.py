@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -63,6 +64,55 @@ class GitAutoupdateWindowTest(unittest.TestCase):
             self.assertTrue(lock_path.exists())
             gau.clear_rollout_lock(lock_path)
             self.assertFalse(lock_path.exists())
+
+    def test_main_defers_before_merge_when_window_is_unsafe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp) / "project"
+            runtime_dir = project_root / "reports" / "runtime"
+            runtime_dir.mkdir(parents=True)
+            pending_path = runtime_dir / "git_autoupdate_pending_restart.json"
+
+            calls: list[tuple[list[str], Path]] = []
+
+            def fake_run(cmd: list[str], cwd: Path):
+                calls.append((cmd, cwd))
+                if cmd[:4] == ["git", "-c", f"safe.directory={project_root}", "status"]:
+                    return SimpleNamespace(returncode=0, stdout="", stderr="")
+                if cmd[:4] == ["git", "-c", f"safe.directory={project_root}", "fetch"]:
+                    return SimpleNamespace(returncode=0, stdout="", stderr="")
+                if cmd[:4] == ["git", "-c", f"safe.directory={project_root}", "rev-parse"]:
+                    if cmd[-1] == "HEAD":
+                        return SimpleNamespace(returncode=0, stdout="oldsha\n", stderr="")
+                    if cmd[-1] == "origin/rollback-20260525-a26cf99":
+                        return SimpleNamespace(returncode=0, stdout="newsha\n", stderr="")
+                if cmd[:4] == ["git", "-c", f"safe.directory={project_root}", "diff"]:
+                    return SimpleNamespace(returncode=0, stdout="scripts/server_watchdog.py\n", stderr="")
+                raise AssertionError(f"unexpected command: {cmd}")
+
+            argv = [
+                "git_autoupdate.py",
+                "--project-root",
+                str(project_root),
+                "--branch",
+                "rollback-20260525-a26cf99",
+                "--pending-restart-path",
+                str(pending_path),
+            ]
+            with patch.object(gau, "run", side_effect=fake_run), patch.object(
+                gau,
+                "restart_allowed_now",
+                return_value=(False, "entry_window 11:00"),
+            ), patch.object(sys, "argv", argv):
+                rc = gau.main()
+
+            self.assertEqual(rc, 0)
+            self.assertTrue(pending_path.exists())
+            payload = __import__("json").loads(pending_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload.get("old_head"), "oldsha")
+            self.assertEqual(payload.get("new_head"), "newsha")
+            self.assertEqual(payload.get("merged"), False)
+            self.assertEqual(payload.get("deferred_because"), "entry_window 11:00")
+            self.assertFalse(any("merge" in cmd for cmd, _cwd in calls))
 
 
 if __name__ == "__main__":
