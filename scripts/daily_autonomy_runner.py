@@ -1797,7 +1797,15 @@ def build_auto_policy(
         for row in research_day
         if scenario_kind(str(row.get("scenario") or "")) == "group_family_blacklist"
     ]
+    best_latest_blackout_overlay = next(
+        (row for row in research_day if scenario_kind(str(row.get("scenario") or "")) == "entry_blackout"),
+        {},
+    )
     best_consensus_overlay = pick_best_consensus_scenario(research_consensus)
+    best_consensus_blackout_overlay = next(
+        (row for row in research_consensus if scenario_kind(str(row.get("scenario") or "")) == "entry_blackout"),
+        {},
+    )
     base_day_overlay = next((row for row in research_day if str(row.get("scenario") or "") == "base"), {})
     base_all_overlay = next((row for row in research_all if str(row.get("scenario") or "") == "base"), {})
     pause_ticker_day_overlay = next((row for row in research_day if str(row.get("scenario") or "") == "pause_ticker_after_1_loss"), {})
@@ -1815,7 +1823,7 @@ def build_auto_policy(
         "candidate_stop_cap_rub": None,
         "notes": [],
     }
-    for candidate in [best_consensus_overlay, best_latest_overlay]:
+    for candidate in [best_consensus_overlay, best_latest_overlay, best_consensus_blackout_overlay, best_latest_blackout_overlay]:
         scenario = str(candidate.get("scenario") or "")
         candidate_entry_start = scenario_entry_start(scenario)
         if candidate_entry_start and not proposed["candidate_entry_start"]:
@@ -1867,6 +1875,12 @@ def build_auto_policy(
     consensus_entry_cutoff = scenario_entry_cutoff(consensus_scenario)
     consensus_entry_start = scenario_entry_start(consensus_scenario)
     consensus_blackout_windows = scenario_blackout_windows(consensus_scenario)
+    blackout_consensus_scenario = str(best_consensus_blackout_overlay.get("scenario") or "")
+    blackout_consensus_days = safe_int(best_consensus_blackout_overlay.get("days"))
+    blackout_consensus_beats = safe_int(best_consensus_blackout_overlay.get("beat_base_days"))
+    blackout_consensus_delta = safe_float(best_consensus_blackout_overlay.get("delta_total_rub"))
+    blackout_consensus_latest_delta = safe_float(best_consensus_blackout_overlay.get("latest_day_delta_rub"))
+    blackout_consensus_windows = scenario_blackout_windows(blackout_consensus_scenario)
     if (
         consensus_entry_start
         and consensus_days >= 2
@@ -1902,6 +1916,20 @@ def build_auto_policy(
         active["notes"].append(
             f"Авто-policy: новые входы блокируются в окне {', '.join(consensus_blackout_windows)}, "
             f"потому что {consensus_scenario} устойчиво улучшает результат против base."
+        )
+    if (
+        blackout_consensus_scenario
+        and blackout_consensus_scenario != consensus_scenario
+        and blackout_consensus_windows
+        and blackout_consensus_days >= 2
+        and blackout_consensus_beats >= blackout_consensus_days
+        and blackout_consensus_delta >= 1_000
+        and blackout_consensus_latest_delta >= 500
+    ):
+        active["entry_blackout_windows"] = merge_blackout_windows(active.get("entry_blackout_windows"), blackout_consensus_windows)
+        active["notes"].append(
+            f"Авто-policy: новые входы блокируются в окне {', '.join(blackout_consensus_windows)}, "
+            f"потому что лучший blackout-сценарий {blackout_consensus_scenario} устойчиво улучшает результат против base."
         )
 
     latest_scenario = str(best_latest_overlay.get("scenario") or "")
