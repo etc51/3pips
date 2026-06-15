@@ -7,6 +7,9 @@ import subprocess
 import time
 from datetime import datetime, time as dt_time
 from pathlib import Path
+from urllib.error import URLError
+from urllib.parse import urlsplit, urlunsplit
+from urllib.request import urlopen
 from zoneinfo import ZoneInfo
 
 from autonomy_common import now_str
@@ -75,6 +78,71 @@ def runtime_open_positions(project_root: Path, run_name: str) -> tuple[int, list
     return total, details
 
 
+def dashboard_health_url(dashboard_url: str) -> str:
+    parts = urlsplit(dashboard_url)
+    path = parts.path or ""
+    if path.endswith("/healthz") or path == "/healthz":
+        return dashboard_url
+    if path in {"", "/"}:
+        clean = ""
+    else:
+        clean = path[:-1] if path.endswith("/") else path
+    return urlunsplit((parts.scheme, parts.netloc, f"{clean}/healthz", "", ""))
+
+
+def dashboard_ok(dashboard_url: str) -> tuple[bool, str]:
+    try:
+        with urlopen(dashboard_health_url(dashboard_url), timeout=5) as response:
+            return True, f"http_{response.status}"
+    except URLError as exc:
+        return False, f"urlerror:{exc}"
+    except Exception as exc:
+        return False, f"error:{exc}"
+
+
+def runtime_health_issues(project_root: Path, run_name: str, health_stale_sec: int) -> list[str]:
+    run_dir = project_root / "reports" / "paper_runs" / run_name
+    issues: list[str] = []
+    health_files = sorted(run_dir.glob("*_health.json"))
+    if not health_files:
+        return ["no_health_files"]
+    now = time.time()
+    for path in health_files:
+        try:
+            age = int(now - path.stat().st_mtime)
+        except FileNotFoundError:
+            issues.append(f"missing_health[{path.name}]")
+            continue
+        if age > health_stale_sec:
+            issues.append(f"stale_health[{path.name}] age={age}s")
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            issues.append(f"bad_health_json[{path.name}] {type(exc).__name__}: {exc}")
+            continue
+        if not isinstance(payload, dict):
+            issues.append(f"bad_health_json[{path.name}] not_dict")
+    for path in sorted(run_dir.glob("*_paper_open_positions.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            issues.append(f"bad_open_positions[{path.name}] {type(exc).__name__}: {exc}")
+            continue
+        if not isinstance(payload, list):
+            issues.append(f"bad_open_positions[{path.name}] not_list")
+    return issues
+
+
+def verify_runtime_ready(project_root: Path, run_name: str, dashboard_url: str, health_stale_sec: int) -> list[str]:
+    issues: list[str] = []
+    ok, dash_status = dashboard_ok(dashboard_url)
+    if not ok:
+        issues.append(f"dashboard_down[{dash_status}]")
+    issues.extend(runtime_health_issues(project_root, run_name, health_stale_sec))
+    return issues
+
+
 def active_entry_window(now_msk: datetime) -> bool:
     return now_msk.weekday() < 5 and ENTRY_WINDOW_START <= now_msk.time() <= ENTRY_WINDOW_END
 
@@ -100,6 +168,8 @@ def main() -> int:
     parser.add_argument("--log-path", default="")
     parser.add_argument("--restart-wait-sec", type=int, default=20)
     parser.add_argument("--run-name", default="v7_live_20260525")
+    parser.add_argument("--dashboard-url", default="http://127.0.0.1:8768/")
+    parser.add_argument("--health-stale-sec", type=int, default=180)
     parser.add_argument("--pending-restart-path", default="")
     parser.add_argument("--rollout-lock-path", default="")
     args = parser.parse_args()
@@ -266,6 +336,21 @@ def main() -> int:
         active = run(["systemctl", "is-active", args.service_name], project_root)
         if active.returncode != 0 or active.stdout.strip() != "active":
             log(log_path, f"fail reason=service_not_active status={active.stdout.strip()} stderr={active.stderr.strip()[:300]}")
+            return 1
+
+        issues = verify_runtime_ready(project_root, args.run_name, args.dashboard_url, args.health_stale_sec)
+        if issues:
+            pending = {
+                "updated_at": now_str(),
+                "old_head": pending_payload.get("old_head", previous_head),
+                "new_head": target_sha,
+                "reason": update_reason or "post_restart_verification_failed",
+                "deferred_because": "post_restart_verification_failed",
+                "deps_ready": True,
+                "merged": True,
+            }
+            write_pending_restart(pending_restart_path, pending)
+            log(log_path, f"fail reason=post_restart_verification summary={' ; '.join(issues)}")
             return 1
 
         if pending_restart_path.exists():
