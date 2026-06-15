@@ -366,6 +366,21 @@ def state_family(st: State) -> str:
     return st.profile.family or contract_family(st.spec.secid)
 
 
+def is_resource_exhausted_error(exc: Exception) -> bool:
+    text = str(exc)
+    return "RESOURCE_EXHAUSTED" in text or "resource exhausted" in text.lower()
+
+
+def rate_limit_backoff_sec(exc: Exception, default_sec: float = 5.0) -> float:
+    match = re.search(r"ratelimit_reset=(\d+)", str(exc))
+    if not match:
+        return max(2.0, float(default_sec))
+    try:
+        return max(2.0, float(match.group(1)) + 1.0)
+    except Exception:
+        return max(2.0, float(default_sec))
+
+
 def has_roll_family_conflict(states: list[State], spec: Spec, family: str, roll_window_days: float) -> str | None:
     if roll_window_days <= 0:
         return None
@@ -1327,11 +1342,22 @@ def poll_market_fallback(
 ) -> None:
     from t_tech.invest import Client
 
+    rate_limit_pause_until = 0.0
+    last_backoff_notice = 0.0
     while not stop_event.is_set():
         try:
             with Client(token) as poll_client:
                 while not stop_event.is_set():
                     time.sleep(max(0.5, float(args.fallback_poll_sec)))
+                    now_mono = time.monotonic()
+                    if now_mono < rate_limit_pause_until:
+                        if now_mono - last_backoff_notice >= 15:
+                            print(
+                                f"{now_str()} POLL backoff active wait_sec={rate_limit_pause_until - now_mono:.1f}",
+                                flush=True,
+                            )
+                            last_backoff_notice = now_mono
+                        continue
                     if time.monotonic() - last_stream_event[0] < float(args.stream_stale_sec):
                         continue
                     try:
@@ -1340,13 +1366,32 @@ def poll_market_fallback(
                     except Exception as exc:
                         print(f"{now_str()} POLL last_price_error={exc}", flush=True)
                         price_by_uid = {}
+                        if is_resource_exhausted_error(exc):
+                            backoff_sec = rate_limit_backoff_sec(exc)
+                            rate_limit_pause_until = max(rate_limit_pause_until, time.monotonic() + backoff_sec)
+                            print(
+                                f"{now_str()} POLL backoff resource_exhausted stage=last_prices wait_sec={backoff_sec:.1f}",
+                                flush=True,
+                            )
+                            last_backoff_notice = 0.0
+                            continue
                     with lock:
+                        rate_limited = False
                         for spec in specs:
                             try:
                                 orderbook = poll_client.market_data.get_order_book(figi=spec.figi, depth=int(args.orderbook_depth))
                             except Exception as exc:
                                 orderbook = None
                                 print(f"{now_str()} POLL orderbook_error {spec.secid} {exc}", flush=True)
+                                if is_resource_exhausted_error(exc):
+                                    backoff_sec = rate_limit_backoff_sec(exc)
+                                    rate_limit_pause_until = max(rate_limit_pause_until, time.monotonic() + backoff_sec)
+                                    print(
+                                        f"{now_str()} POLL backoff resource_exhausted stage=order_book secid={spec.secid} wait_sec={backoff_sec:.1f}",
+                                        flush=True,
+                                    )
+                                    last_backoff_notice = 0.0
+                                    rate_limited = True
                             for contour in ["strict", "aggressive"]:
                                 st = state_by_uid.get((spec.uid, contour))
                                 if st is None:
@@ -1366,6 +1411,8 @@ def poll_market_fallback(
                                     actual_trigger_source_override="polling_fallback",
                                     force_exit_reason=force_reason,
                                 )
+                            if rate_limited:
+                                break
                         write_open_positions(Path(args.open_positions_log), states)
                         write_microstructure_snapshot(Path(args.snapshot_log), states, trading_enabled=True)
                         write_bot_health(
