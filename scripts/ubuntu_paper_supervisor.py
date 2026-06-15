@@ -186,6 +186,7 @@ class Supervisor:
             "--fallback-poll-sec", "2",
             "--no-trade-before", "10:15",
             "--no-new-after", "17:45",
+            "--force-close-at", "23:50",
             "--no-new-expiry-days", "10",
             "--expiry-force-close-days", "3",
             "--roll-observe-days", "21",
@@ -203,7 +204,7 @@ class Supervisor:
         ]
         if name == "neo":
             args = [arg for arg in args if arg not in {"--no-trade-before", "10:15", "--no-new-after", "17:45"}]
-            args += ["--no-new-after", "19:00", "--force-close-at", "23:50"]
+            args += ["--no-new-after", "19:00"]
         return args
 
     def start_process(self, name: str, argv: list[str], pid_path: Path, reason: str) -> None:

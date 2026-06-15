@@ -184,6 +184,7 @@ function New-BotArgs {
         "--fallback-poll-sec", "2",
         "--no-trade-before", "10:15",
         "--no-new-after", "17:45",
+        "--force-close-at", "23:50",
         "--no-new-expiry-days", "10",
         "--expiry-force-close-days", "3",
         "--roll-observe-days", "21",
@@ -199,7 +200,7 @@ function New-BotArgs {
     )
     if ($Name -eq "neo") {
         $args = $args | Where-Object { $_ -ne "17:45" -and $_ -ne "--no-new-after" -and $_ -ne "10:15" -and $_ -ne "--no-trade-before" }
-        $args += @("--no-new-after", "19:00", "--force-close-at", "23:50")
+        $args += @("--no-new-after", "19:00")
     }
     return $args
 }
