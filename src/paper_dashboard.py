@@ -200,6 +200,8 @@ def human_reason(reason: object) -> str:
         return "условия наблюдаются, входа нет"
     if text == "duplicate_filter ticker_already_open" or text == "duplicate_filter_ticker_already_open":
         return "позиция по тикеру уже открыта"
+    if text == "duplicate_filter external_ticker_already_open":
+        return "позиция по тикеру уже открыта в другом контуре"
     if text.startswith("capital_filter no_free_margin"):
         return "не хватает свободного ГО"
     if text == "book_filter no_executable_entry":

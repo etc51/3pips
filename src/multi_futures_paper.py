@@ -41,6 +41,7 @@ SPREAD_HEAVY_RATIO = 0.40
 SPREAD_DOMINATES_RATIO = 1.00
 DEFAULT_MAX_FULL_STOP_RUB = 1_000.0
 AUTO_POLICY_RELOAD_SEC = 30.0
+EXTERNAL_OPEN_POSITIONS_RELOAD_SEC = 2.0
 
 
 @dataclass
@@ -314,6 +315,51 @@ def used_margin(states: list[State]) -> float:
 
 def has_open_ticker(states: list[State], secid: str) -> bool:
     return any(st.spec.secid == secid and st.position is not None for st in states)
+
+
+def empty_external_open_positions() -> dict:
+    return {"tickers": [], "next_check_at": 0.0, "mtimes": {}, "payload": {"tickers": []}}
+
+
+def refresh_external_open_positions(cache: dict) -> dict:
+    now = time.monotonic()
+    reload_sec = float(cache.get("reload_sec") or EXTERNAL_OPEN_POSITIONS_RELOAD_SEC)
+    next_check = float(cache.get("next_check_at") or 0.0)
+    if now < next_check and isinstance(cache.get("payload"), dict):
+        return cache["payload"]
+    cache["next_check_at"] = now + reload_sec
+
+    own_path = cache.get("own_path")
+    if not isinstance(own_path, Path):
+        payload = {"tickers": []}
+        cache["payload"] = payload
+        return payload
+    base_dir = own_path.parent
+    tickers: set[str] = set()
+    mtimes: dict[str, float] = {}
+    for path in sorted(base_dir.glob("*_paper_open_positions.json")):
+        if path == own_path:
+            continue
+        try:
+            mtimes[str(path)] = path.stat().st_mtime
+        except Exception:
+            continue
+        try:
+            rows = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            ticker = str(row.get("ticker") or row.get("secid") or "").strip().upper()
+            if ticker:
+                tickers.add(ticker)
+    payload = {"tickers": sorted(tickers)}
+    cache["mtimes"] = mtimes
+    cache["payload"] = payload
+    return payload
 
 
 def state_family(st: State) -> str:
@@ -1865,6 +1911,11 @@ def main() -> None:
             "last_error": "",
             "payload": empty_auto_policy(),
         }
+        external_positions_state: dict[str, object] = {
+            "own_path": Path(args.open_positions_log),
+            "reload_sec": EXTERNAL_OPEN_POSITIONS_RELOAD_SEC,
+            **empty_external_open_positions(),
+        }
         active_auto_policy = refresh_auto_policy(auto_policy_state, force=True)
         stop_event = threading.Event()
         lock = threading.RLock()
@@ -1960,6 +2011,10 @@ def main() -> None:
                         if has_open_ticker(states, spec.secid):
                             st.last_reason = "duplicate_filter ticker_already_open"
                             continue
+                        external_open = refresh_external_open_positions(external_positions_state)
+                        if spec.secid.upper() in set(external_open.get("tickers") or []):
+                            st.last_reason = "duplicate_filter external_ticker_already_open"
+                            continue
                         policy_reason = auto_policy_block_reason(st, contour, active_auto_policy_local)
                         if policy_reason:
                             st.last_reason = policy_reason
@@ -2012,6 +2067,7 @@ def main() -> None:
                             }
                             st.shadow_closed = {}
                             st.last_entry_candle_count = len(st.candles)
+                            write_open_positions(Path(args.open_positions_log), states)
                             print(
                                 f"{now_str()} OPEN {contour} {spec.secid} {direction} qty={qty} "
                                 f"entry={entry_price:g} source={entry_source} stop={st.position.stop_price:g} "
