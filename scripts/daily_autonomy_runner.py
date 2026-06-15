@@ -1240,7 +1240,6 @@ def build_auto_policy(
             combo_trades >= 6
             and all_sample_combo_delta >= 2_500
             and latest_combo_delta >= 1_500
-            and latest_scenario == best_combo_scenario
         )
         if family_trades >= 3 and family_net < 0 and robust_combo:
             active["observe_only_families"].append(combo_blacklist_family)
