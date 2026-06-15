@@ -482,6 +482,15 @@ def build_research_scenarios(
 
         return pred
 
+    def entry_window_predicate(start_at: str, cutoff: str):
+        after_start = after_start_predicate(start_at)
+        before_cutoff = before_cutoff_predicate(cutoff)
+
+        def pred(row):
+            return after_start(row) and before_cutoff(row)
+
+        return pred
+
     scenarios: list[dict] = []
     scenarios.append(evaluate_scenario("base", sample_rows, profiles, note="current live policy"))
 
@@ -515,6 +524,24 @@ def build_research_scenarios(
                 profiles,
                 predicate=before_cutoff_predicate(cutoff),
                 note="entry time cutoff",
+            )
+        )
+
+    for start_at, cutoff in [
+        ("10:15", "11:59"),
+        ("10:15", "12:59"),
+        ("10:15", "13:59"),
+        ("10:30", "12:59"),
+        ("10:30", "13:59"),
+        ("10:45", "13:59"),
+    ]:
+        scenarios.append(
+            evaluate_scenario(
+                f"entry_window_{start_at.replace(':', '')}_{cutoff.replace(':', '')}",
+                sample_rows,
+                profiles,
+                predicate=entry_window_predicate(start_at, cutoff),
+                note=f"only open new entries inside {start_at}-{cutoff}",
             )
         )
 
@@ -982,6 +1009,8 @@ def scenario_kind(name: str) -> str:
         return "combo_overlay"
     if name.startswith("stop_cap_"):
         return "stop_cap_rub"
+    if name.startswith("entry_window_"):
+        return "entry_window"
     if name.startswith("no_trade_before_"):
         return "entry_start"
     if name.startswith("no_new_after_"):
@@ -1006,7 +1035,7 @@ def scenario_kind(name: str) -> str:
 def recommended_use_for_scenario(kind: str) -> str:
     if kind == "combo_overlay":
         return "candidate_runtime_combo"
-    if kind in {"entry_start", "entry_cutoff", "stop_cap_rub"}:
+    if kind in {"entry_window", "entry_start", "entry_cutoff", "stop_cap_rub"}:
         return "candidate_runtime_tune"
     if kind == "allow_aggressive_group_family":
         return "candidate_runtime_exception"
@@ -1401,6 +1430,10 @@ def scenario_stop_cap(name: str) -> int | None:
 def scenario_entry_cutoff(name: str) -> str:
     candidates = combo_components(name) if name.startswith("combo_") else [name]
     for candidate in candidates:
+        if candidate.startswith("entry_window_"):
+            parts = candidate.removeprefix("entry_window_").split("_", 1)
+            if len(parts) == 2:
+                return normalize_clock_hhmm(parts[1])
         if not candidate.startswith("no_new_after_"):
             continue
         return normalize_clock_hhmm(candidate.removeprefix("no_new_after_"))
@@ -1410,6 +1443,10 @@ def scenario_entry_cutoff(name: str) -> str:
 def scenario_entry_start(name: str) -> str:
     candidates = combo_components(name) if name.startswith("combo_") else [name]
     for candidate in candidates:
+        if candidate.startswith("entry_window_"):
+            parts = candidate.removeprefix("entry_window_").split("_", 1)
+            if len(parts) == 2:
+                return normalize_clock_hhmm(parts[0])
         if not candidate.startswith("no_trade_before_"):
             continue
         return normalize_clock_hhmm(candidate.removeprefix("no_trade_before_"))
@@ -1860,6 +1897,7 @@ def build_auto_policy(
     combo_blacklist_family = scenario_blacklist_family(best_combo_scenario)
     combo_blacklist_portfolio = scenario_blacklist_portfolio(best_combo_scenario)
     combo_blacklist_group_family = scenario_blacklist_group_family(best_combo_scenario)
+    combo_entry_start = scenario_entry_start(best_combo_scenario)
     combo_entry_cutoff = scenario_entry_cutoff(best_combo_scenario)
     combo_stop_cap = scenario_stop_cap(best_combo_scenario)
     combo_has_strict = scenario_has_component(best_combo_scenario, "contour_only_strict")
@@ -1878,6 +1916,12 @@ def build_auto_policy(
         and all_sample_combo_delta >= 1_500
         and latest_combo_delta >= 700
     )
+    if combo_entry_start and combo_cap_matches_active and robust_positive_combo:
+        active["entry_no_trade_before"] = later_clock_hhmm(active.get("entry_no_trade_before"), combo_entry_start)
+        active["notes"].append(
+            f"Авто-policy: старт новых входов сдвинут до {combo_entry_start}, "
+            f"потому что strongest combo {best_combo_scenario} лучше base и по последнему дню, и по короткой серии."
+        )
     if combo_entry_cutoff and combo_cap_matches_active and robust_positive_combo:
         active["entry_no_new_after"] = earlier_clock_hhmm(active.get("entry_no_new_after"), combo_entry_cutoff)
         active["notes"].append(
