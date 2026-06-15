@@ -179,6 +179,60 @@ def merge_blackout_windows(left: object, right: object) -> list[str]:
     return sorted(set(normalize_blackout_windows(left)) | set(normalize_blackout_windows(right)))
 
 
+def normalize_group_blackout_slice(value: object) -> str:
+    text = str(value or "").strip().upper()
+    if not text or "/" not in text:
+        return ""
+    portfolio_name, contour_name = text.split("/", 1)
+    portfolio_name = portfolio_name.strip().upper()
+    contour_name = contour_name.strip().upper()
+    if not portfolio_name or contour_name not in {"STRICT", "AGGRESSIVE"}:
+        return ""
+    return f"{portfolio_name}/{contour_name}"
+
+
+def normalize_group_blackout_windows(values: object) -> dict[str, list[str]]:
+    if not isinstance(values, dict):
+        return {}
+    out: dict[str, list[str]] = {}
+    for key, windows in values.items():
+        group_key = normalize_group_blackout_slice(key)
+        normalized_windows = normalize_blackout_windows(windows)
+        if group_key and normalized_windows:
+            out[group_key] = normalized_windows
+    return {key: out[key] for key in sorted(out)}
+
+
+def merge_group_blackout_windows(left: object, right: object) -> dict[str, list[str]]:
+    left_norm = normalize_group_blackout_windows(left)
+    right_norm = normalize_group_blackout_windows(right)
+    out: dict[str, list[str]] = {}
+    for key in sorted(set(left_norm) | set(right_norm)):
+        merged = merge_blackout_windows(left_norm.get(key), right_norm.get(key))
+        if merged:
+            out[key] = merged
+    return out
+
+
+def count_group_blackout_rules(values: object) -> int:
+    return sum(len(windows) for windows in normalize_group_blackout_windows(values).values())
+
+
+def format_group_blackout_windows(values: object, empty: str = "none") -> str:
+    normalized = normalize_group_blackout_windows(values)
+    if not normalized:
+        return empty
+    return "; ".join(f"{key}={', '.join(windows)}" for key, windows in normalized.items())
+
+
+def policy_group_blackout_windows(values: object) -> dict[str, list[str]]:
+    if not isinstance(values, dict):
+        return {}
+    if "entry_blackout_group_windows" in values or "group_blackout_windows" in values:
+        return normalize_group_blackout_windows(values.get("entry_blackout_group_windows") or values.get("group_blackout_windows"))
+    return normalize_group_blackout_windows(values)
+
+
 def earlier_clock_hhmm(left: object, right: object) -> str:
     left_norm = normalize_clock_hhmm(left)
     right_norm = normalize_clock_hhmm(right)
@@ -226,6 +280,10 @@ def merge_watchdog_overrides(auto_policy: dict, existing_policy: dict) -> dict:
     merged["strict_only_tickers"] = normalize_upper_list(active_base.get("strict_only_tickers"))
     merged["strict_only_families"] = normalize_upper_list(active_base.get("strict_only_families"))
     merged["entry_blackout_windows"] = normalize_blackout_windows(active_base.get("entry_blackout_windows"))
+    merged["entry_blackout_group_windows"] = merge_group_blackout_windows(
+        policy_group_blackout_windows(active_base),
+        policy_group_blackout_windows(overrides),
+    )
     for key in ("entry_no_trade_before", "entry_no_new_after", "entry_max_full_stop_rub", "pause_ticker_after_losses", "pause_family_after_losses", "pause_after_loss_minutes"):
         merged[key] = active_base.get(key)
     base_notes = [str(item) for item in (active_base.get("notes") or []) if str(item).strip()]
@@ -246,6 +304,7 @@ def merge_watchdog_overrides(auto_policy: dict, existing_policy: dict) -> dict:
         + len(merged.get("strict_only_tickers") or [])
         + len(merged.get("strict_only_families") or [])
         + len(merged.get("entry_blackout_windows") or [])
+        + count_group_blackout_rules(policy_group_blackout_windows(merged))
         + sum(
             1
             for key in ("entry_no_trade_before", "entry_no_new_after", "entry_max_full_stop_rub", "pause_ticker_after_losses", "pause_family_after_losses", "pause_after_loss_minutes")
@@ -535,6 +594,20 @@ def build_research_scenarios(
 
         return pred
 
+    def portfolio_contour_key(row: dict) -> str:
+        return normalize_group_blackout_slice(f"{str(row.get('portfolio_group') or '')}/{str(row.get('contour') or '')}")
+
+    def group_blackout_predicate(group_key: str, start_at: str, end_at: str):
+        group_key = normalize_group_blackout_slice(group_key)
+        outside_blackout = outside_blackout_predicate(start_at, end_at)
+
+        def pred(row, group_key=group_key, outside_blackout=outside_blackout):
+            if portfolio_contour_key(row) != group_key:
+                return True
+            return outside_blackout(row)
+
+        return pred
+
     scenarios: list[dict] = []
     scenarios.append(evaluate_scenario("base", sample_rows, profiles, note="current live policy"))
 
@@ -604,6 +677,35 @@ def build_research_scenarios(
                 note=f"skip new entries during {start_at}-{end_at}",
             )
         )
+
+    observed_group_slices = sorted(
+        {
+            str(row.get("group") or "")
+            for row in grouped_metrics(all_rows, lambda row: portfolio_contour_key(row))
+            if str(row.get("group") or "")
+        }
+    )
+    for group_key in observed_group_slices:
+        try:
+            portfolio_name, contour_name = group_key.split("/", 1)
+        except ValueError:
+            continue
+        contour_token = contour_name.lower()
+        for start_at, end_at in [
+            ("12:00", "12:59"),
+            ("12:00", "13:59"),
+            ("12:00", "15:59"),
+            ("13:00", "15:59"),
+        ]:
+            scenarios.append(
+                evaluate_scenario(
+                    f"group_blackout_{portfolio_name}__{contour_token}__{start_at.replace(':', '')}_{end_at.replace(':', '')}",
+                    sample_rows,
+                    profiles,
+                    predicate=group_blackout_predicate(group_key, start_at, end_at),
+                    note=f"skip new entries during {start_at}-{end_at} only for {group_key}",
+                )
+            )
 
     for contour_name in ["strict", "aggressive"]:
         scenarios.append(
@@ -1097,6 +1199,8 @@ def scenario_kind(name: str) -> str:
         return "stop_cap_rub"
     if name.startswith("entry_window_"):
         return "entry_window"
+    if name.startswith("group_blackout_"):
+        return "group_blackout"
     if name.startswith("blackout_"):
         return "entry_blackout"
     if name.startswith("no_trade_before_"):
@@ -1134,6 +1238,7 @@ def recommended_use_for_scenario(kind: str) -> str:
         "family_blacklist",
         "portfolio_blacklist",
         "group_family_blacklist",
+        "group_blackout",
         "family_whitelist",
     }:
         return "candidate_runtime_restriction"
@@ -1304,6 +1409,16 @@ def build_restriction_rows(auto_policy: dict) -> list[dict]:
                 "note": "",
             }
         )
+    for group_key, windows in policy_group_blackout_windows(active).items():
+        for window in windows:
+            rows.append(
+                {
+                    "stage": "active",
+                    "restriction_type": "group_blackout_window",
+                    "value": f"{group_key}::{window}",
+                    "note": "",
+                }
+            )
     for key in ("pause_ticker_after_losses", "pause_family_after_losses", "pause_after_loss_minutes"):
         if active.get(key) not in (None, ""):
             rows.append(
@@ -1350,6 +1465,16 @@ def build_restriction_rows(auto_policy: dict) -> list[dict]:
                 "note": "",
             }
         )
+    for group_key, windows in normalize_group_blackout_windows(proposed.get("candidate_group_blackout_windows")).items():
+        for window in windows:
+            rows.append(
+                {
+                    "stage": "proposed",
+                    "restriction_type": "candidate_group_blackout_window",
+                    "value": f"{group_key}::{window}",
+                    "note": "",
+                }
+            )
     if proposed.get("candidate_stop_cap_rub") not in (None, ""):
         rows.append(
             {
@@ -1361,6 +1486,8 @@ def build_restriction_rows(auto_policy: dict) -> list[dict]:
         )
     best_latest = proposed.get("best_latest_overlay") if isinstance(proposed.get("best_latest_overlay"), dict) else {}
     best_consensus = proposed.get("best_consensus_overlay") if isinstance(proposed.get("best_consensus_overlay"), dict) else {}
+    best_latest_group_blackout = proposed.get("best_latest_group_blackout_overlay") if isinstance(proposed.get("best_latest_group_blackout_overlay"), dict) else {}
+    best_consensus_group_blackout = proposed.get("best_consensus_group_blackout_overlay") if isinstance(proposed.get("best_consensus_group_blackout_overlay"), dict) else {}
     if best_latest.get("scenario"):
         rows.append(
             {
@@ -1376,6 +1503,24 @@ def build_restriction_rows(auto_policy: dict) -> list[dict]:
                 "stage": "proposed",
                 "restriction_type": "best_consensus_overlay",
                 "value": best_consensus.get("scenario"),
+                "note": "",
+            }
+        )
+    if best_latest_group_blackout.get("scenario"):
+        rows.append(
+            {
+                "stage": "proposed",
+                "restriction_type": "best_latest_group_blackout_overlay",
+                "value": best_latest_group_blackout.get("scenario"),
+                "note": "",
+            }
+        )
+    if best_consensus_group_blackout.get("scenario"):
+        rows.append(
+            {
+                "stage": "proposed",
+                "restriction_type": "best_consensus_group_blackout_overlay",
+                "value": best_consensus_group_blackout.get("scenario"),
                 "note": "",
             }
         )
@@ -1444,6 +1589,7 @@ def build_nightly_cycle_status(
                         "entry_blackout_windows",
                     )
                 )
+                + count_group_blackout_rules(policy_group_blackout_windows(active))
                 + sum(
                     1
                     for key in ("entry_no_trade_before", "entry_no_new_after", "entry_max_full_stop_rub", "pause_ticker_after_losses", "pause_family_after_losses", "pause_after_loss_minutes")
@@ -1575,6 +1721,29 @@ def scenario_blackout_windows(name: str) -> list[str]:
     return sorted(set(out))
 
 
+def scenario_group_blackout_windows(name: str) -> dict[str, list[str]]:
+    candidate_names = combo_components(name) if name.startswith("combo_") else [name]
+    prefix = "group_blackout_"
+    out: dict[str, list[str]] = {}
+    for candidate in candidate_names:
+        if not candidate.startswith(prefix):
+            continue
+        payload = candidate.removeprefix(prefix)
+        parts = payload.split("__", 2)
+        if len(parts) != 3:
+            continue
+        portfolio_name, contour_name, window_token = parts
+        window_parts = window_token.split("_", 1)
+        if len(window_parts) != 2:
+            continue
+        group_key = normalize_group_blackout_slice(f"{portfolio_name}/{contour_name}")
+        normalized_window = normalize_blackout_window(f"{window_parts[0]}-{window_parts[1]}")
+        if not group_key or not normalized_window:
+            continue
+        out[group_key] = merge_blackout_windows(out.get(group_key), [normalized_window])
+    return {key: out[key] for key in sorted(out)}
+
+
 def scenario_blacklist_family(name: str) -> str:
     if name.startswith("blacklist_family_"):
         return name.removeprefix("blacklist_family_")
@@ -1672,6 +1841,17 @@ def split_group_family_key(value: str) -> tuple[str, str, str]:
     return portfolio_name, contour_name, family
 
 
+def split_portfolio_contour_key(value: str) -> tuple[str, str]:
+    text = normalize_group_blackout_slice(value)
+    if not text:
+        return "", ""
+    try:
+        portfolio_name, contour_name = text.split("/", 1)
+    except ValueError:
+        return "", ""
+    return portfolio_name, contour_name
+
+
 def build_auto_policy(
     all_rows: list[dict],
     profiles: dict[str, dict],
@@ -1688,6 +1868,10 @@ def build_auto_policy(
     by_ticker = metrics_map(all_rows, lambda row: str(row.get("secid") or ""))
     by_family = metrics_map(all_rows, lambda row: family_for_row(row, profiles))
     by_portfolio = metrics_map(all_rows, lambda row: str(row.get("portfolio_group") or ""))
+    by_portfolio_contour = metrics_map(
+        all_rows,
+        lambda row: normalize_group_blackout_slice(f"{str(row.get('portfolio_group') or '')}/{str(row.get('contour') or '')}"),
+    )
     by_group_family = metrics_map(
         all_rows,
         lambda row: f"{str(row.get('portfolio_group') or '').upper()}/{str(row.get('contour') or '').upper()}::{family_for_row(row, profiles).upper()}",
@@ -1704,6 +1888,7 @@ def build_auto_policy(
         "strict_only_tickers": [],
         "strict_only_families": [],
         "entry_blackout_windows": [],
+        "entry_blackout_group_windows": {},
         "entry_no_trade_before": None,
         "entry_no_new_after": None,
         "entry_max_full_stop_rub": None,
@@ -1801,9 +1986,17 @@ def build_auto_policy(
         (row for row in research_day if scenario_kind(str(row.get("scenario") or "")) == "entry_blackout"),
         {},
     )
+    best_latest_group_blackout_overlay = next(
+        (row for row in research_day if scenario_kind(str(row.get("scenario") or "")) == "group_blackout"),
+        {},
+    )
     best_consensus_overlay = pick_best_consensus_scenario(research_consensus)
     best_consensus_blackout_overlay = next(
         (row for row in research_consensus if scenario_kind(str(row.get("scenario") or "")) == "entry_blackout"),
+        {},
+    )
+    best_consensus_group_blackout_overlay = next(
+        (row for row in research_consensus if scenario_kind(str(row.get("scenario") or "")) == "group_blackout"),
         {},
     )
     base_day_overlay = next((row for row in research_day if str(row.get("scenario") or "") == "base"), {})
@@ -1817,13 +2010,23 @@ def build_auto_policy(
     proposed = {
         "best_latest_overlay": best_latest_overlay,
         "best_consensus_overlay": best_consensus_overlay,
+        "best_latest_group_blackout_overlay": best_latest_group_blackout_overlay,
+        "best_consensus_group_blackout_overlay": best_consensus_group_blackout_overlay,
         "candidate_entry_start": "",
         "candidate_entry_cutoff": "",
         "candidate_entry_blackout_windows": [],
+        "candidate_group_blackout_windows": {},
         "candidate_stop_cap_rub": None,
         "notes": [],
     }
-    for candidate in [best_consensus_overlay, best_latest_overlay, best_consensus_blackout_overlay, best_latest_blackout_overlay]:
+    for candidate in [
+        best_consensus_overlay,
+        best_latest_overlay,
+        best_consensus_blackout_overlay,
+        best_latest_blackout_overlay,
+        best_consensus_group_blackout_overlay,
+        best_latest_group_blackout_overlay,
+    ]:
         scenario = str(candidate.get("scenario") or "")
         candidate_entry_start = scenario_entry_start(scenario)
         if candidate_entry_start and not proposed["candidate_entry_start"]:
@@ -1843,6 +2046,18 @@ def build_auto_policy(
             proposed["notes"].append(
                 f"Сценарий {scenario} дал лучший результат в исследовательском слое: это кандидат на blackout новых входов {', '.join(candidate_blackout_windows)}."
             )
+        candidate_group_blackout_windows = scenario_group_blackout_windows(scenario)
+        if candidate_group_blackout_windows:
+            merged_group_blackout_windows = merge_group_blackout_windows(
+                proposed.get("candidate_group_blackout_windows"),
+                candidate_group_blackout_windows,
+            )
+            if merged_group_blackout_windows != normalize_group_blackout_windows(proposed.get("candidate_group_blackout_windows")):
+                proposed["candidate_group_blackout_windows"] = merged_group_blackout_windows
+                proposed["notes"].append(
+                    f"Сценарий {scenario} дал лучший результат в исследовательском слое: "
+                    f"это кандидат на точечный blackout {format_group_blackout_windows(candidate_group_blackout_windows, empty='-')}."
+                )
         if scenario.startswith("stop_cap_") and proposed["candidate_stop_cap_rub"] is None:
             try:
                 proposed["candidate_stop_cap_rub"] = int(scenario.removeprefix("stop_cap_"))
@@ -1881,6 +2096,12 @@ def build_auto_policy(
     blackout_consensus_delta = safe_float(best_consensus_blackout_overlay.get("delta_total_rub"))
     blackout_consensus_latest_delta = safe_float(best_consensus_blackout_overlay.get("latest_day_delta_rub"))
     blackout_consensus_windows = scenario_blackout_windows(blackout_consensus_scenario)
+    group_blackout_consensus_scenario = str(best_consensus_group_blackout_overlay.get("scenario") or "")
+    group_blackout_consensus_days = safe_int(best_consensus_group_blackout_overlay.get("days"))
+    group_blackout_consensus_beats = safe_int(best_consensus_group_blackout_overlay.get("beat_base_days"))
+    group_blackout_consensus_delta = safe_float(best_consensus_group_blackout_overlay.get("delta_total_rub"))
+    group_blackout_consensus_latest_delta = safe_float(best_consensus_group_blackout_overlay.get("latest_day_delta_rub"))
+    group_blackout_consensus_windows = scenario_group_blackout_windows(group_blackout_consensus_scenario)
     if (
         consensus_entry_start
         and consensus_days >= 2
@@ -1931,9 +2152,49 @@ def build_auto_policy(
             f"Авто-policy: новые входы блокируются в окне {', '.join(blackout_consensus_windows)}, "
             f"потому что лучший blackout-сценарий {blackout_consensus_scenario} устойчиво улучшает результат против base."
         )
+    if group_blackout_consensus_windows:
+        group_blackout_consensus_key = next(iter(group_blackout_consensus_windows))
+        group_blackout_consensus_total = by_portfolio_contour.get(group_blackout_consensus_key) or {}
+        group_blackout_consensus_trades = safe_int(group_blackout_consensus_total.get("trades"))
+        group_blackout_consensus_net = safe_float(group_blackout_consensus_total.get("net_rub"))
+        if (
+            group_blackout_consensus_days >= 2
+            and group_blackout_consensus_beats >= max(1, group_blackout_consensus_days - 1)
+            and group_blackout_consensus_delta >= 1_000
+            and group_blackout_consensus_latest_delta >= 500
+            and group_blackout_consensus_trades >= 2
+            and group_blackout_consensus_net < 0
+        ):
+            active["entry_blackout_group_windows"] = merge_group_blackout_windows(
+                policy_group_blackout_windows(active),
+                group_blackout_consensus_windows,
+            )
+            active["notes"].append(
+                f"Авто-policy: для {group_blackout_consensus_key} новые входы блокируются в окне "
+                f"{', '.join(group_blackout_consensus_windows[group_blackout_consensus_key])}, "
+                f"потому что {group_blackout_consensus_scenario} устойчиво улучшает результат против base."
+            )
 
     latest_scenario = str(best_latest_overlay.get("scenario") or "")
     base_day_net = safe_float(base_day_overlay.get("net_rub"))
+    latest_group_blackout_scenario = str(best_latest_group_blackout_overlay.get("scenario") or "")
+    latest_group_blackout_windows = scenario_group_blackout_windows(latest_group_blackout_scenario)
+    if latest_group_blackout_windows:
+        latest_group_blackout_key = next(iter(latest_group_blackout_windows))
+        latest_group_blackout_total = by_portfolio_contour.get(latest_group_blackout_key) or {}
+        latest_group_blackout_trades = safe_int(latest_group_blackout_total.get("trades"))
+        latest_group_blackout_net = safe_float(latest_group_blackout_total.get("net_rub"))
+        latest_group_blackout_delta = safe_float(best_latest_group_blackout_overlay.get("net_rub")) - base_day_net
+        if latest_group_blackout_trades >= 2 and latest_group_blackout_net <= -1_500 and latest_group_blackout_delta >= 1_500:
+            active["entry_blackout_group_windows"] = merge_group_blackout_windows(
+                policy_group_blackout_windows(active),
+                latest_group_blackout_windows,
+            )
+            active["notes"].append(
+                f"Авто-policy: для {latest_group_blackout_key} новые входы блокируются в окне "
+                f"{', '.join(latest_group_blackout_windows[latest_group_blackout_key])}, "
+                f"потому что {latest_group_blackout_scenario} резко улучшает текущий день против base."
+            )
     for row in best_latest_group_family_overlays[:2]:
         group_family_key = scenario_blacklist_group_family(str(row.get("scenario") or ""))
         group_family_total = by_group_family.get(group_family_key) or {}
@@ -2265,6 +2526,11 @@ def build_auto_policy(
 
     covered_portfolios = {str(value).strip().upper() for value in (active.get("observe_only_portfolios") or []) if str(value).strip()}
     covered_families = {str(value).strip().upper() for value in (active.get("observe_only_families") or []) if str(value).strip()}
+    active["entry_blackout_group_windows"] = {
+        key: windows
+        for key, windows in policy_group_blackout_windows(active).items()
+        if split_portfolio_contour_key(key)[0] not in covered_portfolios
+    }
     active["observe_only_group_families"] = [
         value
         for value in (active.get("observe_only_group_families") or [])
@@ -2308,6 +2574,7 @@ def build_auto_policy(
             "observe_only_group_families": [],
             "observe_only_tickers": [],
             "observe_only_families": [],
+            "entry_blackout_group_windows": {},
             "notes": [],
         },
         "proposed": proposed,
@@ -2325,6 +2592,7 @@ def build_auto_policy(
                     "entry_blackout_windows",
                 )
             )
+            + count_group_blackout_rules(policy_group_blackout_windows(active))
             + sum(
                 1
                 for key in ("entry_no_trade_before", "entry_no_new_after", "entry_max_full_stop_rub", "pause_ticker_after_losses", "pause_family_after_losses", "pause_after_loss_minutes")
@@ -2357,6 +2625,7 @@ def render_auto_policy_markdown(auto_policy: dict) -> str:
         f"- strict_only_tickers: {', '.join(active.get('strict_only_tickers') or []) or 'none'}",
         f"- strict_only_families: {', '.join(active.get('strict_only_families') or []) or 'none'}",
         f"- entry_blackout_windows: {', '.join(active.get('entry_blackout_windows') or []) or 'none'}",
+        f"- entry_blackout_group_windows: {format_group_blackout_windows(policy_group_blackout_windows(active), empty='none')}",
         f"- entry_no_trade_before: {active.get('entry_no_trade_before') or '-'}",
         f"- entry_no_new_after: {active.get('entry_no_new_after') or '-'}",
         f"- entry_max_full_stop_rub: {active.get('entry_max_full_stop_rub') or '-'}",
@@ -2376,11 +2645,16 @@ def render_auto_policy_markdown(auto_policy: dict) -> str:
     lines.append("")
     best_latest = proposed.get("best_latest_overlay") if isinstance(proposed.get("best_latest_overlay"), dict) else {}
     best_consensus = proposed.get("best_consensus_overlay") if isinstance(proposed.get("best_consensus_overlay"), dict) else {}
+    best_latest_group_blackout = proposed.get("best_latest_group_blackout_overlay") if isinstance(proposed.get("best_latest_group_blackout_overlay"), dict) else {}
+    best_consensus_group_blackout = proposed.get("best_consensus_group_blackout_overlay") if isinstance(proposed.get("best_consensus_group_blackout_overlay"), dict) else {}
     lines.append(f"- best_latest_overlay: {best_latest.get('scenario') or '-'}")
     lines.append(f"- best_consensus_overlay: {best_consensus.get('scenario') or '-'}")
+    lines.append(f"- best_latest_group_blackout_overlay: {best_latest_group_blackout.get('scenario') or '-'}")
+    lines.append(f"- best_consensus_group_blackout_overlay: {best_consensus_group_blackout.get('scenario') or '-'}")
     lines.append(f"- candidate_entry_start: {proposed.get('candidate_entry_start') or '-'}")
     lines.append(f"- candidate_entry_cutoff: {proposed.get('candidate_entry_cutoff') or '-'}")
     lines.append(f"- candidate_entry_blackout_windows: {', '.join(proposed.get('candidate_entry_blackout_windows') or []) or '-'}")
+    lines.append(f"- candidate_group_blackout_windows: {format_group_blackout_windows(proposed.get('candidate_group_blackout_windows'), empty='-')}")
     lines.append(f"- candidate_stop_cap_rub: {proposed.get('candidate_stop_cap_rub') or '-'}")
     lines.append("")
     for note in proposed.get("notes") or []:

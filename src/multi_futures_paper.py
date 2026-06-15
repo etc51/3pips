@@ -130,6 +130,7 @@ def empty_auto_policy() -> dict:
         "strict_only_tickers": [],
         "strict_only_families": [],
         "entry_blackout_windows": [],
+        "entry_blackout_group_windows": {},
         "entry_no_trade_before": None,
         "entry_no_new_after": None,
         "entry_max_full_stop_rub": None,
@@ -212,6 +213,32 @@ def normalize_blackout_windows(values: object) -> list[str]:
     return sorted(set(out))
 
 
+def normalize_group_blackout_key(portfolio_group: object, contour: object) -> str:
+    portfolio = str(portfolio_group or "").strip().upper()
+    contour_name = str(contour or "").strip().upper()
+    if not portfolio or not contour_name:
+        return ""
+    return f"{portfolio}/{contour_name}"
+
+
+def normalize_group_blackout_windows(values: object) -> dict[str, list[str]]:
+    if not isinstance(values, dict):
+        return {}
+    out: dict[str, list[str]] = {}
+    for raw_key, raw_windows in values.items():
+        key_text = str(raw_key or "").strip().upper()
+        if "/" not in key_text:
+            continue
+        portfolio, contour = key_text.split("/", 1)
+        key = normalize_group_blackout_key(portfolio, contour)
+        if not key:
+            continue
+        windows = normalize_blackout_windows(raw_windows)
+        if windows:
+            out[key] = windows
+    return out
+
+
 def parse_auto_policy_payload(payload: object) -> dict:
     if not isinstance(payload, dict):
         return empty_auto_policy()
@@ -227,6 +254,7 @@ def parse_auto_policy_payload(payload: object) -> dict:
         "strict_only_tickers": normalize_policy_names(active.get("strict_only_tickers")),
         "strict_only_families": normalize_policy_names(active.get("strict_only_families")),
         "entry_blackout_windows": normalize_blackout_windows(active.get("entry_blackout_windows")),
+        "entry_blackout_group_windows": normalize_group_blackout_windows(active.get("entry_blackout_group_windows")),
         "entry_no_trade_before": normalize_clock_hhmm(active.get("entry_no_trade_before")),
         "entry_no_new_after": normalize_clock_hhmm(active.get("entry_no_new_after")),
         "entry_max_full_stop_rub": normalize_rub_cap(active.get("entry_max_full_stop_rub")),
@@ -278,6 +306,7 @@ def refresh_auto_policy(cache: dict, force: bool = False) -> dict:
     allow_aggressive_count = len(payload["allow_aggressive_group_families"])
     strict_count = len(payload["strict_only_tickers"]) + len(payload["strict_only_families"])
     blackout_windows = payload.get("entry_blackout_windows") or []
+    blackout_group_windows = payload.get("entry_blackout_group_windows") or {}
     entry_start = payload.get("entry_no_trade_before")
     entry_cutoff = payload.get("entry_no_new_after")
     stop_cap = payload.get("entry_max_full_stop_rub")
@@ -287,6 +316,7 @@ def refresh_auto_policy(cache: dict, force: bool = False) -> dict:
         f"{now_str()} AUTO_POLICY loaded trade_date={payload.get('trade_date') or '-'} "
         f"observe={observe_count} allow_aggressive={allow_aggressive_count} strict_only={strict_count} "
         f"entry_blackout_windows={','.join(blackout_windows) if blackout_windows else '-'} "
+        f"entry_blackout_groups={len(blackout_group_windows)} "
         f"entry_no_trade_before={entry_start or '-'} "
         f"entry_no_new_after={entry_cutoff or '-'} "
         f"stop_cap_rub={stop_cap if stop_cap is not None else '-'} "
@@ -348,11 +378,20 @@ def effective_no_new_after(base_no_new_after: int | None, policy: dict) -> int |
     return min(base_no_new_after, policy_no_new_after)
 
 
-def effective_entry_blackout_windows(base_windows: object, policy: dict) -> list[str]:
-    return sorted(
-        set(normalize_blackout_windows(base_windows))
-        | set(normalize_blackout_windows(policy.get("entry_blackout_windows") if isinstance(policy, dict) else None))
-    )
+def effective_entry_blackout_windows(
+    base_windows: object,
+    policy: dict,
+    portfolio_group: str = "",
+    contour: str = "",
+) -> list[str]:
+    windows = set(normalize_blackout_windows(base_windows))
+    if isinstance(policy, dict):
+        windows |= set(normalize_blackout_windows(policy.get("entry_blackout_windows")))
+        group_windows = normalize_group_blackout_windows(policy.get("entry_blackout_group_windows"))
+        group_key = normalize_group_blackout_key(portfolio_group, contour)
+        if group_key:
+            windows |= set(group_windows.get(group_key) or [])
+    return sorted(windows)
 
 
 def apply_auto_loss_pause(st: State, states: list[State], net: float, policy: dict) -> None:
@@ -1536,7 +1575,16 @@ def poll_market_fallback(
                             effective_entry_blackout_windows(normalize_blackout_windows(getattr(args, "entry_blackout_window", [])), active_auto_policy_poll),
                         )
                         write_open_positions(Path(args.open_positions_log), states)
-                        write_microstructure_snapshot(Path(args.snapshot_log), states, trading_enabled=poll_trading_enabled)
+                        write_microstructure_snapshot(
+                            Path(args.snapshot_log),
+                            states,
+                            trading_enabled=poll_trading_enabled,
+                            no_trade_before=effective_no_trade_before(parse_clock_time(getattr(args, "no_trade_before", "")), active_auto_policy_poll),
+                            no_new_after=effective_no_new_after(parse_clock_time(getattr(args, "no_new_after", "")), active_auto_policy_poll),
+                            base_blackout_windows=normalize_blackout_windows(getattr(args, "entry_blackout_window", [])),
+                            auto_policy=active_auto_policy_poll,
+                            portfolio_group_name=trade_log_group(Path(getattr(args, "log", ""))).upper(),
+                        )
                         write_bot_health(
                             Path(args.health_log),
                             states,
@@ -1555,13 +1603,30 @@ def poll_market_fallback(
                 time.sleep(3)
 
 
-def write_microstructure_snapshot(path: Path, states: list[State], trading_enabled: bool) -> None:
+def write_microstructure_snapshot(
+    path: Path,
+    states: list[State],
+    trading_enabled: bool,
+    no_trade_before: int | None = None,
+    no_new_after: int | None = None,
+    base_blackout_windows: object = None,
+    auto_policy: dict | None = None,
+    portfolio_group_name: str = "",
+) -> None:
     rows = []
     spread_review_rows = []
     snapshot_time = now_str()
     for st in states:
         if st.contour != "aggressive":
             continue
+        state_blackout_windows = effective_entry_blackout_windows(
+            base_blackout_windows,
+            auto_policy if isinstance(auto_policy, dict) else {},
+            portfolio_group_name,
+            st.contour,
+        ) if any(value is not None and value != [] and value != "" for value in [base_blackout_windows, auto_policy]) else []
+        state_gate_reason = daily_trading_block_reason(no_trade_before, no_new_after, state_blackout_windows)
+        state_can_open = state_gate_reason is None if (no_trade_before is not None or no_new_after is not None or state_blackout_windows) else trading_enabled
         levels = best_levels(st.last_order_book, st.spec)
         spread_ratio, spread_class, spread_review = spread_to_stop_metrics(
             levels["spread_ticks"],
@@ -1585,12 +1650,12 @@ def write_microstructure_snapshot(path: Path, states: list[State], trading_enabl
                 "spread_class": spread_class,
                 "spread_review_flag": spread_review,
                 "fee_to_stop_ratio": round(fee_to_stop, 4) if fee_to_stop is not None else None,
-                "signal_status": "listening" if trading_enabled else "warmup_or_no_new_entries",
-                "skip_reason": "" if trading_enabled else "time_gate",
+                "signal_status": "listening" if state_can_open else "warmup_or_no_new_entries",
+                "skip_reason": "" if state_can_open else (state_gate_reason or "time_gate"),
                 "orderbook_source": "tbank_stream",
                 "execution_validation_possible": levels["bid"] is not None and levels["ask"] is not None,
                 "session_phase": "stream",
-                "can_open_new_paper_trade": trading_enabled,
+                "can_open_new_paper_trade": state_can_open,
                 "last_reason": st.last_reason,
             }
         )
@@ -2119,13 +2184,13 @@ def main() -> None:
             nonlocal next_report, next_snapshot
             now = time.monotonic()
             active_auto_policy_local = refresh_auto_policy(auto_policy_state)
-            effective_blackout_windows = effective_entry_blackout_windows(base_blackout_windows, active_auto_policy_local)
-            trading_gate_reason = daily_trading_block_reason(
-                effective_no_trade_before(no_trade_before, active_auto_policy_local),
-                effective_no_new_after(no_new_after, active_auto_policy_local),
-                effective_blackout_windows,
+            effective_entry_start = effective_no_trade_before(no_trade_before, active_auto_policy_local)
+            effective_entry_cutoff = effective_no_new_after(no_new_after, active_auto_policy_local)
+            trading_enabled = daily_trading_enabled(
+                effective_entry_start,
+                effective_entry_cutoff,
+                effective_entry_blackout_windows(base_blackout_windows, active_auto_policy_local),
             )
-            trading_enabled = trading_gate_reason is None
             force_close_due = daily_force_close_due(force_close_at)
             uid = ""
             price = None
@@ -2150,6 +2215,18 @@ def main() -> None:
             with lock:
                 for contour in ["strict", "aggressive"]:
                     st = state_by_uid[(uid, contour)]
+                    state_blackout_windows = effective_entry_blackout_windows(
+                        base_blackout_windows,
+                        active_auto_policy_local,
+                        portfolio_group_name,
+                        contour,
+                    )
+                    state_trading_gate_reason = daily_trading_block_reason(
+                        effective_entry_start,
+                        effective_entry_cutoff,
+                        state_blackout_windows,
+                    )
+                    state_trading_enabled = state_trading_gate_reason is None
                     if price is not None:
                         st.last_price = round_to_step(price, spec.min_step)
                     if orderbook is not None:
@@ -2175,10 +2252,10 @@ def main() -> None:
                         )
                         if has_active_shadow(st):
                             continue
-                    if st.position is None and not trading_enabled and trading_gate_reason:
+                    if st.position is None and not state_trading_enabled and state_trading_gate_reason:
                         if not st.last_reason.startswith("auto_policy pause_"):
-                            st.last_reason = f"time_gate {trading_gate_reason}"
-                    if st.position is None and trading_enabled and not force_close_due:
+                            st.last_reason = f"time_gate {state_trading_gate_reason}"
+                    if st.position is None and state_trading_enabled and not force_close_due:
                         if st.attempts >= st.profile.max_attempts:
                             st.last_reason = "attempt_filter max_attempts_reached"
                             continue
@@ -2277,7 +2354,16 @@ def main() -> None:
                     print_portfolio_report(states, portfolio)
                     next_report += args.report_sec
                 if now >= next_snapshot:
-                    write_microstructure_snapshot(Path(args.snapshot_log), states, trading_enabled)
+                    write_microstructure_snapshot(
+                        Path(args.snapshot_log),
+                        states,
+                        trading_enabled,
+                        no_trade_before=effective_no_trade_before(no_trade_before, active_auto_policy_local),
+                        no_new_after=effective_no_new_after(no_new_after, active_auto_policy_local),
+                        base_blackout_windows=base_blackout_windows,
+                        auto_policy=active_auto_policy_local,
+                        portfolio_group_name=portfolio_group_name,
+                    )
                     write_open_positions(Path(args.open_positions_log), states)
                     write_bot_health(
                         Path(args.health_log),

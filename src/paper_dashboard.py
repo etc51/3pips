@@ -1155,6 +1155,12 @@ HTML = r"""<!doctype html>
         if ((autoPolicyActive.entry_blackout_windows || []).length) {
           policyBits.push(`blackout: ${(autoPolicyActive.entry_blackout_windows || []).join(', ')}`);
         }
+        if (autoPolicyActive.entry_blackout_group_windows && Object.keys(autoPolicyActive.entry_blackout_group_windows).length) {
+          const groupBits = Object.entries(autoPolicyActive.entry_blackout_group_windows)
+            .slice(0, 3)
+            .map(([k, v]) => `${k}=${(v || []).join(',')}`);
+          policyBits.push(`group blackout: ${groupBits.join('; ')}`);
+        }
         if (autoPolicyActive.entry_max_full_stop_rub !== undefined && autoPolicyActive.entry_max_full_stop_rub !== null && autoPolicyActive.entry_max_full_stop_rub !== '') {
           policyBits.push(`entry stop cap: ${fmt(autoPolicyActive.entry_max_full_stop_rub, 0)} ₽`);
         }

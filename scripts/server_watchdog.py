@@ -207,6 +207,28 @@ def normalize_blackout_windows(values: object) -> list[str]:
     return sorted(set(out))
 
 
+def normalize_group_blackout_windows(values: object) -> dict[str, list[str]]:
+    if not isinstance(values, dict):
+        return {}
+    out: dict[str, list[str]] = {}
+    for raw_key, raw_windows in values.items():
+        key = str(raw_key or "").strip().upper()
+        if "/" not in key:
+            continue
+        windows = normalize_blackout_windows(raw_windows)
+        if windows:
+            out[key] = windows
+    return out
+
+
+def policy_group_blackout_windows(values: object) -> dict[str, list[str]]:
+    if not isinstance(values, dict):
+        return {}
+    if "entry_blackout_group_windows" in values or "group_blackout_windows" in values:
+        return normalize_group_blackout_windows(values.get("entry_blackout_group_windows") or values.get("group_blackout_windows"))
+    return normalize_group_blackout_windows(values)
+
+
 def family_from_ticker(ticker: str) -> str:
     secid = str(ticker or "").strip()
     if not secid:
@@ -388,6 +410,7 @@ def strip_watchdog_overrides(active: dict, overrides: dict) -> dict:
             remove_values = set(normalize_upper_list(overrides.get(key)))
             values = [value for value in values if value not in remove_values]
         base[key] = values
+    base["entry_blackout_group_windows"] = policy_group_blackout_windows(base)
     notes = [str(item) for item in (base.get("notes") or []) if str(item).strip()]
     remove_notes = {str(item) for item in (overrides.get("notes") or []) if str(item).strip()}
     base["notes"] = [note for note in notes if note not in remove_notes]
@@ -411,6 +434,10 @@ def merge_policy_views(base_active: dict, overrides: dict) -> dict:
     merged["strict_only_tickers"] = normalize_upper_list(base_active.get("strict_only_tickers"))
     merged["strict_only_families"] = normalize_upper_list(base_active.get("strict_only_families"))
     merged["entry_blackout_windows"] = normalize_blackout_windows(base_active.get("entry_blackout_windows"))
+    merged["entry_blackout_group_windows"] = merge_group_blackout_windows(
+        policy_group_blackout_windows(base_active),
+        policy_group_blackout_windows(overrides),
+    )
     for key in (
         "entry_no_trade_before",
         "entry_no_new_after",
@@ -563,6 +590,7 @@ def compute_intraday_watchdog_overrides(
         "observe_only_group_families": observe_group_families,
         "observe_only_tickers": observe_tickers,
         "observe_only_families": observe_families,
+        "entry_blackout_group_windows": {},
         "notes": notes[:8],
     }
 
@@ -583,7 +611,14 @@ def refresh_intraday_killer_policy(project_root: Path, run_dir: Path, dashboard_
     active = payload.get("active") if isinstance(payload.get("active"), dict) else {}
     active_base = payload.get("active_base") if isinstance(payload.get("active_base"), dict) else strip_watchdog_overrides(active, current_overrides)
     if not trade_date:
-        overrides = {"trade_date": "", "observe_only_group_families": [], "observe_only_tickers": [], "observe_only_families": [], "notes": []}
+        overrides = {
+            "trade_date": "",
+            "observe_only_group_families": [],
+            "observe_only_tickers": [],
+            "observe_only_families": [],
+            "entry_blackout_group_windows": {},
+            "notes": [],
+        }
     else:
         overrides = compute_intraday_watchdog_overrides(
             run_dir,
@@ -597,6 +632,7 @@ def refresh_intraday_killer_policy(project_root: Path, run_dir: Path, dashboard_
         normalize_upper_list((current_overrides or {}).get("observe_only_group_families")) != normalize_upper_list(overrides.get("observe_only_group_families"))
         or normalize_upper_list((current_overrides or {}).get("observe_only_tickers")) != normalize_upper_list(overrides.get("observe_only_tickers"))
         or normalize_upper_list((current_overrides or {}).get("observe_only_families")) != normalize_upper_list(overrides.get("observe_only_families"))
+        or policy_group_blackout_windows(current_overrides) != policy_group_blackout_windows(overrides)
         or [str(item) for item in ((current_overrides or {}).get("notes") or []) if str(item).strip()] != [str(item) for item in (overrides.get("notes") or []) if str(item).strip()]
         or payload.get("active_base") != active_base
         or payload.get("active") != merged_active
@@ -615,6 +651,7 @@ def refresh_intraday_killer_policy(project_root: Path, run_dir: Path, dashboard_
         + len(merged_active.get("strict_only_tickers") or [])
         + len(merged_active.get("strict_only_families") or [])
         + len(merged_active.get("entry_blackout_windows") or [])
+        + sum(len(v or []) for v in (merged_active.get("entry_blackout_group_windows") or {}).values())
         + sum(
             1
             for key in (
