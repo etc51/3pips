@@ -408,7 +408,10 @@ def check_tbank_token() -> pd.DataFrame:
             seen.add(token)
             unique.append((src, token))
     try:
-        from tinkoff.invest import Client
+        try:
+            from t_tech.invest import Client
+        except Exception:
+            from tinkoff.invest import Client
 
         for src, token in unique:
             try:

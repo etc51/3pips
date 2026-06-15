@@ -134,6 +134,18 @@ def number(value, digits: int = 2):
     return round(value, digits)
 
 
+def resolve_autonomy_policy(autonomy_manifest: object, autonomy_policy: object) -> dict:
+    if isinstance(autonomy_policy, dict) and (
+        autonomy_policy.get("trade_date")
+        or autonomy_policy.get("active")
+        or autonomy_policy.get("proposed")
+    ):
+        return autonomy_policy
+    if isinstance(autonomy_manifest, dict) and isinstance(autonomy_manifest.get("auto_policy"), dict):
+        return autonomy_manifest.get("auto_policy")
+    return {}
+
+
 def clean_record(row: dict) -> dict:
     return {k: (None if pd.isna(v) else v) for k, v in row.items()}
 
@@ -487,6 +499,7 @@ def build_state(base_dir: Path) -> dict:
     autonomy_manifest = read_json(REPORTS / "autonomy" / "latest" / "latest_manifest.json")
     autonomy_policy = read_json(REPORTS / "autonomy" / "latest" / "latest_auto_policy.json")
     autonomy_email = read_json(REPORTS / "autonomy" / "latest" / "latest_email_status.json")
+    resolved_auto_policy = resolve_autonomy_policy(autonomy_manifest, autonomy_policy)
     open_positions = []
     for portfolio in portfolio_names:
         opened = read_json(portfolio_path(base_dir, portfolio, "paper_open_positions.json"))
@@ -813,7 +826,7 @@ def build_state(base_dir: Path) -> dict:
             "nightly_cycle_status": autonomy_manifest.get("nightly_cycle_status") if isinstance(autonomy_manifest.get("nightly_cycle_status"), dict) else {},
             "archive": autonomy_manifest.get("archive"),
             "roll_watch": autonomy_manifest.get("roll_watch") if isinstance(autonomy_manifest.get("roll_watch"), list) else [],
-            "auto_policy": autonomy_manifest.get("auto_policy") if isinstance(autonomy_manifest.get("auto_policy"), dict) else (autonomy_policy if isinstance(autonomy_policy, dict) else {}),
+            "auto_policy": resolved_auto_policy,
         }
     elif runtime_config:
         autonomy = {
@@ -838,7 +851,7 @@ def build_state(base_dir: Path) -> dict:
             "nightly_cycle_status": {},
             "archive": None,
             "roll_watch": [],
-            "auto_policy": autonomy_policy if isinstance(autonomy_policy, dict) else {},
+            "auto_policy": resolved_auto_policy,
         }
     if isinstance(autonomy_email, dict):
         autonomy["email_status"] = human_email_status(autonomy_email.get("status"))
@@ -1105,6 +1118,9 @@ HTML = r"""<!doctype html>
         if ((autoPolicyActive.observe_only_families || []).length) policyBits.push(`observe family: ${(autoPolicyActive.observe_only_families || []).join(', ')}`);
         if ((autoPolicyActive.strict_only_tickers || []).length) policyBits.push(`strict-only ticker: ${(autoPolicyActive.strict_only_tickers || []).join(', ')}`);
         if ((autoPolicyActive.strict_only_families || []).length) policyBits.push(`strict-only family: ${(autoPolicyActive.strict_only_families || []).join(', ')}`);
+        if (autoPolicyActive.entry_max_full_stop_rub !== undefined && autoPolicyActive.entry_max_full_stop_rub !== null && autoPolicyActive.entry_max_full_stop_rub !== '') {
+          policyBits.push(`entry stop cap: ${fmt(autoPolicyActive.entry_max_full_stop_rub, 0)} ₽`);
+        }
         const policyText = policyBits.length ? policyBits.join(' | ') : 'активных runtime-ограничений пока нет';
         const recHtml = autoRecs.length
           ? `<ul class="autonomy-list">${autoRecs.map(x => `<li>${x}</li>`).join('')}</ul>`

@@ -123,6 +123,7 @@ def empty_auto_policy() -> dict:
         "observe_only_families": [],
         "strict_only_tickers": [],
         "strict_only_families": [],
+        "entry_max_full_stop_rub": None,
         "notes": [],
     }
 
@@ -138,6 +139,14 @@ def normalize_policy_names(values: object) -> list[str]:
     return sorted(set(out))
 
 
+def normalize_rub_cap(value: object) -> int | None:
+    try:
+        cap = int(float(value))
+    except Exception:
+        return None
+    return cap if cap > 0 else None
+
+
 def parse_auto_policy_payload(payload: object) -> dict:
     if not isinstance(payload, dict):
         return empty_auto_policy()
@@ -149,6 +158,7 @@ def parse_auto_policy_payload(payload: object) -> dict:
         "observe_only_families": normalize_policy_names(active.get("observe_only_families")),
         "strict_only_tickers": normalize_policy_names(active.get("strict_only_tickers")),
         "strict_only_families": normalize_policy_names(active.get("strict_only_families")),
+        "entry_max_full_stop_rub": normalize_rub_cap(active.get("entry_max_full_stop_rub")),
         "notes": [str(item) for item in (active.get("notes") or []) if str(item).strip()],
     }
 
@@ -192,9 +202,11 @@ def refresh_auto_policy(cache: dict, force: bool = False) -> dict:
     cache["payload"] = payload
     observe_count = len(payload["observe_only_tickers"]) + len(payload["observe_only_families"])
     strict_count = len(payload["strict_only_tickers"]) + len(payload["strict_only_families"])
+    stop_cap = payload.get("entry_max_full_stop_rub")
     print(
         f"{now_str()} AUTO_POLICY loaded trade_date={payload.get('trade_date') or '-'} "
-        f"observe={observe_count} strict_only={strict_count} path={path}",
+        f"observe={observe_count} strict_only={strict_count} "
+        f"stop_cap_rub={stop_cap if stop_cap is not None else '-'} path={path}",
         flush=True,
     )
     return payload
@@ -213,6 +225,16 @@ def auto_policy_block_reason(st: State, contour: str, policy: dict) -> str | Non
         if family in set(policy.get("strict_only_families") or []):
             return "auto_policy strict_only_family"
     return None
+
+
+def effective_max_full_stop_rub(base_cap_rub: float, policy: dict) -> float:
+    cap = float(base_cap_rub or 0.0)
+    policy_cap = normalize_rub_cap(policy.get("entry_max_full_stop_rub") if isinstance(policy, dict) else None)
+    if policy_cap is None:
+        return cap
+    if cap <= 0:
+        return float(policy_cap)
+    return min(cap, float(policy_cap))
 
 
 def position_margin(spec: Spec, direction: Direction | str, qty: int) -> float:
@@ -1899,7 +1921,7 @@ def main() -> None:
                                 st.profile,
                                 direction,
                                 st.side_fee,
-                                float(args.max_full_stop_rub),
+                                effective_max_full_stop_rub(float(args.max_full_stop_rub), active_auto_policy_local),
                             )
                             qty = sizing.qty
                             if qty < 1:

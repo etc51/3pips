@@ -738,6 +738,15 @@ def build_restriction_rows(auto_policy: dict) -> list[dict]:
                     "note": "",
                 }
             )
+    if active.get("entry_max_full_stop_rub") not in (None, ""):
+        rows.append(
+            {
+                "stage": "active",
+                "restriction_type": "entry_max_full_stop_rub",
+                "value": active.get("entry_max_full_stop_rub"),
+                "note": "",
+            }
+        )
     for note in active.get("notes") or []:
         rows.append(
             {
@@ -834,7 +843,7 @@ def build_nightly_cycle_status(
                 "active_rule_count": sum(
                     len(active.get(key) or [])
                     for key in ("observe_only_tickers", "observe_only_families", "strict_only_tickers", "strict_only_families")
-                ),
+                ) + (1 if active.get("entry_max_full_stop_rub") not in (None, "") else 0),
                 "rows": len(restriction_rows),
             },
             "summary": {
@@ -871,6 +880,7 @@ def build_auto_policy(
         "observe_only_families": [],
         "strict_only_tickers": [],
         "strict_only_families": [],
+        "entry_max_full_stop_rub": None,
         "notes": [],
     }
 
@@ -962,6 +972,24 @@ def build_auto_policy(
                     f"Сценарий {scenario} выглядит сильнее base: это кандидат на следующий тест лимита полного стопа."
                 )
 
+    consensus_scenario = str(best_consensus_overlay.get("scenario") or "")
+    consensus_days = safe_int(best_consensus_overlay.get("days"))
+    consensus_beats = safe_int(best_consensus_overlay.get("beat_base_days"))
+    consensus_delta = safe_float(best_consensus_overlay.get("delta_total_rub"))
+    candidate_stop_cap = proposed.get("candidate_stop_cap_rub")
+    if (
+        consensus_scenario.startswith("stop_cap_")
+        and candidate_stop_cap not in (None, "")
+        and consensus_days >= 2
+        and consensus_beats >= consensus_days
+        and consensus_delta >= 1_000
+    ):
+        active["entry_max_full_stop_rub"] = int(candidate_stop_cap)
+        active["notes"].append(
+            f"Авто-тюнинг: лимит полного стопа новых входов снижен до {candidate_stop_cap} ₽, "
+            f"потому что {consensus_scenario} улучшил все {consensus_days} последних дня."
+        )
+
     return {
         "generated_at": now_str(),
         "trade_date": trade_date,
@@ -973,7 +1001,7 @@ def build_auto_policy(
             "active_rule_count": sum(
                 len(active[key])
                 for key in ("observe_only_tickers", "observe_only_families", "strict_only_tickers", "strict_only_families")
-            ),
+            ) + (1 if active.get("entry_max_full_stop_rub") not in (None, "") else 0),
             "active_notes_count": len(active["notes"]),
             "best_consensus_scenario": str(best_consensus_overlay.get("scenario") or ""),
         },
@@ -997,6 +1025,7 @@ def render_auto_policy_markdown(auto_policy: dict) -> str:
         f"- observe_only_families: {', '.join(active.get('observe_only_families') or []) or 'none'}",
         f"- strict_only_tickers: {', '.join(active.get('strict_only_tickers') or []) or 'none'}",
         f"- strict_only_families: {', '.join(active.get('strict_only_families') or []) or 'none'}",
+        f"- entry_max_full_stop_rub: {active.get('entry_max_full_stop_rub') or '-'}",
         "",
     ]
     notes = active.get("notes") or []

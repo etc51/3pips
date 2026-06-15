@@ -31,6 +31,18 @@ def git_cmd(project_root: Path, *args: str) -> list[str]:
     return ["git", "-c", f"safe.directory={project_root}", *args]
 
 
+def changed_paths(project_root: Path, old_rev: str, new_rev: str) -> set[str]:
+    diff = run(git_cmd(project_root, "diff", "--name-only", f"{old_rev}..{new_rev}"), project_root)
+    if diff.returncode != 0:
+        return set()
+    return {line.strip() for line in diff.stdout.splitlines() if line.strip()}
+
+
+def write_pending_restart(path: Path, payload: dict[str, object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def runtime_open_positions(project_root: Path, run_name: str) -> tuple[int, list[str]]:
     run_dir = project_root / "reports" / "paper_runs" / run_name
     total = 0
@@ -111,15 +123,17 @@ def main() -> int:
     need_restart = False
     update_reason = ""
     previous_head = head_sha
+    requirements_changed = False
+    needs_dependency_refresh = False
 
     if head_sha != remote_sha:
+        requirements_changed = "requirements.txt" in changed_paths(project_root, previous_head, remote_sha)
         ff = run(git_cmd(project_root, "merge", "--ff-only", remote_sha), project_root)
         if ff.returncode != 0:
             log(log_path, f"fail reason=ff_merge_failed rc={ff.returncode} stderr={ff.stderr.strip()[:300]}")
             return 1
 
-        pip_install = run([args.venv_python, "-m", "pip", "install", "-r", "requirements.txt"], project_root)
-        log(log_path, f"pip rc={pip_install.returncode} stdout_len={len(pip_install.stdout)} stderr_len={len(pip_install.stderr)}")
+        needs_dependency_refresh = requirements_changed
 
         deploy_dir = project_root / "deploy"
         unit_names = [
@@ -146,9 +160,29 @@ def main() -> int:
     elif pending_payload:
         need_restart = True
         update_reason = f"pending_restart old={pending_payload.get('old_head','')} new={pending_payload.get('new_head', head_sha)}"
+        needs_dependency_refresh = not bool(pending_payload.get("deps_ready", True))
     else:
         log(log_path, f"skip reason=up_to_date head={head_sha}")
         return 0
+
+    if needs_dependency_refresh:
+        pip_install = run([args.venv_python, "-m", "pip", "install", "-r", "requirements.txt"], project_root)
+        log(log_path, f"pip rc={pip_install.returncode} stdout_len={len(pip_install.stdout)} stderr_len={len(pip_install.stderr)}")
+        if pip_install.returncode != 0:
+            pending = {
+                "updated_at": now_str(),
+                "old_head": pending_payload.get("old_head", previous_head),
+                "new_head": remote_sha if remote_sha else head_sha,
+                "reason": update_reason or "pending_restart",
+                "deferred_because": "dependency_install_failed",
+                "deps_ready": False,
+            }
+            write_pending_restart(pending_restart_path, pending)
+            log(
+                log_path,
+                f"fail reason=dependency_install rc={pip_install.returncode} stderr={pip_install.stderr.strip()[:300]}",
+            )
+            return 1
 
     allowed, why = restart_allowed_now(project_root, args.run_name)
     if not allowed:
@@ -158,9 +192,9 @@ def main() -> int:
             "new_head": remote_sha if remote_sha else head_sha,
             "reason": update_reason or "pending_restart",
             "deferred_because": why,
+            "deps_ready": True,
         }
-        pending_restart_path.parent.mkdir(parents=True, exist_ok=True)
-        pending_restart_path.write_text(json.dumps(pending, ensure_ascii=False, indent=2), encoding="utf-8")
+        write_pending_restart(pending_restart_path, pending)
         log(log_path, f"defer reason={why} {pending['reason']}")
         return 0
 

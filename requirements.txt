@@ -4,6 +4,7 @@ requests
 scipy
 matplotlib
 xlrd
-tinkoff-investments
+--extra-index-url https://opensource.tbank.ru/api/v4/projects/238/packages/pypi/simple
+t-tech-investments
 statsmodels
 pyarrow
