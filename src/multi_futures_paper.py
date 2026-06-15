@@ -126,6 +126,7 @@ def empty_auto_policy() -> dict:
         "observe_only_families": [],
         "strict_only_tickers": [],
         "strict_only_families": [],
+        "entry_no_new_after": None,
         "entry_max_full_stop_rub": None,
         "pause_ticker_after_losses": None,
         "pause_family_after_losses": None,
@@ -161,6 +162,26 @@ def normalize_positive_int(value: object) -> int | None:
     return parsed if parsed > 0 else None
 
 
+def normalize_clock_hhmm(value: object) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if ":" in text:
+        parts = text.split(":", 1)
+    elif len(text) == 4 and text.isdigit():
+        parts = [text[:2], text[2:]]
+    else:
+        return None
+    try:
+        hour = int(parts[0])
+        minute = int(parts[1])
+    except Exception:
+        return None
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    return f"{hour:02d}:{minute:02d}"
+
+
 def parse_auto_policy_payload(payload: object) -> dict:
     if not isinstance(payload, dict):
         return empty_auto_policy()
@@ -172,6 +193,7 @@ def parse_auto_policy_payload(payload: object) -> dict:
         "observe_only_families": normalize_policy_names(active.get("observe_only_families")),
         "strict_only_tickers": normalize_policy_names(active.get("strict_only_tickers")),
         "strict_only_families": normalize_policy_names(active.get("strict_only_families")),
+        "entry_no_new_after": normalize_clock_hhmm(active.get("entry_no_new_after")),
         "entry_max_full_stop_rub": normalize_rub_cap(active.get("entry_max_full_stop_rub")),
         "pause_ticker_after_losses": normalize_positive_int(active.get("pause_ticker_after_losses")),
         "pause_family_after_losses": normalize_positive_int(active.get("pause_family_after_losses")),
@@ -219,12 +241,14 @@ def refresh_auto_policy(cache: dict, force: bool = False) -> dict:
     cache["payload"] = payload
     observe_count = len(payload["observe_only_tickers"]) + len(payload["observe_only_families"])
     strict_count = len(payload["strict_only_tickers"]) + len(payload["strict_only_families"])
+    entry_cutoff = payload.get("entry_no_new_after")
     stop_cap = payload.get("entry_max_full_stop_rub")
     pause_ticker = payload.get("pause_ticker_after_losses")
     pause_family = payload.get("pause_family_after_losses")
     print(
         f"{now_str()} AUTO_POLICY loaded trade_date={payload.get('trade_date') or '-'} "
         f"observe={observe_count} strict_only={strict_count} "
+        f"entry_no_new_after={entry_cutoff or '-'} "
         f"stop_cap_rub={stop_cap if stop_cap is not None else '-'} "
         f"pause_ticker={pause_ticker if pause_ticker is not None else '-'} "
         f"pause_family={pause_family if pause_family is not None else '-'} path={path}",
@@ -256,6 +280,16 @@ def effective_max_full_stop_rub(base_cap_rub: float, policy: dict) -> float:
     if cap <= 0:
         return float(policy_cap)
     return min(cap, float(policy_cap))
+
+
+def effective_no_new_after(base_no_new_after: int | None, policy: dict) -> int | None:
+    policy_cutoff = normalize_clock_hhmm(policy.get("entry_no_new_after") if isinstance(policy, dict) else None)
+    policy_no_new_after = parse_clock_time(policy_cutoff) if policy_cutoff else None
+    if base_no_new_after is None:
+        return policy_no_new_after
+    if policy_no_new_after is None:
+        return base_no_new_after
+    return min(base_no_new_after, policy_no_new_after)
 
 
 def apply_auto_loss_pause(st: State, states: list[State], net: float, policy: dict) -> None:
@@ -1991,7 +2025,10 @@ def main() -> None:
             nonlocal next_report, next_snapshot
             now = time.monotonic()
             active_auto_policy_local = refresh_auto_policy(auto_policy_state)
-            trading_enabled = daily_trading_enabled(no_trade_before, no_new_after)
+            trading_enabled = daily_trading_enabled(
+                no_trade_before,
+                effective_no_new_after(no_new_after, active_auto_policy_local),
+            )
             force_close_due = daily_force_close_due(force_close_at)
             uid = ""
             price = None

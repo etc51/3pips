@@ -256,7 +256,7 @@ def merge_policy_views(base_active: dict, overrides: dict) -> dict:
     )
     merged["strict_only_tickers"] = normalize_upper_list(base_active.get("strict_only_tickers"))
     merged["strict_only_families"] = normalize_upper_list(base_active.get("strict_only_families"))
-    for key in ("entry_max_full_stop_rub", "pause_ticker_after_losses", "pause_family_after_losses", "pause_after_loss_minutes"):
+    for key in ("entry_no_new_after", "entry_max_full_stop_rub", "pause_ticker_after_losses", "pause_family_after_losses", "pause_after_loss_minutes"):
         merged[key] = base_active.get(key)
     base_notes = [str(item) for item in (base_active.get("notes") or []) if str(item).strip()]
     override_notes = [str(item) for item in (overrides.get("notes") or []) if str(item).strip()]
@@ -378,7 +378,7 @@ def refresh_intraday_killer_policy(project_root: Path, run_dir: Path, dashboard_
         + len(merged_active.get("strict_only_families") or [])
         + sum(
             1
-            for key in ("entry_max_full_stop_rub", "pause_ticker_after_losses", "pause_family_after_losses", "pause_after_loss_minutes")
+            for key in ("entry_no_new_after", "entry_max_full_stop_rub", "pause_ticker_after_losses", "pause_family_after_losses", "pause_after_loss_minutes")
             if merged_active.get(key) not in (None, "")
         )
     )

@@ -130,6 +130,36 @@ def normalize_upper_list(values: object) -> list[str]:
     return sorted({str(value).strip().upper() for value in values if str(value).strip()})
 
 
+def normalize_clock_hhmm(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if ":" in text:
+        parts = text.split(":", 1)
+    elif len(text) == 4 and text.isdigit():
+        parts = [text[:2], text[2:]]
+    else:
+        return ""
+    try:
+        hour = int(parts[0])
+        minute = int(parts[1])
+    except Exception:
+        return ""
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return ""
+    return f"{hour:02d}:{minute:02d}"
+
+
+def earlier_clock_hhmm(left: object, right: object) -> str:
+    left_norm = normalize_clock_hhmm(left)
+    right_norm = normalize_clock_hhmm(right)
+    if not left_norm:
+        return right_norm
+    if not right_norm:
+        return left_norm
+    return left_norm if left_norm <= right_norm else right_norm
+
+
 def merge_watchdog_overrides(auto_policy: dict, existing_policy: dict) -> dict:
     if not isinstance(auto_policy, dict) or not isinstance(existing_policy, dict):
         return auto_policy
@@ -150,7 +180,7 @@ def merge_watchdog_overrides(auto_policy: dict, existing_policy: dict) -> dict:
     )
     merged["strict_only_tickers"] = normalize_upper_list(active_base.get("strict_only_tickers"))
     merged["strict_only_families"] = normalize_upper_list(active_base.get("strict_only_families"))
-    for key in ("entry_max_full_stop_rub", "pause_ticker_after_losses", "pause_family_after_losses", "pause_after_loss_minutes"):
+    for key in ("entry_no_new_after", "entry_max_full_stop_rub", "pause_ticker_after_losses", "pause_family_after_losses", "pause_after_loss_minutes"):
         merged[key] = active_base.get(key)
     base_notes = [str(item) for item in (active_base.get("notes") or []) if str(item).strip()]
     override_notes = [str(item) for item in (overrides.get("notes") or []) if str(item).strip()]
@@ -168,7 +198,7 @@ def merge_watchdog_overrides(auto_policy: dict, existing_policy: dict) -> dict:
         + len(merged.get("strict_only_families") or [])
         + sum(
             1
-            for key in ("entry_max_full_stop_rub", "pause_ticker_after_losses", "pause_family_after_losses", "pause_after_loss_minutes")
+            for key in ("entry_no_new_after", "entry_max_full_stop_rub", "pause_ticker_after_losses", "pause_family_after_losses", "pause_after_loss_minutes")
             if merged.get(key) not in (None, "")
         )
     )
@@ -387,6 +417,17 @@ def build_research_scenarios(
     profiles: dict[str, dict],
     include_combo_scenarios: bool = True,
 ) -> list[dict]:
+    def before_cutoff_predicate(cutoff: str):
+        hh, mm = map(int, cutoff.split(":"))
+
+        def pred(row, hh=hh, mm=mm):
+            dt = entry_dt(row)
+            if dt is None:
+                return True
+            return (dt.hour, dt.minute) <= (hh, mm)
+
+        return pred
+
     scenarios: list[dict] = []
     scenarios.append(evaluate_scenario("base", sample_rows, profiles, note="current live policy"))
 
@@ -402,20 +443,12 @@ def build_research_scenarios(
         )
 
     for cutoff in ["16:30", "17:00", "17:15", "17:30", "17:45"]:
-        hh, mm = map(int, cutoff.split(":"))
-
-        def pred(row, hh=hh, mm=mm):
-            dt = entry_dt(row)
-            if dt is None:
-                return True
-            return (dt.hour, dt.minute) <= (hh, mm)
-
         scenarios.append(
             evaluate_scenario(
                 f"no_new_after_{cutoff.replace(':', '')}",
                 sample_rows,
                 profiles,
-                predicate=pred,
+                predicate=before_cutoff_predicate(cutoff),
                 note="entry time cutoff",
             )
         )
@@ -524,6 +557,31 @@ def build_research_scenarios(
                 note="500 RUB stop cap + family pause after second losing close",
             )
         )
+        for cutoff in ["17:00", "17:15", "17:30"]:
+            cutoff_token = cutoff.replace(":", "")
+            scenarios.append(
+                evaluate_scenario(
+                    f"combo_stop_cap_500__no_new_after_{cutoff_token}",
+                    sample_rows,
+                    profiles,
+                    predicate=before_cutoff_predicate(cutoff),
+                    cap_rub=500,
+                    note=f"500 RUB stop cap + no new entries after {cutoff}",
+                )
+            )
+            scenarios.append(
+                evaluate_scenario(
+                    f"combo_stop_cap_500__contour_only_strict__no_new_after_{cutoff_token}",
+                    sample_rows,
+                    profiles,
+                    predicate=lambda row, cutoff=cutoff: (
+                        str(row.get("contour") or "") == "strict"
+                        and before_cutoff_predicate(cutoff)(row)
+                    ),
+                    cap_rub=500,
+                    note=f"strict only + 500 RUB stop cap + no new entries after {cutoff}",
+                )
+            )
         for family in weak_families[:4]:
             scenarios.append(
                 evaluate_scenario(
@@ -878,6 +936,15 @@ def build_restriction_rows(auto_policy: dict) -> list[dict]:
                 "note": "",
             }
         )
+    if active.get("entry_no_new_after") not in (None, ""):
+        rows.append(
+            {
+                "stage": "active",
+                "restriction_type": "entry_no_new_after",
+                "value": active.get("entry_no_new_after"),
+                "note": "",
+            }
+        )
     for key in ("pause_ticker_after_losses", "pause_family_after_losses", "pause_after_loss_minutes"):
         if active.get(key) not in (None, ""):
             rows.append(
@@ -987,7 +1054,7 @@ def build_nightly_cycle_status(
                 )
                 + sum(
                     1
-                    for key in ("entry_max_full_stop_rub", "pause_ticker_after_losses", "pause_family_after_losses", "pause_after_loss_minutes")
+                    for key in ("entry_no_new_after", "entry_max_full_stop_rub", "pause_ticker_after_losses", "pause_family_after_losses", "pause_after_loss_minutes")
                     if active.get(key) not in (None, "")
                 ),
                 "rows": len(restriction_rows),
@@ -1033,6 +1100,15 @@ def scenario_stop_cap(name: str) -> int | None:
     return None
 
 
+def scenario_entry_cutoff(name: str) -> str:
+    candidates = combo_components(name) if name.startswith("combo_") else [name]
+    for candidate in candidates:
+        if not candidate.startswith("no_new_after_"):
+            continue
+        return normalize_clock_hhmm(candidate.removeprefix("no_new_after_"))
+    return ""
+
+
 def scenario_blacklist_family(name: str) -> str:
     if name.startswith("blacklist_family_"):
         return name.removeprefix("blacklist_family_")
@@ -1072,6 +1148,7 @@ def build_auto_policy(
         "observe_only_families": [],
         "strict_only_tickers": [],
         "strict_only_families": [],
+        "entry_no_new_after": None,
         "entry_max_full_stop_rub": None,
         "pause_ticker_after_losses": None,
         "pause_family_after_losses": None,
@@ -1155,10 +1232,11 @@ def build_auto_policy(
     }
     for candidate in [best_consensus_overlay, best_latest_overlay]:
         scenario = str(candidate.get("scenario") or "")
-        if scenario.startswith("no_new_after_") and not proposed["candidate_entry_cutoff"]:
-            proposed["candidate_entry_cutoff"] = scenario.removeprefix("no_new_after_")
+        candidate_entry_cutoff = scenario_entry_cutoff(scenario)
+        if candidate_entry_cutoff and not proposed["candidate_entry_cutoff"]:
+            proposed["candidate_entry_cutoff"] = candidate_entry_cutoff
             proposed["notes"].append(
-                f"Сценарий {scenario} дал лучший результат в исследовательском слое: это кандидат на ранний cutoff, но пока не активируется автоматически."
+                f"Сценарий {scenario} дал лучший результат в исследовательском слое: это кандидат на ранний cutoff {candidate_entry_cutoff}, но пока не активируется автоматически."
             )
         if scenario.startswith("stop_cap_") and proposed["candidate_stop_cap_rub"] is None:
             try:
@@ -1174,6 +1252,7 @@ def build_auto_policy(
     consensus_days = safe_int(best_consensus_overlay.get("days"))
     consensus_beats = safe_int(best_consensus_overlay.get("beat_base_days"))
     consensus_delta = safe_float(best_consensus_overlay.get("delta_total_rub"))
+    consensus_latest_delta = safe_float(best_consensus_overlay.get("latest_day_delta_rub"))
     candidate_stop_cap = proposed.get("candidate_stop_cap_rub")
     if (
         consensus_scenario.startswith("stop_cap_")
@@ -1186,6 +1265,20 @@ def build_auto_policy(
         active["notes"].append(
             f"Авто-тюнинг: лимит полного стопа новых входов снижен до {candidate_stop_cap} ₽, "
             f"потому что {consensus_scenario} улучшил все {consensus_days} последних дня."
+        )
+
+    consensus_entry_cutoff = scenario_entry_cutoff(consensus_scenario)
+    if (
+        consensus_entry_cutoff
+        and consensus_days >= 2
+        and consensus_beats >= consensus_days
+        and consensus_delta >= 1_000
+        and consensus_latest_delta >= 500
+    ):
+        active["entry_no_new_after"] = earlier_clock_hhmm(active.get("entry_no_new_after"), consensus_entry_cutoff)
+        active["notes"].append(
+            f"Авто-policy: окно новых входов ужесточено до {consensus_entry_cutoff}, "
+            f"потому что {consensus_scenario} устойчиво улучшает результат против base."
         )
 
     latest_scenario = str(best_latest_overlay.get("scenario") or "")
@@ -1246,19 +1339,34 @@ def build_auto_policy(
 
     best_combo_scenario = str(best_all_combo_overlay.get("scenario") or "")
     combo_blacklist_family = scenario_blacklist_family(best_combo_scenario)
+    combo_entry_cutoff = scenario_entry_cutoff(best_combo_scenario)
     combo_stop_cap = scenario_stop_cap(best_combo_scenario)
     combo_has_strict = scenario_has_component(best_combo_scenario, "contour_only_strict")
     best_day_same_combo = next((row for row in research_day if str(row.get("scenario") or "") == best_combo_scenario), {})
     all_sample_combo_delta = safe_float(best_all_combo_overlay.get("net_rub")) - safe_float(base_all_overlay.get("net_rub"))
     latest_combo_delta = safe_float(best_day_same_combo.get("net_rub")) - safe_float(base_day_overlay.get("net_rub"))
     latest_combo_net = safe_float(best_day_same_combo.get("net_rub"))
+    combo_trades = safe_int(best_all_combo_overlay.get("trades"))
+    combo_net = safe_float(best_all_combo_overlay.get("net_rub"))
     active_stop_cap = int(active.get("entry_max_full_stop_rub") or 0) if active.get("entry_max_full_stop_rub") not in (None, "") else 0
     combo_cap_matches_active = bool(combo_stop_cap and active_stop_cap and combo_stop_cap == active_stop_cap)
+    robust_positive_combo = (
+        combo_trades >= 5
+        and combo_net > 0
+        and latest_combo_net > 0
+        and all_sample_combo_delta >= 1_500
+        and latest_combo_delta >= 700
+    )
+    if combo_entry_cutoff and combo_cap_matches_active and robust_positive_combo:
+        active["entry_no_new_after"] = earlier_clock_hhmm(active.get("entry_no_new_after"), combo_entry_cutoff)
+        active["notes"].append(
+            f"Авто-policy: окно новых входов ужесточено до {combo_entry_cutoff}, "
+            f"потому что strongest combo {best_combo_scenario} лучше base и по последнему дню, и по короткой серии."
+        )
     if combo_blacklist_family and combo_cap_matches_active:
         family_total = by_family.get(combo_blacklist_family) or {}
         family_trades = safe_int(family_total.get("trades"))
         family_net = safe_float(family_total.get("net_rub"))
-        combo_trades = safe_int(best_all_combo_overlay.get("trades"))
         robust_combo = (
             combo_trades >= 6
             and all_sample_combo_delta >= 2_500
@@ -1271,8 +1379,6 @@ def build_auto_policy(
                 f"потому что strongest combo {best_combo_scenario} резко улучшает и последний день, и всю короткую выборку."
             )
     if combo_has_strict and combo_cap_matches_active:
-        combo_trades = safe_int(best_all_combo_overlay.get("trades"))
-        combo_net = safe_float(best_all_combo_overlay.get("net_rub"))
         robust_strict_combo = (
             combo_trades >= 5
             and combo_net > 0
@@ -1342,7 +1448,7 @@ def build_auto_policy(
             )
             + sum(
                 1
-                for key in ("entry_max_full_stop_rub", "pause_ticker_after_losses", "pause_family_after_losses", "pause_after_loss_minutes")
+                for key in ("entry_no_new_after", "entry_max_full_stop_rub", "pause_ticker_after_losses", "pause_family_after_losses", "pause_after_loss_minutes")
                 if active.get(key) not in (None, "")
             ),
             "active_notes_count": len(active["notes"]),
@@ -1368,6 +1474,7 @@ def render_auto_policy_markdown(auto_policy: dict) -> str:
         f"- observe_only_families: {', '.join(active.get('observe_only_families') or []) or 'none'}",
         f"- strict_only_tickers: {', '.join(active.get('strict_only_tickers') or []) or 'none'}",
         f"- strict_only_families: {', '.join(active.get('strict_only_families') or []) or 'none'}",
+        f"- entry_no_new_after: {active.get('entry_no_new_after') or '-'}",
         f"- entry_max_full_stop_rub: {active.get('entry_max_full_stop_rub') or '-'}",
         f"- pause_ticker_after_losses: {active.get('pause_ticker_after_losses') or '-'}",
         f"- pause_family_after_losses: {active.get('pause_family_after_losses') or '-'}",
