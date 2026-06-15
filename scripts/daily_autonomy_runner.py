@@ -1015,6 +1015,30 @@ def build_auto_policy(
         )
 
     latest_scenario = str(best_latest_overlay.get("scenario") or "")
+    strict_consensus_overlay = next((row for row in research_consensus if str(row.get("scenario") or "") == "contour_only_strict"), {})
+    strict_days = safe_int(strict_consensus_overlay.get("days"))
+    strict_total_net = safe_float(strict_consensus_overlay.get("total_net_rub"))
+    strict_delta = safe_float(strict_consensus_overlay.get("delta_total_rub"))
+    strict_latest_delta = safe_float(strict_consensus_overlay.get("latest_day_delta_rub"))
+    futures_families = sorted(
+        family
+        for family in by_family
+        if family and "PERPA" not in str(family).upper()
+    )
+    if (
+        futures_families
+        and strict_days >= 2
+        and strict_total_net >= 0
+        and strict_delta >= 2_000
+        and strict_latest_delta >= 1_000
+        and latest_scenario == "contour_only_strict"
+    ):
+        active["strict_only_families"].extend(futures_families)
+        active["notes"].append(
+            "Авто-policy: все фьючерсные семьи переведены в strict-only для новых входов, "
+            "потому что contour_only_strict дал сильный прирост на последнем дне и не уходит в минус по накопленной серии."
+        )
+
     consensus_blacklist_family = consensus_scenario.removeprefix("blacklist_family_") if consensus_scenario.startswith("blacklist_family_") else ""
     if consensus_blacklist_family:
         family_total = by_family.get(consensus_blacklist_family) or {}
