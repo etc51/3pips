@@ -39,6 +39,7 @@ from auto_policy_utils import (  # noqa: E402
     normalize_upper_list,
     policy_group_blackout_windows,
 )
+from auto_policy_merge import merge_watchdog_overrides, summarize_active_policy  # noqa: E402
 
 
 PREMIUM_FUTURES_RATE = 0.00025
@@ -153,69 +154,6 @@ def later_clock_hhmm(left: object, right: object) -> str:
     if not right_norm:
         return left_norm
     return left_norm if left_norm >= right_norm else right_norm
-
-
-def merge_watchdog_overrides(auto_policy: dict, existing_policy: dict) -> dict:
-    if not isinstance(auto_policy, dict) or not isinstance(existing_policy, dict):
-        return auto_policy
-    trade_date = str(auto_policy.get("trade_date") or "")
-    if not trade_date or str(existing_policy.get("trade_date") or "") != trade_date:
-        return auto_policy
-    overrides = existing_policy.get("watchdog_overrides")
-    if not isinstance(overrides, dict):
-        return auto_policy
-
-    active_base = auto_policy.get("active_base") if isinstance(auto_policy.get("active_base"), dict) else {}
-    merged = dict(active_base)
-    merged["observe_only_portfolios"] = normalize_upper_list(active_base.get("observe_only_portfolios"))
-    merged["observe_only_group_families"] = sorted(
-        set(normalize_upper_list(active_base.get("observe_only_group_families")))
-        | set(normalize_upper_list(overrides.get("observe_only_group_families")))
-    )
-    merged["allow_aggressive_group_families"] = normalize_upper_list(active_base.get("allow_aggressive_group_families"))
-    merged["observe_only_tickers"] = sorted(
-        set(normalize_upper_list(active_base.get("observe_only_tickers"))) | set(normalize_upper_list(overrides.get("observe_only_tickers")))
-    )
-    merged["observe_only_families"] = sorted(
-        set(normalize_upper_list(active_base.get("observe_only_families"))) | set(normalize_upper_list(overrides.get("observe_only_families")))
-    )
-    merged["strict_only_tickers"] = normalize_upper_list(active_base.get("strict_only_tickers"))
-    merged["strict_only_families"] = normalize_upper_list(active_base.get("strict_only_families"))
-    merged["entry_blackout_windows"] = normalize_blackout_windows(active_base.get("entry_blackout_windows"))
-    merged["entry_blackout_group_windows"] = merge_group_blackout_windows(
-        policy_group_blackout_windows(active_base),
-        policy_group_blackout_windows(overrides),
-    )
-    for key in ("entry_no_trade_before", "entry_no_new_after", "entry_max_full_stop_rub", "pause_ticker_after_losses", "pause_family_after_losses", "pause_after_loss_minutes"):
-        merged[key] = active_base.get(key)
-    base_notes = [str(item) for item in (active_base.get("notes") or []) if str(item).strip()]
-    override_notes = [str(item) for item in (overrides.get("notes") or []) if str(item).strip()]
-    merged["notes"] = list(dict.fromkeys(base_notes + override_notes))[:12]
-
-    payload = dict(auto_policy)
-    payload["active_base"] = dict(active_base)
-    payload["watchdog_overrides"] = dict(overrides)
-    payload["active"] = merged
-    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
-    summary["active_rule_count"] = (
-        len(merged.get("observe_only_portfolios") or [])
-        + len(merged.get("observe_only_group_families") or [])
-        + len(merged.get("allow_aggressive_group_families") or [])
-        + len(merged.get("observe_only_tickers") or [])
-        + len(merged.get("observe_only_families") or [])
-        + len(merged.get("strict_only_tickers") or [])
-        + len(merged.get("strict_only_families") or [])
-        + len(merged.get("entry_blackout_windows") or [])
-        + count_group_blackout_rules(policy_group_blackout_windows(merged))
-        + sum(
-            1
-            for key in ("entry_no_trade_before", "entry_no_new_after", "entry_max_full_stop_rub", "pause_ticker_after_losses", "pause_family_after_losses", "pause_after_loss_minutes")
-            if merged.get(key) not in (None, "")
-        )
-    )
-    summary["active_notes_count"] = len(merged.get("notes") or [])
-    payload["summary"] = summary
-    return payload
 
 
 def normalize_trade_row(row: dict) -> dict | None:
@@ -1478,25 +1416,7 @@ def build_nightly_cycle_status(
             },
             "restrictions": {
                 "status": "ok",
-                "active_rule_count": sum(
-                    len(active.get(key) or [])
-                    for key in (
-                        "observe_only_portfolios",
-                        "observe_only_group_families",
-                        "allow_aggressive_group_families",
-                        "observe_only_tickers",
-                        "observe_only_families",
-                        "strict_only_tickers",
-                        "strict_only_families",
-                        "entry_blackout_windows",
-                    )
-                )
-                + count_group_blackout_rules(policy_group_blackout_windows(active))
-                + sum(
-                    1
-                    for key in ("entry_no_trade_before", "entry_no_new_after", "entry_max_full_stop_rub", "pause_ticker_after_losses", "pause_family_after_losses", "pause_after_loss_minutes")
-                    if active.get(key) not in (None, "")
-                ),
+                "active_rule_count": summarize_active_policy(active)["active_rule_count"],
                 "rows": len(restriction_rows),
             },
             "summary": {
@@ -2584,26 +2504,7 @@ def build_auto_policy(
         },
         "proposed": proposed,
         "summary": {
-            "active_rule_count": sum(
-                len(active[key])
-                for key in (
-                    "observe_only_portfolios",
-                    "observe_only_group_families",
-                    "allow_aggressive_group_families",
-                    "observe_only_tickers",
-                    "observe_only_families",
-                    "strict_only_tickers",
-                    "strict_only_families",
-                    "entry_blackout_windows",
-                )
-            )
-            + count_group_blackout_rules(policy_group_blackout_windows(active))
-            + sum(
-                1
-                for key in ("entry_no_trade_before", "entry_no_new_after", "entry_max_full_stop_rub", "pause_ticker_after_losses", "pause_family_after_losses", "pause_after_loss_minutes")
-                if active.get(key) not in (None, "")
-            ),
-            "active_notes_count": len(active["notes"]),
+            **summarize_active_policy(active),
             "best_consensus_scenario": str(best_consensus_overlay.get("scenario") or ""),
         },
     }

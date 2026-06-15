@@ -26,6 +26,7 @@ from auto_policy_utils import (  # noqa: E402
     normalize_upper_list,
     policy_group_blackout_windows,
 )
+from auto_policy_merge import merge_policy_views, strip_watchdog_overrides, summarize_active_policy  # noqa: E402
 
 
 def log(path: Path, message: str) -> None:
@@ -334,62 +335,6 @@ def load_dashboard_state(dashboard_url: str) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
-def strip_watchdog_overrides(active: dict, overrides: dict) -> dict:
-    base = dict(active) if isinstance(active, dict) else {}
-    base["observe_only_portfolios"] = normalize_upper_list(base.get("observe_only_portfolios"))
-    group_values = normalize_upper_list(base.get("observe_only_group_families"))
-    remove_group_values = set(normalize_upper_list(overrides.get("observe_only_group_families")))
-    base["observe_only_group_families"] = [value for value in group_values if value not in remove_group_values]
-    base["allow_aggressive_group_families"] = normalize_upper_list(base.get("allow_aggressive_group_families"))
-    for key in ("observe_only_tickers", "observe_only_families", "strict_only_tickers", "strict_only_families"):
-        values = normalize_upper_list(base.get(key))
-        if key in {"observe_only_tickers", "observe_only_families"}:
-            remove_values = set(normalize_upper_list(overrides.get(key)))
-            values = [value for value in values if value not in remove_values]
-        base[key] = values
-    base["entry_blackout_group_windows"] = policy_group_blackout_windows(base)
-    notes = [str(item) for item in (base.get("notes") or []) if str(item).strip()]
-    remove_notes = {str(item) for item in (overrides.get("notes") or []) if str(item).strip()}
-    base["notes"] = [note for note in notes if note not in remove_notes]
-    return base
-
-
-def merge_policy_views(base_active: dict, overrides: dict) -> dict:
-    merged = dict(base_active) if isinstance(base_active, dict) else {}
-    merged["observe_only_portfolios"] = normalize_upper_list(base_active.get("observe_only_portfolios"))
-    merged["observe_only_group_families"] = sorted(
-        set(normalize_upper_list(base_active.get("observe_only_group_families")))
-        | set(normalize_upper_list(overrides.get("observe_only_group_families")))
-    )
-    merged["allow_aggressive_group_families"] = normalize_upper_list(base_active.get("allow_aggressive_group_families"))
-    merged["observe_only_tickers"] = sorted(
-        set(normalize_upper_list(base_active.get("observe_only_tickers"))) | set(normalize_upper_list(overrides.get("observe_only_tickers")))
-    )
-    merged["observe_only_families"] = sorted(
-        set(normalize_upper_list(base_active.get("observe_only_families"))) | set(normalize_upper_list(overrides.get("observe_only_families")))
-    )
-    merged["strict_only_tickers"] = normalize_upper_list(base_active.get("strict_only_tickers"))
-    merged["strict_only_families"] = normalize_upper_list(base_active.get("strict_only_families"))
-    merged["entry_blackout_windows"] = normalize_blackout_windows(base_active.get("entry_blackout_windows"))
-    merged["entry_blackout_group_windows"] = merge_group_blackout_windows(
-        policy_group_blackout_windows(base_active),
-        policy_group_blackout_windows(overrides),
-    )
-    for key in (
-        "entry_no_trade_before",
-        "entry_no_new_after",
-        "entry_max_full_stop_rub",
-        "pause_ticker_after_losses",
-        "pause_family_after_losses",
-        "pause_after_loss_minutes",
-    ):
-        merged[key] = base_active.get(key)
-    base_notes = [str(item) for item in (base_active.get("notes") or []) if str(item).strip()]
-    override_notes = [str(item) for item in (overrides.get("notes") or []) if str(item).strip()]
-    merged["notes"] = list(dict.fromkeys(base_notes + override_notes))[:12]
-    return merged
-
-
 def compute_intraday_watchdog_overrides(
     run_dir: Path,
     trade_date: str,
@@ -598,30 +543,7 @@ def refresh_intraday_killer_policy(project_root: Path, run_dir: Path, dashboard_
     payload["watchdog_overrides"] = overrides
     payload["active"] = merged_active
     summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
-    summary["active_rule_count"] = (
-        len(merged_active.get("observe_only_portfolios") or [])
-        + len(merged_active.get("observe_only_group_families") or [])
-        + len(merged_active.get("allow_aggressive_group_families") or [])
-        + len(merged_active.get("observe_only_tickers") or [])
-        + len(merged_active.get("observe_only_families") or [])
-        + len(merged_active.get("strict_only_tickers") or [])
-        + len(merged_active.get("strict_only_families") or [])
-        + len(merged_active.get("entry_blackout_windows") or [])
-        + sum(len(v or []) for v in (merged_active.get("entry_blackout_group_windows") or {}).values())
-        + sum(
-            1
-            for key in (
-                "entry_no_trade_before",
-                "entry_no_new_after",
-                "entry_max_full_stop_rub",
-                "pause_ticker_after_losses",
-                "pause_family_after_losses",
-                "pause_after_loss_minutes",
-            )
-            if merged_active.get(key) not in (None, "")
-        )
-    )
-    summary["active_notes_count"] = len(merged_active.get("notes") or [])
+    summary.update(summarize_active_policy(merged_active))
     payload["summary"] = summary
     if changed:
         write_json(policy_path, payload)
