@@ -173,7 +173,10 @@ def merge_watchdog_overrides(auto_policy: dict, existing_policy: dict) -> dict:
     active_base = auto_policy.get("active_base") if isinstance(auto_policy.get("active_base"), dict) else {}
     merged = dict(active_base)
     merged["observe_only_portfolios"] = normalize_upper_list(active_base.get("observe_only_portfolios"))
-    merged["observe_only_group_families"] = normalize_upper_list(active_base.get("observe_only_group_families"))
+    merged["observe_only_group_families"] = sorted(
+        set(normalize_upper_list(active_base.get("observe_only_group_families")))
+        | set(normalize_upper_list(overrides.get("observe_only_group_families")))
+    )
     merged["observe_only_tickers"] = sorted(
         set(normalize_upper_list(active_base.get("observe_only_tickers"))) | set(normalize_upper_list(overrides.get("observe_only_tickers")))
     )
