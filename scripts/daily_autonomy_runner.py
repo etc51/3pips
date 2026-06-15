@@ -2413,6 +2413,12 @@ def build_auto_policy(
         and all_sample_combo_delta >= 1_500
         and latest_combo_delta >= 700
     )
+    group_blackout_beats_strict_combo = (
+        bool(activated_group_blackout_scenarios)
+        and combo_has_strict
+        and best_active_group_blackout_all_net >= combo_net
+        and best_active_group_blackout_day_net >= latest_combo_net
+    )
     if combo_entry_start and combo_cap_matches_active and robust_positive_combo:
         active["entry_no_trade_before"] = later_clock_hhmm(active.get("entry_no_trade_before"), combo_entry_start)
         active["notes"].append(
@@ -2493,13 +2499,13 @@ def build_auto_policy(
             and all_sample_combo_delta >= 2_000
             and latest_combo_delta >= 1_000
         )
-        if robust_strict_combo:
+        if robust_strict_combo and not group_blackout_beats_strict_combo:
             active["strict_only_families"].extend(futures_families)
             active["notes"].append(
                 f"Авто-policy: все фьючерсные семьи переведены в strict-only для новых входов, "
                 f"потому что strongest combo {best_combo_scenario} уже даёт положительный результат на общей и последней выборке."
             )
-        elif group_blackout_beats_blanket_strict:
+        elif group_blackout_beats_strict_combo or group_blackout_beats_blanket_strict:
             active["notes"].append(
                 f"Авто-policy: strongest combo {best_combo_scenario} не переводит все семьи в strict-only, "
                 "потому что адресный group blackout уже перекрывает основной ущерб мягче."
