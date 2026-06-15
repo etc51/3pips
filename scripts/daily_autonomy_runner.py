@@ -160,6 +160,16 @@ def earlier_clock_hhmm(left: object, right: object) -> str:
     return left_norm if left_norm <= right_norm else right_norm
 
 
+def later_clock_hhmm(left: object, right: object) -> str:
+    left_norm = normalize_clock_hhmm(left)
+    right_norm = normalize_clock_hhmm(right)
+    if not left_norm:
+        return right_norm
+    if not right_norm:
+        return left_norm
+    return left_norm if left_norm >= right_norm else right_norm
+
+
 def merge_watchdog_overrides(auto_policy: dict, existing_policy: dict) -> dict:
     if not isinstance(auto_policy, dict) or not isinstance(existing_policy, dict):
         return auto_policy
@@ -186,7 +196,7 @@ def merge_watchdog_overrides(auto_policy: dict, existing_policy: dict) -> dict:
     )
     merged["strict_only_tickers"] = normalize_upper_list(active_base.get("strict_only_tickers"))
     merged["strict_only_families"] = normalize_upper_list(active_base.get("strict_only_families"))
-    for key in ("entry_no_new_after", "entry_max_full_stop_rub", "pause_ticker_after_losses", "pause_family_after_losses", "pause_after_loss_minutes"):
+    for key in ("entry_no_trade_before", "entry_no_new_after", "entry_max_full_stop_rub", "pause_ticker_after_losses", "pause_family_after_losses", "pause_after_loss_minutes"):
         merged[key] = active_base.get(key)
     base_notes = [str(item) for item in (active_base.get("notes") or []) if str(item).strip()]
     override_notes = [str(item) for item in (overrides.get("notes") or []) if str(item).strip()]
@@ -207,7 +217,7 @@ def merge_watchdog_overrides(auto_policy: dict, existing_policy: dict) -> dict:
         + len(merged.get("strict_only_families") or [])
         + sum(
             1
-            for key in ("entry_no_new_after", "entry_max_full_stop_rub", "pause_ticker_after_losses", "pause_family_after_losses", "pause_after_loss_minutes")
+            for key in ("entry_no_trade_before", "entry_no_new_after", "entry_max_full_stop_rub", "pause_ticker_after_losses", "pause_family_after_losses", "pause_after_loss_minutes")
             if merged.get(key) not in (None, "")
         )
     )
@@ -426,6 +436,17 @@ def build_research_scenarios(
     profiles: dict[str, dict],
     include_combo_scenarios: bool = True,
 ) -> list[dict]:
+    def after_start_predicate(start_at: str):
+        hh, mm = map(int, start_at.split(":"))
+
+        def pred(row, hh=hh, mm=mm):
+            dt = entry_dt(row)
+            if dt is None:
+                return True
+            return (dt.hour, dt.minute) >= (hh, mm)
+
+        return pred
+
     def before_cutoff_predicate(cutoff: str):
         hh, mm = map(int, cutoff.split(":"))
 
@@ -448,6 +469,17 @@ def build_research_scenarios(
                 profiles,
                 cap_rub=cap,
                 note="linear qty rescale by full stop cap",
+            )
+        )
+
+    for start_at in ["10:30", "10:45", "11:00"]:
+        scenarios.append(
+            evaluate_scenario(
+                f"no_trade_before_{start_at.replace(':', '')}",
+                sample_rows,
+                profiles,
+                predicate=after_start_predicate(start_at),
+                note="delay session start to avoid weaker early entries",
             )
         )
 
@@ -926,6 +958,8 @@ def scenario_kind(name: str) -> str:
         return "combo_overlay"
     if name.startswith("stop_cap_"):
         return "stop_cap_rub"
+    if name.startswith("no_trade_before_"):
+        return "entry_start"
     if name.startswith("no_new_after_"):
         return "entry_cutoff"
     if name.startswith("contour_only_"):
@@ -948,7 +982,7 @@ def scenario_kind(name: str) -> str:
 def recommended_use_for_scenario(kind: str) -> str:
     if kind == "combo_overlay":
         return "candidate_runtime_combo"
-    if kind in {"entry_cutoff", "stop_cap_rub"}:
+    if kind in {"entry_start", "entry_cutoff", "stop_cap_rub"}:
         return "candidate_runtime_tune"
     if kind == "allow_aggressive_group_family":
         return "candidate_runtime_exception"
@@ -1102,6 +1136,15 @@ def build_restriction_rows(auto_policy: dict) -> list[dict]:
                 "note": "",
             }
         )
+    if active.get("entry_no_trade_before") not in (None, ""):
+        rows.append(
+            {
+                "stage": "active",
+                "restriction_type": "entry_no_trade_before",
+                "value": active.get("entry_no_trade_before"),
+                "note": "",
+            }
+        )
     if active.get("entry_no_new_after") not in (None, ""):
         rows.append(
             {
@@ -1136,6 +1179,15 @@ def build_restriction_rows(auto_policy: dict) -> list[dict]:
                 "stage": "proposed",
                 "restriction_type": "candidate_entry_cutoff",
                 "value": proposed.get("candidate_entry_cutoff"),
+                "note": "",
+            }
+        )
+    if proposed.get("candidate_entry_start"):
+        rows.append(
+            {
+                "stage": "proposed",
+                "restriction_type": "candidate_entry_start",
+                "value": proposed.get("candidate_entry_start"),
                 "note": "",
             }
         )
@@ -1234,7 +1286,7 @@ def build_nightly_cycle_status(
                 )
                 + sum(
                     1
-                    for key in ("entry_no_new_after", "entry_max_full_stop_rub", "pause_ticker_after_losses", "pause_family_after_losses", "pause_after_loss_minutes")
+                    for key in ("entry_no_trade_before", "entry_no_new_after", "entry_max_full_stop_rub", "pause_ticker_after_losses", "pause_family_after_losses", "pause_after_loss_minutes")
                     if active.get(key) not in (None, "")
                 ),
                 "rows": len(restriction_rows),
@@ -1286,6 +1338,15 @@ def scenario_entry_cutoff(name: str) -> str:
         if not candidate.startswith("no_new_after_"):
             continue
         return normalize_clock_hhmm(candidate.removeprefix("no_new_after_"))
+    return ""
+
+
+def scenario_entry_start(name: str) -> str:
+    candidates = combo_components(name) if name.startswith("combo_") else [name]
+    for candidate in candidates:
+        if not candidate.startswith("no_trade_before_"):
+            continue
+        return normalize_clock_hhmm(candidate.removeprefix("no_trade_before_"))
     return ""
 
 
@@ -1416,6 +1477,7 @@ def build_auto_policy(
         "observe_only_families": [],
         "strict_only_tickers": [],
         "strict_only_families": [],
+        "entry_no_trade_before": None,
         "entry_no_new_after": None,
         "entry_max_full_stop_rub": None,
         "pause_ticker_after_losses": None,
@@ -1499,12 +1561,19 @@ def build_auto_policy(
     proposed = {
         "best_latest_overlay": best_latest_overlay,
         "best_consensus_overlay": best_consensus_overlay,
+        "candidate_entry_start": "",
         "candidate_entry_cutoff": "",
         "candidate_stop_cap_rub": None,
         "notes": [],
     }
     for candidate in [best_consensus_overlay, best_latest_overlay]:
         scenario = str(candidate.get("scenario") or "")
+        candidate_entry_start = scenario_entry_start(scenario)
+        if candidate_entry_start and not proposed["candidate_entry_start"]:
+            proposed["candidate_entry_start"] = candidate_entry_start
+            proposed["notes"].append(
+                f"Сценарий {scenario} дал лучший результат в исследовательском слое: это кандидат на более поздний старт {candidate_entry_start}, но пока не активируется автоматически."
+            )
         candidate_entry_cutoff = scenario_entry_cutoff(scenario)
         if candidate_entry_cutoff and not proposed["candidate_entry_cutoff"]:
             proposed["candidate_entry_cutoff"] = candidate_entry_cutoff
@@ -1541,6 +1610,19 @@ def build_auto_policy(
         )
 
     consensus_entry_cutoff = scenario_entry_cutoff(consensus_scenario)
+    consensus_entry_start = scenario_entry_start(consensus_scenario)
+    if (
+        consensus_entry_start
+        and consensus_days >= 2
+        and consensus_beats >= consensus_days
+        and consensus_delta >= 1_000
+        and consensus_latest_delta >= 500
+    ):
+        active["entry_no_trade_before"] = later_clock_hhmm(active.get("entry_no_trade_before"), consensus_entry_start)
+        active["notes"].append(
+            f"Авто-policy: старт новых входов сдвинут до {consensus_entry_start}, "
+            f"потому что {consensus_scenario} устойчиво улучшает результат против base."
+        )
     if (
         consensus_entry_cutoff
         and consensus_days >= 2
@@ -1934,7 +2016,7 @@ def build_auto_policy(
             )
             + sum(
                 1
-                for key in ("entry_no_new_after", "entry_max_full_stop_rub", "pause_ticker_after_losses", "pause_family_after_losses", "pause_after_loss_minutes")
+                for key in ("entry_no_trade_before", "entry_no_new_after", "entry_max_full_stop_rub", "pause_ticker_after_losses", "pause_family_after_losses", "pause_after_loss_minutes")
                 if active.get(key) not in (None, "")
             ),
             "active_notes_count": len(active["notes"]),
@@ -1963,6 +2045,7 @@ def render_auto_policy_markdown(auto_policy: dict) -> str:
         f"- observe_only_families: {', '.join(active.get('observe_only_families') or []) or 'none'}",
         f"- strict_only_tickers: {', '.join(active.get('strict_only_tickers') or []) or 'none'}",
         f"- strict_only_families: {', '.join(active.get('strict_only_families') or []) or 'none'}",
+        f"- entry_no_trade_before: {active.get('entry_no_trade_before') or '-'}",
         f"- entry_no_new_after: {active.get('entry_no_new_after') or '-'}",
         f"- entry_max_full_stop_rub: {active.get('entry_max_full_stop_rub') or '-'}",
         f"- pause_ticker_after_losses: {active.get('pause_ticker_after_losses') or '-'}",
@@ -1983,6 +2066,7 @@ def render_auto_policy_markdown(auto_policy: dict) -> str:
     best_consensus = proposed.get("best_consensus_overlay") if isinstance(proposed.get("best_consensus_overlay"), dict) else {}
     lines.append(f"- best_latest_overlay: {best_latest.get('scenario') or '-'}")
     lines.append(f"- best_consensus_overlay: {best_consensus.get('scenario') or '-'}")
+    lines.append(f"- candidate_entry_start: {proposed.get('candidate_entry_start') or '-'}")
     lines.append(f"- candidate_entry_cutoff: {proposed.get('candidate_entry_cutoff') or '-'}")
     lines.append(f"- candidate_stop_cap_rub: {proposed.get('candidate_stop_cap_rub') or '-'}")
     lines.append("")

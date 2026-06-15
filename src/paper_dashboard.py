@@ -1140,6 +1140,9 @@ HTML = r"""<!doctype html>
         if ((autoPolicyActive.observe_only_families || []).length) policyBits.push(`observe family: ${(autoPolicyActive.observe_only_families || []).join(', ')}`);
         if ((autoPolicyActive.strict_only_tickers || []).length) policyBits.push(`strict-only ticker: ${(autoPolicyActive.strict_only_tickers || []).join(', ')}`);
         if ((autoPolicyActive.strict_only_families || []).length) policyBits.push(`strict-only family: ${(autoPolicyActive.strict_only_families || []).join(', ')}`);
+        if (autoPolicyActive.entry_no_trade_before !== undefined && autoPolicyActive.entry_no_trade_before !== null && autoPolicyActive.entry_no_trade_before !== '') {
+          policyBits.push(`start after: ${autoPolicyActive.entry_no_trade_before}`);
+        }
         if (autoPolicyActive.entry_no_new_after !== undefined && autoPolicyActive.entry_no_new_after !== null && autoPolicyActive.entry_no_new_after !== '') {
           policyBits.push(`no new after: ${autoPolicyActive.entry_no_new_after}`);
         }

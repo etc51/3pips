@@ -129,6 +129,7 @@ def empty_auto_policy() -> dict:
         "observe_only_families": [],
         "strict_only_tickers": [],
         "strict_only_families": [],
+        "entry_no_trade_before": None,
         "entry_no_new_after": None,
         "entry_max_full_stop_rub": None,
         "pause_ticker_after_losses": None,
@@ -199,6 +200,7 @@ def parse_auto_policy_payload(payload: object) -> dict:
         "observe_only_families": normalize_policy_names(active.get("observe_only_families")),
         "strict_only_tickers": normalize_policy_names(active.get("strict_only_tickers")),
         "strict_only_families": normalize_policy_names(active.get("strict_only_families")),
+        "entry_no_trade_before": normalize_clock_hhmm(active.get("entry_no_trade_before")),
         "entry_no_new_after": normalize_clock_hhmm(active.get("entry_no_new_after")),
         "entry_max_full_stop_rub": normalize_rub_cap(active.get("entry_max_full_stop_rub")),
         "pause_ticker_after_losses": normalize_positive_int(active.get("pause_ticker_after_losses")),
@@ -248,6 +250,7 @@ def refresh_auto_policy(cache: dict, force: bool = False) -> dict:
     observe_count = len(payload["observe_only_portfolios"]) + len(payload["observe_only_group_families"]) + len(payload["observe_only_tickers"]) + len(payload["observe_only_families"])
     allow_aggressive_count = len(payload["allow_aggressive_group_families"])
     strict_count = len(payload["strict_only_tickers"]) + len(payload["strict_only_families"])
+    entry_start = payload.get("entry_no_trade_before")
     entry_cutoff = payload.get("entry_no_new_after")
     stop_cap = payload.get("entry_max_full_stop_rub")
     pause_ticker = payload.get("pause_ticker_after_losses")
@@ -255,6 +258,7 @@ def refresh_auto_policy(cache: dict, force: bool = False) -> dict:
     print(
         f"{now_str()} AUTO_POLICY loaded trade_date={payload.get('trade_date') or '-'} "
         f"observe={observe_count} allow_aggressive={allow_aggressive_count} strict_only={strict_count} "
+        f"entry_no_trade_before={entry_start or '-'} "
         f"entry_no_new_after={entry_cutoff or '-'} "
         f"stop_cap_rub={stop_cap if stop_cap is not None else '-'} "
         f"pause_ticker={pause_ticker if pause_ticker is not None else '-'} "
@@ -293,6 +297,16 @@ def effective_max_full_stop_rub(base_cap_rub: float, policy: dict) -> float:
     if cap <= 0:
         return float(policy_cap)
     return min(cap, float(policy_cap))
+
+
+def effective_no_trade_before(base_no_trade_before: int | None, policy: dict) -> int | None:
+    policy_start = normalize_clock_hhmm(policy.get("entry_no_trade_before") if isinstance(policy, dict) else None)
+    policy_no_trade_before = parse_clock_time(policy_start) if policy_start else None
+    if base_no_trade_before is None:
+        return policy_no_trade_before
+    if policy_no_trade_before is None:
+        return base_no_trade_before
+    return max(base_no_trade_before, policy_no_trade_before)
 
 
 def effective_no_new_after(base_no_new_after: int | None, policy: dict) -> int | None:
@@ -2040,7 +2054,7 @@ def main() -> None:
             now = time.monotonic()
             active_auto_policy_local = refresh_auto_policy(auto_policy_state)
             trading_enabled = daily_trading_enabled(
-                no_trade_before,
+                effective_no_trade_before(no_trade_before, active_auto_policy_local),
                 effective_no_new_after(no_new_after, active_auto_policy_local),
             )
             force_close_due = daily_force_close_due(force_close_at)
