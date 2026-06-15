@@ -971,6 +971,8 @@ def build_auto_policy(
 
     best_latest_overlay = next((row for row in research_day if row.get("scenario") != "base"), {})
     best_consensus_overlay = pick_best_consensus_scenario(research_consensus)
+    base_day_overlay = next((row for row in research_day if str(row.get("scenario") or "") == "base"), {})
+    pause_ticker_day_overlay = next((row for row in research_day if str(row.get("scenario") or "") == "pause_ticker_after_1_loss"), {})
 
     proposed = {
         "best_latest_overlay": best_latest_overlay,
@@ -1015,6 +1017,19 @@ def build_auto_policy(
         )
 
     latest_scenario = str(best_latest_overlay.get("scenario") or "")
+    pause_ticker_day_delta = safe_float(pause_ticker_day_overlay.get("net_rub")) - safe_float(base_day_overlay.get("net_rub"))
+    if (
+        pause_ticker_day_overlay
+        and safe_int(pause_ticker_day_overlay.get("skipped_trades")) >= 1
+        and pause_ticker_day_delta >= 800
+    ):
+        active["pause_ticker_after_losses"] = 1
+        active["pause_after_loss_minutes"] = max(int(active.get("pause_after_loss_minutes") or 0), 120)
+        active["notes"].append(
+            "Авто-policy: после первого убыточного закрытия тикер ставится на паузу на 120 минут, "
+            "потому что это заметно улучшило последний день и убрало повторный вход в тот же убыточный тикер."
+        )
+
     strict_consensus_overlay = next((row for row in research_consensus if str(row.get("scenario") or "") == "contour_only_strict"), {})
     strict_days = safe_int(strict_consensus_overlay.get("days"))
     strict_total_net = safe_float(strict_consensus_overlay.get("total_net_rub"))
