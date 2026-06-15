@@ -1002,6 +1002,33 @@ def scenario_loss_limit(name: str, prefix: str) -> int | None:
         return None
 
 
+def combo_components(name: str) -> list[str]:
+    if not name.startswith("combo_"):
+        return []
+    return [part for part in name.removeprefix("combo_").split("__") if part]
+
+
+def scenario_stop_cap(name: str) -> int | None:
+    candidates = combo_components(name) if name.startswith("combo_") else [name]
+    for candidate in candidates:
+        if not candidate.startswith("stop_cap_"):
+            continue
+        try:
+            return int(candidate.removeprefix("stop_cap_").split("_", 1)[0])
+        except Exception:
+            continue
+    return None
+
+
+def scenario_blacklist_family(name: str) -> str:
+    if name.startswith("blacklist_family_"):
+        return name.removeprefix("blacklist_family_")
+    for candidate in combo_components(name):
+        if candidate.startswith("blacklist_family_"):
+            return candidate.removeprefix("blacklist_family_")
+    return ""
+
+
 def build_auto_policy(
     all_rows: list[dict],
     profiles: dict[str, dict],
@@ -1010,6 +1037,7 @@ def build_auto_policy(
     recurring_tickers: list[dict],
     recurring_families: list[dict],
     research_day: list[dict],
+    research_all: list[dict],
     research_consensus: list[dict],
 ) -> dict:
     history_days = len(day_history)
@@ -1090,7 +1118,12 @@ def build_auto_policy(
     best_latest_overlay = next((row for row in research_day if row.get("scenario") != "base"), {})
     best_consensus_overlay = pick_best_consensus_scenario(research_consensus)
     base_day_overlay = next((row for row in research_day if str(row.get("scenario") or "") == "base"), {})
+    base_all_overlay = next((row for row in research_all if str(row.get("scenario") or "") == "base"), {})
     pause_ticker_day_overlay = next((row for row in research_day if str(row.get("scenario") or "") == "pause_ticker_after_1_loss"), {})
+    best_all_combo_overlay = next(
+        (row for row in research_all if scenario_kind(str(row.get("scenario") or "")) == "combo_overlay"),
+        {},
+    )
 
     proposed = {
         "best_latest_overlay": best_latest_overlay,
@@ -1172,24 +1205,48 @@ def build_auto_policy(
             "потому что contour_only_strict дал сильный прирост на последнем дне и не уходит в минус по накопленной серии."
         )
 
-    consensus_blacklist_family = consensus_scenario.removeprefix("blacklist_family_") if consensus_scenario.startswith("blacklist_family_") else ""
+    consensus_blacklist_family = scenario_blacklist_family(consensus_scenario)
     if consensus_blacklist_family:
         family_total = by_family.get(consensus_blacklist_family) or {}
         family_trades = safe_int(family_total.get("trades"))
         family_net = safe_float(family_total.get("net_rub"))
         latest_delta = safe_float(best_consensus_overlay.get("latest_day_delta_rub"))
-        latest_overlay_net = safe_float(best_latest_overlay.get("net_rub"))
         robust_consensus = consensus_days >= 2 and consensus_beats >= consensus_days and consensus_delta >= 1_500
         strong_latest_confirmation = (
             latest_scenario == consensus_scenario
             and latest_delta >= 2_000
-            and latest_overlay_net > 0
         )
         if family_trades >= 3 and family_net < 0 and (robust_consensus or strong_latest_confirmation):
             active["observe_only_families"].append(consensus_blacklist_family)
             active["notes"].append(
                 f"Авто-policy: семейство {consensus_blacklist_family} переведено в observe-only, "
                 f"потому что {consensus_scenario} устойчиво улучшает результат против base."
+            )
+
+    best_combo_scenario = str(best_all_combo_overlay.get("scenario") or "")
+    combo_blacklist_family = scenario_blacklist_family(best_combo_scenario)
+    combo_stop_cap = scenario_stop_cap(best_combo_scenario)
+    best_day_same_combo = next((row for row in research_day if str(row.get("scenario") or "") == best_combo_scenario), {})
+    all_sample_combo_delta = safe_float(best_all_combo_overlay.get("net_rub")) - safe_float(base_all_overlay.get("net_rub"))
+    latest_combo_delta = safe_float(best_day_same_combo.get("net_rub")) - safe_float(base_day_overlay.get("net_rub"))
+    active_stop_cap = int(active.get("entry_max_full_stop_rub") or 0) if active.get("entry_max_full_stop_rub") not in (None, "") else 0
+    combo_cap_matches_active = bool(combo_stop_cap and active_stop_cap and combo_stop_cap == active_stop_cap)
+    if combo_blacklist_family and combo_cap_matches_active:
+        family_total = by_family.get(combo_blacklist_family) or {}
+        family_trades = safe_int(family_total.get("trades"))
+        family_net = safe_float(family_total.get("net_rub"))
+        combo_trades = safe_int(best_all_combo_overlay.get("trades"))
+        robust_combo = (
+            combo_trades >= 6
+            and all_sample_combo_delta >= 2_500
+            and latest_combo_delta >= 1_500
+            and latest_scenario == best_combo_scenario
+        )
+        if family_trades >= 3 and family_net < 0 and robust_combo:
+            active["observe_only_families"].append(combo_blacklist_family)
+            active["notes"].append(
+                f"Авто-policy: семейство {combo_blacklist_family} переведено в observe-only, "
+                f"потому что strongest combo {best_combo_scenario} резко улучшает и последний день, и всю короткую выборку."
             )
 
     pause_ticker_limit = scenario_loss_limit(consensus_scenario, "pause_ticker_after_")
@@ -1789,6 +1846,7 @@ def main() -> int:
         recurring_tickers=recurring_tickers,
         recurring_families=recurring_families,
         research_day=research_day,
+        research_all=research_all,
         research_consensus=scenario_consensus,
     )
     auto_policy = merge_watchdog_overrides(auto_policy, load_json(manifest_root / "latest_auto_policy.json"))
