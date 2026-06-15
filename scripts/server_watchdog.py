@@ -195,6 +195,18 @@ def group_family_key(portfolio: str, contour: str, family: str) -> str:
     return f"{portfolio_name}/{contour_name}::{family_name}"
 
 
+def split_group_family_key(value: str) -> tuple[str, str, str]:
+    text = str(value or "").strip().upper()
+    if not text:
+        return "", "", ""
+    try:
+        head, family = text.split("::", 1)
+        portfolio_name, contour_name = head.split("/", 1)
+    except ValueError:
+        return "", "", ""
+    return portfolio_name, contour_name, family
+
+
 def concentrated_family_group_key(family: str, by_group_family: dict[str, dict[str, float]]) -> str:
     family_norm = str(family or "").strip().upper()
     if not family_norm:
@@ -226,6 +238,28 @@ def concentrated_family_group_key(family: str, by_group_family: dict[str, dict[s
     if total_negative_abs >= 1_000 and nonnegative_other and worst_total >= total_negative_abs * 0.55:
         return worst_key
     return ""
+
+
+def ticker_fully_covered(
+    secid: str,
+    ticker_group_families: dict[str, set[str]],
+    covered_portfolios: set[str],
+    covered_group_families: set[str],
+    covered_families: set[str],
+) -> bool:
+    slices = ticker_group_families.get(str(secid or "").strip().upper()) or set()
+    if not slices:
+        return False
+    for slice_key in slices:
+        portfolio_name, _contour_name, family_name = split_group_family_key(slice_key)
+        if portfolio_name in covered_portfolios:
+            continue
+        if slice_key in covered_group_families:
+            continue
+        if family_name in covered_families:
+            continue
+        return False
+    return True
 
 
 def load_closed_trade_rows(run_dir: Path, trade_date: str) -> list[dict]:
@@ -323,11 +357,17 @@ def merge_policy_views(base_active: dict, overrides: dict) -> dict:
     return merged
 
 
-def compute_intraday_watchdog_overrides(run_dir: Path, trade_date: str, dashboard_state: dict | None = None) -> dict:
+def compute_intraday_watchdog_overrides(
+    run_dir: Path,
+    trade_date: str,
+    dashboard_state: dict | None = None,
+    base_active: dict | None = None,
+) -> dict:
     rows = load_closed_trade_rows(run_dir, trade_date)
     by_ticker: dict[str, dict[str, float]] = {}
     by_family: dict[str, dict[str, float]] = {}
     by_group_family: dict[str, dict[str, float]] = {}
+    ticker_group_families: dict[str, set[str]] = {}
     for row in rows:
         secid = row["secid"]
         family = row["family"]
@@ -345,6 +385,7 @@ def compute_intraday_watchdog_overrides(run_dir: Path, trade_date: str, dashboar
         if group_family_bucket is not None:
             group_family_bucket["closed_net_rub"] += net
             group_family_bucket["trades"] += 1
+            ticker_group_families.setdefault(secid, set()).add(slice_key)
         if net < 0:
             ticker_bucket["losses"] += 1
             family_bucket["losses"] += 1
@@ -376,6 +417,7 @@ def compute_intraday_watchdog_overrides(run_dir: Path, trade_date: str, dashboar
             if group_family_bucket is not None:
                 group_family_bucket["open_net_rub"] += open_net
                 group_family_bucket["open_positions"] += 1
+                ticker_group_families.setdefault(secid, set()).add(slice_key)
 
     observe_group_families = sorted(
         key
@@ -417,6 +459,26 @@ def compute_intraday_watchdog_overrides(run_dir: Path, trade_date: str, dashboar
         )
         and family_from_ticker(secid) not in set(observe_families)
     )
+
+    base_active = base_active if isinstance(base_active, dict) else {}
+    covered_portfolios = set(normalize_upper_list(base_active.get("observe_only_portfolios")))
+    covered_group_families = set(normalize_upper_list(base_active.get("observe_only_group_families")))
+    covered_families = set(normalize_upper_list(base_active.get("observe_only_families")))
+    observe_group_families = sorted(
+        key
+        for key in observe_group_families
+        if key not in covered_group_families
+        and split_group_family_key(key)[0] not in covered_portfolios
+        and split_group_family_key(key)[2] not in covered_families
+    )
+    effective_group_families = covered_group_families | set(observe_group_families)
+    effective_families = covered_families | set(observe_families)
+    observe_tickers = sorted(
+        secid
+        for secid in observe_tickers
+        if not ticker_fully_covered(secid, ticker_group_families, covered_portfolios, effective_group_families, effective_families)
+    )
+
     notes: list[str] = []
     for key in observe_group_families[:6]:
         total_net = round(float(by_group_family[key]["closed_net_rub"] + by_group_family[key]["open_net_rub"]), 2)
@@ -449,13 +511,17 @@ def refresh_intraday_killer_policy(project_root: Path, run_dir: Path, dashboard_
 
     trade_date = latest_trade_date(run_dir)
     current_overrides = payload.get("watchdog_overrides") if isinstance(payload.get("watchdog_overrides"), dict) else {}
+    active = payload.get("active") if isinstance(payload.get("active"), dict) else {}
+    active_base = payload.get("active_base") if isinstance(payload.get("active_base"), dict) else strip_watchdog_overrides(active, current_overrides)
     if not trade_date:
         overrides = {"trade_date": "", "observe_only_group_families": [], "observe_only_tickers": [], "observe_only_families": [], "notes": []}
     else:
-        overrides = compute_intraday_watchdog_overrides(run_dir, trade_date, load_dashboard_state(dashboard_url) if dashboard_url else {})
-
-    active = payload.get("active") if isinstance(payload.get("active"), dict) else {}
-    active_base = payload.get("active_base") if isinstance(payload.get("active_base"), dict) else strip_watchdog_overrides(active, current_overrides)
+        overrides = compute_intraday_watchdog_overrides(
+            run_dir,
+            trade_date,
+            load_dashboard_state(dashboard_url) if dashboard_url else {},
+            active_base,
+        )
     merged_active = merge_policy_views(active_base, overrides)
 
     changed = (

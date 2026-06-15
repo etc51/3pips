@@ -1282,6 +1282,18 @@ def concentrated_family_group_key(family: str, by_group_family: dict[str, dict])
     return worst_key
 
 
+def split_group_family_key(value: str) -> tuple[str, str, str]:
+    text = str(value or "").strip().upper()
+    if not text:
+        return "", "", ""
+    try:
+        head, family = text.split("::", 1)
+        portfolio_name, contour_name = head.split("/", 1)
+    except ValueError:
+        return "", "", ""
+    return portfolio_name, contour_name, family
+
+
 def build_auto_policy(
     all_rows: list[dict],
     profiles: dict[str, dict],
@@ -1708,6 +1720,17 @@ def build_auto_policy(
             f"потому что {consensus_scenario} улучшает выборку против base."
         )
 
+    covered_portfolios = {str(value).strip().upper() for value in (active.get("observe_only_portfolios") or []) if str(value).strip()}
+    covered_families = {str(value).strip().upper() for value in (active.get("observe_only_families") or []) if str(value).strip()}
+    active["observe_only_group_families"] = [
+        value
+        for value in (active.get("observe_only_group_families") or [])
+        if (
+            (lambda portfolio_name, _contour_name, family_name: portfolio_name not in covered_portfolios and family_name not in covered_families)(
+                *split_group_family_key(str(value))
+            )
+        )
+    ]
     for key in ("observe_only_portfolios", "observe_only_group_families", "observe_only_tickers", "observe_only_families", "strict_only_tickers", "strict_only_families"):
         active[key] = sorted({str(value).upper() for value in active[key] if str(value).strip()})
     active["notes"] = list(dict.fromkeys(active["notes"]))[:12]
