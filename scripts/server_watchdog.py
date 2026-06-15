@@ -535,20 +535,29 @@ def compute_intraday_watchdog_overrides(
                 group_family_bucket["open_positions"] += 1
                 ticker_group_families.setdefault(secid, set()).add(slice_key)
 
-    observe_group_families = sorted(
-        key
-        for key, bucket in by_group_family.items()
-        if key
-        and (
+    observe_group_families: list[str] = []
+    localized_blackout_notes: list[str] = []
+    for key, bucket in sorted(by_group_family.items()):
+        if not key:
+            continue
+        triggered = (
             (bucket["losses"] >= 1 and bucket["closed_net_rub"] <= -1500.0)
             or (bucket["losses"] >= 2 and bucket["closed_net_rub"] <= -1000.0)
             or (bucket["closed_net_rub"] + bucket["open_net_rub"] <= -1500.0 and bucket["open_positions"] >= 1)
             or (bucket["open_net_rub"] <= -1200.0 and bucket["open_positions"] >= 1)
         )
-    )
+        if not triggered:
+            continue
+        slice_key = group_family_slice_key(key)
+        if slice_key in covered_group_blackout_slices:
+            total_net = round(float(bucket["closed_net_rub"] + bucket["open_net_rub"]), 2)
+            localized_blackout_notes.append(
+                f"watchdog intraday: {key} damage {total_net:.2f} RUB stays inside active group blackout {slice_key}"
+            )
+            continue
+        observe_group_families.append(key)
 
     observe_families: list[str] = []
-    localized_blackout_notes: list[str] = []
     for family, bucket in sorted(by_family.items()):
         triggered = (
             (bucket["losses"] >= 1 and bucket["closed_net_rub"] <= -3000.0)
