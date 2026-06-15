@@ -216,7 +216,10 @@ def api_state_url(dashboard_url: str) -> str:
     path = parts.path or ""
     if path.endswith("/api/state") or path == "/api/state":
         return dashboard_url
-    clean = path[:-1] if path.endswith("/") and path != "/" else path
+    if path in {"", "/"}:
+        clean = ""
+    else:
+        clean = path[:-1] if path.endswith("/") else path
     return urlunsplit((parts.scheme, parts.netloc, f"{clean}/api/state", "", ""))
 
 
