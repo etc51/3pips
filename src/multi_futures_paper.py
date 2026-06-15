@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import os
 import threading
 import time
@@ -92,6 +93,7 @@ class State:
     family_loss_streak: int = 0
     shadow_positions: dict[str, Position] = field(default_factory=dict)
     shadow_closed: dict[str, bool] = field(default_factory=dict)
+    entry_shadow_decisions: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -950,6 +952,440 @@ def avg_volume(rows: list[dict], n: int) -> float:
     return sum(vols) / len(vols) if vols else 0.0
 
 
+def close_values(rows: list[dict], n: int | None = None) -> list[float]:
+    subset = rows[-n:] if n else rows
+    return [float(r.get("close") or 0.0) for r in subset]
+
+
+def ema_value(values: list[float], period: int) -> float | None:
+    if period <= 0 or len(values) < period:
+        return None
+    ema = sum(values[:period]) / period
+    alpha = 2.0 / (period + 1.0)
+    for value in values[period:]:
+        ema = alpha * value + (1.0 - alpha) * ema
+    return ema
+
+
+def stddev_value(values: list[float]) -> float | None:
+    if len(values) < 2:
+        return None
+    mean = sum(values) / len(values)
+    variance = sum((value - mean) ** 2 for value in values) / len(values)
+    return math.sqrt(max(variance, 0.0))
+
+
+def rsi_value(rows: list[dict], period: int = 14) -> float | None:
+    values = close_values(rows)
+    if len(values) < period + 1:
+        return None
+    gains: list[float] = []
+    losses: list[float] = []
+    for idx in range(1, period + 1):
+        change = values[idx] - values[idx - 1]
+        gains.append(max(change, 0.0))
+        losses.append(max(-change, 0.0))
+    avg_gain = sum(gains) / period
+    avg_loss = sum(losses) / period
+    for idx in range(period + 1, len(values)):
+        change = values[idx] - values[idx - 1]
+        gain = max(change, 0.0)
+        loss = max(-change, 0.0)
+        avg_gain = ((avg_gain * (period - 1)) + gain) / period
+        avg_loss = ((avg_loss * (period - 1)) + loss) / period
+    if avg_loss <= 0:
+        return 100.0
+    rs = avg_gain / avg_loss
+    return 100.0 - (100.0 / (1.0 + rs))
+
+
+def true_range(current: dict, prev_close: float | None = None) -> float:
+    high = float(current.get("high") or 0.0)
+    low = float(current.get("low") or 0.0)
+    if prev_close is None:
+        return max(high - low, 0.0)
+    return max(high - low, abs(high - prev_close), abs(low - prev_close))
+
+
+def atr_value(rows: list[dict], period: int = 14) -> float | None:
+    if len(rows) < period + 1:
+        return None
+    trs: list[float] = []
+    for idx in range(1, len(rows)):
+        prev_close = float(rows[idx - 1].get("close") or 0.0)
+        trs.append(true_range(rows[idx], prev_close))
+    if len(trs) < period:
+        return None
+    atr = sum(trs[:period]) / period
+    for value in trs[period:]:
+        atr = ((atr * (period - 1)) + value) / period
+    return atr
+
+
+def adx_value(rows: list[dict], period: int = 14) -> float | None:
+    if len(rows) < (period * 2) + 1:
+        return None
+    trs: list[float] = []
+    pos_dm: list[float] = []
+    neg_dm: list[float] = []
+    for idx in range(1, len(rows)):
+        current = rows[idx]
+        prev = rows[idx - 1]
+        current_high = float(current.get("high") or 0.0)
+        current_low = float(current.get("low") or 0.0)
+        prev_high = float(prev.get("high") or 0.0)
+        prev_low = float(prev.get("low") or 0.0)
+        up_move = current_high - prev_high
+        down_move = prev_low - current_low
+        trs.append(true_range(current, float(prev.get("close") or 0.0)))
+        pos_dm.append(up_move if up_move > down_move and up_move > 0 else 0.0)
+        neg_dm.append(down_move if down_move > up_move and down_move > 0 else 0.0)
+    if len(trs) < period:
+        return None
+    atr = sum(trs[:period])
+    pos = sum(pos_dm[:period])
+    neg = sum(neg_dm[:period])
+    dxs: list[float] = []
+    for idx in range(period, len(trs)):
+        if idx > period:
+            atr = atr - (atr / period) + trs[idx]
+            pos = pos - (pos / period) + pos_dm[idx]
+            neg = neg - (neg / period) + neg_dm[idx]
+        if atr <= 0:
+            continue
+        pos_di = 100.0 * (pos / atr)
+        neg_di = 100.0 * (neg / atr)
+        denom = pos_di + neg_di
+        if denom <= 0:
+            continue
+        dxs.append(100.0 * abs(pos_di - neg_di) / denom)
+    if len(dxs) < period:
+        return None
+    adx = sum(dxs[:period]) / period
+    for value in dxs[period:]:
+        adx = ((adx * (period - 1)) + value) / period
+    return adx
+
+
+def bollinger_context(rows: list[dict], period: int = 20, std_mult: float = 2.0) -> dict:
+    closes = close_values(rows)
+    if len(closes) < period:
+        return {
+            "middle": None,
+            "upper": None,
+            "lower": None,
+            "width_pct": None,
+            "prev_width_pct": None,
+            "median_width_pct": None,
+        }
+    window = closes[-period:]
+    middle = sum(window) / period
+    sd = stddev_value(window)
+    if sd is None or middle == 0:
+        return {
+            "middle": middle,
+            "upper": None,
+            "lower": None,
+            "width_pct": None,
+            "prev_width_pct": None,
+            "median_width_pct": None,
+        }
+    upper = middle + (std_mult * sd)
+    lower = middle - (std_mult * sd)
+    width_pct = (upper - lower) / middle if middle else None
+    widths: list[float] = []
+    for end in range(period, len(closes)):
+        past_window = closes[end - period : end]
+        past_middle = sum(past_window) / period
+        past_sd = stddev_value(past_window)
+        if past_sd is None or past_middle == 0:
+            continue
+        widths.append(((past_middle + std_mult * past_sd) - (past_middle - std_mult * past_sd)) / past_middle)
+    prev_width_pct = widths[-1] if widths else None
+    median_width_pct = median(widths[-10:]) if widths else None
+    return {
+        "middle": middle,
+        "upper": upper,
+        "lower": lower,
+        "width_pct": width_pct,
+        "prev_width_pct": prev_width_pct,
+        "median_width_pct": median_width_pct,
+    }
+
+
+def choppiness_index(rows: list[dict], period: int = 14) -> float | None:
+    if len(rows) < period + 1:
+        return None
+    window = rows[-period:]
+    previous = rows[-period - 1 : -1]
+    tr_sum = 0.0
+    for current, prev in zip(window, previous):
+        tr_sum += true_range(current, float(prev.get("close") or 0.0))
+    highest = max(float(r.get("high") or 0.0) for r in window)
+    lowest = min(float(r.get("low") or 0.0) for r in window)
+    denominator = highest - lowest
+    if tr_sum <= 0 or denominator <= 0:
+        return None
+    return 100.0 * math.log10(tr_sum / denominator) / math.log10(period)
+
+
+def candle_close_location(row: dict) -> float | None:
+    high = float(row.get("high") or 0.0)
+    low = float(row.get("low") or 0.0)
+    close = float(row.get("close") or 0.0)
+    if high <= low:
+        return None
+    return (close - low) / (high - low)
+
+
+def current_clock_hhmm() -> str:
+    now_sec = clock_seconds_now()
+    hour = now_sec // 3600
+    minute = (now_sec % 3600) // 60
+    return f"{hour:02d}:{minute:02d}"
+
+
+def build_entry_shadow_context(state: State, direction: Direction, aggressive: bool) -> dict:
+    rows = list(state.candles)
+    spec = state.spec
+    lookback = 4 if aggressive else 6
+    recent = rows[-lookback - 1 : -1] if len(rows) > lookback else rows[:-1]
+    last = rows[-1]
+    prev = rows[-2]
+    last_close = float(last.get("close") or 0.0)
+    prev_close = float(prev.get("close") or 0.0)
+    last_open = float(last.get("open") or last_close)
+    avgv = avg_volume(rows[:-1], 20)
+    last_vol = float(last.get("volume") or 0.0)
+    volume_ratio = (last_vol / avgv) if avgv > 0 else 0.0
+    vwap, _ = volume_vwap(rows, state.last_price)
+    fast = sum(float(r.get("close") or 0.0) for r in rows[-2:]) / 2.0
+    slow = sum(float(r.get("close") or 0.0) for r in rows[-5:]) / 5.0
+    trend_ticks = (fast - slow) / spec.min_step
+    momentum_ticks = (last_close - prev_close) / spec.min_step
+    high = max(float(r.get("high") or 0.0) for r in recent) if recent else last_close
+    low = min(float(r.get("low") or 0.0) for r in recent) if recent else last_close
+    breakout_margin_ticks = (
+        (last_close - high) / spec.min_step
+        if direction == "long"
+        else (low - last_close) / spec.min_step
+    )
+    recent_range_ticks = (
+        max((float(r.get("high") or 0.0) - float(r.get("low") or 0.0)) / spec.min_step for r in rows[-5:])
+        if len(rows) >= 5
+        else 0.0
+    )
+    levels = best_levels(state.last_order_book, spec)
+    spread_ticks = float(levels.get("spread_ticks") or 0.0)
+    spread_to_stop_ratio = (spread_ticks / state.profile.stop_ticks) if state.profile.stop_ticks > 0 else None
+    directional_vwap_ticks = (
+        (state.last_price - vwap) / spec.min_step if direction == "long" else (vwap - state.last_price) / spec.min_step
+    )
+    directional_vwap_to_stop = (
+        directional_vwap_ticks / state.profile.stop_ticks if state.profile.stop_ticks > 0 else None
+    )
+    closes = close_values(rows)
+    ema9 = ema_value(closes, 9)
+    ema21 = ema_value(closes, 21)
+    rsi14 = rsi_value(rows, 14)
+    adx14 = adx_value(rows, 14)
+    atr14 = atr_value(rows, 14)
+    atr14_ticks = (atr14 / spec.min_step) if atr14 is not None and spec.min_step > 0 else None
+    bb = bollinger_context(rows, 20, 2.0)
+    chop14 = choppiness_index(rows, 14)
+    close_location = candle_close_location(last)
+    donchian_window = rows[-21:-1] if len(rows) >= 21 else rows[:-1]
+    donchian_breakout_ticks = None
+    if donchian_window:
+        donchian_high = max(float(r.get("high") or 0.0) for r in donchian_window)
+        donchian_low = min(float(r.get("low") or 0.0) for r in donchian_window)
+        donchian_breakout_ticks = (
+            (last_close - donchian_high) / spec.min_step
+            if direction == "long"
+            else (donchian_low - last_close) / spec.min_step
+        )
+    macd_fast = ema_value(closes, 12)
+    macd_slow = ema_value(closes, 26)
+    macd_signal = None
+    if len(closes) >= 35:
+        macd_line_values: list[float] = []
+        for end in range(26, len(closes) + 1):
+            fast_val = ema_value(closes[:end], 12)
+            slow_val = ema_value(closes[:end], 26)
+            if fast_val is not None and slow_val is not None:
+                macd_line_values.append(fast_val - slow_val)
+        macd_signal = ema_value(macd_line_values, 9) if len(macd_line_values) >= 9 else None
+    macd_line = (macd_fast - macd_slow) if macd_fast is not None and macd_slow is not None else None
+    macd_hist = (macd_line - macd_signal) if macd_line is not None and macd_signal is not None else None
+    return {
+        "event_time": now_str(),
+        "clock_hhmm": current_clock_hhmm(),
+        "direction": direction,
+        "aggressive": aggressive,
+        "entry_price_reference": state.last_price,
+        "last_open": last_open,
+        "last_close": last_close,
+        "vwap": vwap,
+        "volume_ratio": volume_ratio,
+        "momentum_ticks": momentum_ticks,
+        "trend_ticks": trend_ticks,
+        "breakout_margin_ticks": breakout_margin_ticks,
+        "recent_range_ticks": recent_range_ticks,
+        "spread_ticks": spread_ticks,
+        "spread_to_stop_ratio": spread_to_stop_ratio,
+        "directional_vwap_ticks": directional_vwap_ticks,
+        "directional_vwap_to_stop": directional_vwap_to_stop,
+        "ema9": ema9,
+        "ema21": ema21,
+        "rsi14": rsi14,
+        "adx14": adx14,
+        "atr14_ticks": atr14_ticks,
+        "bb_upper": bb["upper"],
+        "bb_lower": bb["lower"],
+        "bb_width_pct": bb["width_pct"],
+        "bb_prev_width_pct": bb["prev_width_pct"],
+        "bb_median_width_pct": bb["median_width_pct"],
+        "chop14": chop14,
+        "close_location": close_location,
+        "donchian20_breakout_ticks": donchian_breakout_ticks,
+        "macd_hist": macd_hist,
+    }
+
+
+def evaluate_entry_shadow_models(
+    state: State,
+    portfolio_group: str,
+    direction: Direction,
+    entry_price: float,
+    qty: int,
+    sizing: SizingDecision,
+    aggressive: bool,
+) -> list[dict]:
+    ctx = build_entry_shadow_context(state, direction, aggressive)
+    family = state.profile.family or contract_family(state.spec.secid)
+    entry_id = f"{ctx['event_time']}|{portfolio_group}|{state.contour}|{state.spec.secid}|{direction}|{entry_price}"
+    base_row = {
+        "entry_id": entry_id,
+        "opened_at": ctx["event_time"],
+        "closed_at": "",
+        "portfolio_group": portfolio_group,
+        "contour": state.contour,
+        "family": family,
+        "secid": state.spec.secid,
+        "direction": direction,
+        "qty": qty,
+        "entry_price": entry_price,
+        "exit_price": "",
+        "exit_source": "",
+        "net_rub": "",
+        "ticks": "",
+        "minutes_held": "",
+        "clock_hhmm": ctx["clock_hhmm"],
+        "model": "",
+        "model_source": "",
+        "allow": "",
+        "decision_reason": "",
+        "volume_ratio": round(ctx["volume_ratio"], 4),
+        "spread_to_stop_ratio": round(ctx["spread_to_stop_ratio"], 4) if ctx["spread_to_stop_ratio"] is not None else "",
+        "spread_ticks": round(ctx["spread_ticks"], 3),
+        "momentum_ticks": round(ctx["momentum_ticks"], 3),
+        "trend_ticks": round(ctx["trend_ticks"], 3),
+        "breakout_margin_ticks": round(ctx["breakout_margin_ticks"], 3),
+        "recent_range_ticks": round(ctx["recent_range_ticks"], 3),
+        "directional_vwap_ticks": round(ctx["directional_vwap_ticks"], 3),
+        "directional_vwap_to_stop": round(ctx["directional_vwap_to_stop"], 4) if ctx["directional_vwap_to_stop"] is not None else "",
+        "ema9": round(ctx["ema9"], 6) if ctx["ema9"] is not None else "",
+        "ema21": round(ctx["ema21"], 6) if ctx["ema21"] is not None else "",
+        "rsi14": round(ctx["rsi14"], 3) if ctx["rsi14"] is not None else "",
+        "adx14": round(ctx["adx14"], 3) if ctx["adx14"] is not None else "",
+        "atr14_ticks": round(ctx["atr14_ticks"], 3) if ctx["atr14_ticks"] is not None else "",
+        "bb_width_pct": round(ctx["bb_width_pct"], 6) if ctx["bb_width_pct"] is not None else "",
+        "bb_prev_width_pct": round(ctx["bb_prev_width_pct"], 6) if ctx["bb_prev_width_pct"] is not None else "",
+        "bb_median_width_pct": round(ctx["bb_median_width_pct"], 6) if ctx["bb_median_width_pct"] is not None else "",
+        "chop14": round(ctx["chop14"], 3) if ctx["chop14"] is not None else "",
+        "close_location": round(ctx["close_location"], 4) if ctx["close_location"] is not None else "",
+        "donchian20_breakout_ticks": round(ctx["donchian20_breakout_ticks"], 3) if ctx["donchian20_breakout_ticks"] is not None else "",
+        "macd_hist": round(ctx["macd_hist"], 6) if ctx["macd_hist"] is not None else "",
+        "full_stop_risk_rub": round(sizing.full_stop_rub, 2),
+        "stop_ticks": state.profile.stop_ticks,
+        "trail_ticks": state.profile.trail_ticks,
+        "trail_arm_ticks": state.profile.trail_arm_ticks,
+    }
+
+    def finalize(model: str, source: str, checks: list[tuple[bool, str]]) -> dict:
+        failed = [reason for ok, reason in checks if not ok]
+        row = dict(base_row)
+        row["model"] = model
+        row["model_source"] = source
+        row["allow"] = not failed
+        row["decision_reason"] = "ok" if not failed else ";".join(failed)
+        return row
+
+    is_long = direction == "long"
+    clock_sec = clock_seconds_now()
+    early_window_ok = parse_clock_time("10:15") <= clock_sec <= parse_clock_time("11:59")
+    close_loc = ctx["close_location"]
+    spread_ratio = ctx["spread_to_stop_ratio"] if ctx["spread_to_stop_ratio"] is not None else 99.0
+    directional_vwap_ticks = ctx["directional_vwap_ticks"] if ctx["directional_vwap_ticks"] is not None else -999.0
+    donchian_breakout_ticks = ctx["donchian20_breakout_ticks"] if ctx["donchian20_breakout_ticks"] is not None else -999.0
+    atr_ticks = ctx["atr14_ticks"] if ctx["atr14_ticks"] is not None else 0.0
+    price_above_ema = ctx["ema9"] is not None and ctx["ema21"] is not None and (
+        (ctx["last_close"] >= ctx["ema9"] >= ctx["ema21"]) if is_long else (ctx["last_close"] <= ctx["ema9"] <= ctx["ema21"])
+    )
+    bb_breakout = ctx["bb_upper"] is not None and ctx["bb_lower"] is not None and (
+        ctx["last_close"] >= ctx["bb_upper"] if is_long else ctx["last_close"] <= ctx["bb_lower"]
+    )
+    directional_close_ok = close_loc is not None and ((close_loc >= 0.65) if is_long else (close_loc <= 0.35))
+
+    return [
+        finalize(
+            "tv_early_vwap_volume_breakout",
+            "TradingView ORB/VWAP/Volume inspired",
+            [
+                (early_window_ok, "outside_1015_1159"),
+                (ctx["volume_ratio"] >= 1.5, "volume_ratio_lt_1_5"),
+                (spread_ratio <= 0.20, "spread_to_stop_gt_0_20"),
+                (ctx["breakout_margin_ticks"] >= 2.0, "breakout_margin_lt_2"),
+                (directional_vwap_ticks >= 2.0, "vwap_distance_lt_2t"),
+                (directional_close_ok, "weak_close_location"),
+            ],
+        ),
+        finalize(
+            "tv_ema_rsi_adx_trend",
+            "TradingView/Investing EMA+RSI+ADX trend confirmation",
+            [
+                (price_above_ema, "ema_alignment_fail"),
+                ((ctx["rsi14"] or 0.0) >= (55.0 if is_long else 0.0), "rsi_lt_long_threshold") if is_long else (((ctx["rsi14"] or 100.0) <= 45.0), "rsi_gt_short_threshold"),
+                ((ctx["adx14"] or 0.0) >= 20.0, "adx_lt_20"),
+                (spread_ratio <= 0.25, "spread_to_stop_gt_0_25"),
+                (directional_vwap_ticks >= 1.0, "wrong_side_of_vwap"),
+            ],
+        ),
+        finalize(
+            "tv_bb_squeeze_release",
+            "TradingView Bollinger squeeze breakout inspired",
+            [
+                (ctx["bb_prev_width_pct"] is not None and ctx["bb_median_width_pct"] is not None and ctx["bb_prev_width_pct"] <= ctx["bb_median_width_pct"] * 0.85, "no_prior_squeeze"),
+                (bb_breakout, "no_band_breakout"),
+                (ctx["volume_ratio"] >= 1.25, "volume_ratio_lt_1_25"),
+                (ctx["breakout_margin_ticks"] >= 2.0, "breakout_margin_lt_2"),
+                (spread_ratio <= 0.25, "spread_to_stop_gt_0_25"),
+            ],
+        ),
+        finalize(
+            "forum_chop_donchian_guard",
+            "Forum/Reddit Donchian breakout with anti-chop guard",
+            [
+                ((ctx["chop14"] or 100.0) <= 45.0, "chop_gt_45"),
+                (donchian_breakout_ticks >= 2.0, "donchian_breakout_lt_2"),
+                ((ctx["adx14"] or 0.0) >= 18.0, "adx_lt_18"),
+                (spread_ratio <= 0.20, "spread_to_stop_gt_0_20"),
+                (atr_ticks >= max(4.0, state.profile.stop_ticks * 0.08), "atr_too_small"),
+            ],
+        ),
+    ]
+
+
 def signal(state: State, aggressive: bool) -> tuple[Direction | None, str]:
     rows = list(state.candles)
     if len(rows) < 12:
@@ -1429,14 +1865,27 @@ def process_open_state_exit(
             stop_limit_qty,
             stop_overrun_ticks,
         )
+    closed_at = now_str()
     ticks, gross, net = pnl_rub(st.position, fill_price, st.spec, st.side_fee)
     st.closed += 1
     st.closed_net += net
     portfolio.closed_net += net
+    if st.entry_shadow_decisions:
+        entry_shadow_path = entry_shadow_log_path(args)
+        for row in st.entry_shadow_decisions:
+            out = dict(row)
+            out["closed_at"] = closed_at
+            out["minutes_held"] = position_minutes_held(st.position, closed_at)
+            out["exit_price"] = fill_price
+            out["exit_source"] = fill_source
+            out["net_rub"] = round(net, 2)
+            out["ticks"] = round(ticks, 3)
+            append_schema_stable_csv(entry_shadow_path, out)
+        st.entry_shadow_decisions = []
     append_trade(
         Path(args.log),
         {
-            "closed_at": now_str(),
+            "closed_at": closed_at,
             "opened_at": st.position.opened_at,
             "minutes_held": position_minutes_held(st.position),
             "portfolio_group": trade_log_group(Path(args.log)),
@@ -1929,6 +2378,14 @@ def trade_log_group(path: Path) -> str:
     return name
 
 
+def entry_shadow_log_path(args: argparse.Namespace) -> Path:
+    configured = str(getattr(args, "entry_shadow_log", "") or "").strip()
+    if configured:
+        return Path(configured)
+    trade_path = Path(getattr(args, "log", REPORTS / "multi_futures_paper_trades.csv"))
+    return trade_path.with_name(f"{trade_log_group(trade_path)}_entry_shadow_models.csv")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--secids", nargs="+", default=["NGK6", "NGM6", "BMM6", "VBM6", "GZM6", "S1M6"])
@@ -1943,6 +2400,7 @@ def main() -> None:
     parser.add_argument("--instrument-specs-log", default=str(REPORTS / "paper_instrument_specs.csv"))
     parser.add_argument("--startup-status-log", default=str(REPORTS / "paper_startup_status.csv"))
     parser.add_argument("--shadow-log", default=str(REPORTS / "paper_shadow_exit_models.csv"))
+    parser.add_argument("--entry-shadow-log", default="")
     parser.add_argument("--health-log", default=str(REPORTS / "paper_bot_health.json"))
     parser.add_argument("--snapshot-sec", type=int, default=10)
     parser.add_argument("--no-trade-before", default="")
@@ -2327,6 +2785,15 @@ def main() -> None:
                                 "candle_like": clone_position(st.position),
                             }
                             st.shadow_closed = {}
+                            st.entry_shadow_decisions = evaluate_entry_shadow_models(
+                                st,
+                                portfolio_group_name,
+                                direction,
+                                entry_price,
+                                qty,
+                                sizing,
+                                contour == "aggressive",
+                            )
                             st.last_entry_candle_count = len(st.candles)
                             write_open_positions(Path(args.open_positions_log), states)
                             print(
