@@ -13,6 +13,8 @@ from autonomy_common import now_str
 
 
 MSK = ZoneInfo("Europe/Moscow")
+ENTRY_WINDOW_START = dt_time(10, 15)
+ENTRY_WINDOW_END = dt_time(17, 45)
 
 
 def log(path: Path, message: str) -> None:
@@ -61,18 +63,19 @@ def runtime_open_positions(project_root: Path, run_name: str) -> tuple[int, list
     return total, details
 
 
+def active_entry_window(now_msk: datetime) -> bool:
+    return now_msk.weekday() < 5 and ENTRY_WINDOW_START <= now_msk.time() <= ENTRY_WINDOW_END
+
+
 def restart_allowed_now(project_root: Path, run_name: str) -> tuple[bool, str]:
     now_msk = datetime.now(MSK)
-    weekday = now_msk.weekday() < 5
-    current = now_msk.time()
-    # Keep the runtime untouched while any contour can still open new trades.
-    # After the entry windows close, the bot can restore open positions from disk,
-    # so delayed updates should be allowed to land the same evening.
-    if weekday and dt_time(10, 0) <= current <= dt_time(19, 5):
-        return False, f"trading_window {now_msk.strftime('%H:%M')}"
+    if active_entry_window(now_msk):
+        return False, f"entry_window {now_msk.strftime('%H:%M')}"
     open_count, details = runtime_open_positions(project_root, run_name)
-    suffix = f" open_positions={open_count} {' '.join(details[:6])}" if open_count > 0 and details else ""
-    return True, f"safe_window {now_msk.strftime('%H:%M')}{suffix}"
+    if open_count > 0:
+        detail_suffix = f" {' '.join(details[:6])}" if details else ""
+        return False, f"open_positions={open_count}{detail_suffix}"
+    return True, f"safe_window {now_msk.strftime('%H:%M')}"
 
 
 def main() -> int:
@@ -128,6 +131,20 @@ def main() -> int:
 
     if head_sha != remote_sha:
         requirements_changed = "requirements.txt" in changed_paths(project_root, previous_head, remote_sha)
+        allowed, why = restart_allowed_now(project_root, args.run_name)
+        if not allowed:
+            pending = {
+                "updated_at": now_str(),
+                "old_head": previous_head,
+                "new_head": remote_sha,
+                "reason": "remote_update_available",
+                "deferred_because": why,
+                "deps_ready": not requirements_changed,
+                "merged": False,
+            }
+            write_pending_restart(pending_restart_path, pending)
+            log(log_path, f"defer reason={why} update_available old={previous_head} new={remote_sha}")
+            return 0
         ff = run(git_cmd(project_root, "merge", "--ff-only", remote_sha), project_root)
         if ff.returncode != 0:
             log(log_path, f"fail reason=ff_merge_failed rc={ff.returncode} stderr={ff.stderr.strip()[:300]}")
@@ -195,6 +212,7 @@ def main() -> int:
             "reason": update_reason or "pending_restart",
             "deferred_because": why,
             "deps_ready": True,
+            "merged": True,
         }
         write_pending_restart(pending_restart_path, pending)
         log(log_path, f"defer reason={why} {pending['reason']}")
