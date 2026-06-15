@@ -33,8 +33,10 @@ from auto_policy_utils import (  # noqa: E402
     format_group_blackout_windows,
     merge_blackout_windows,
     merge_group_blackout_windows,
+    normalize_blackout_window,
     normalize_blackout_windows,
     normalize_clock_hhmm,
+    normalize_group_blackout_slice,
     normalize_group_blackout_windows,
     normalize_upper_list,
     policy_group_blackout_windows,
@@ -1835,6 +1837,14 @@ def build_auto_policy(
     base_day_overlay = next((row for row in research_day if str(row.get("scenario") or "") == "base"), {})
     base_all_overlay = next((row for row in research_all if str(row.get("scenario") or "") == "base"), {})
     pause_ticker_day_overlay = next((row for row in research_day if str(row.get("scenario") or "") == "pause_ticker_after_1_loss"), {})
+    pause_ticker_consensus_overlay = next(
+        (row for row in research_consensus if scenario_kind(str(row.get("scenario") or "")) == "ticker_pause_after_losses"),
+        {},
+    )
+    pause_family_consensus_overlay = next(
+        (row for row in research_consensus if scenario_kind(str(row.get("scenario") or "")) == "family_pause_after_losses"),
+        {},
+    )
     best_all_combo_overlay = next(
         (row for row in research_all if scenario_kind(str(row.get("scenario") or "")) == "combo_overlay"),
         {},
@@ -2122,6 +2132,54 @@ def build_auto_policy(
         active["notes"].append(
             "Авто-policy: после первого убыточного закрытия тикер ставится на паузу на 120 минут, "
             "потому что это заметно улучшило последний день и убрало повторный вход в тот же убыточный тикер."
+        )
+    pause_ticker_consensus_scenario = str(pause_ticker_consensus_overlay.get("scenario") or "")
+    pause_ticker_consensus_limit = scenario_loss_limit(pause_ticker_consensus_scenario, "pause_ticker_after_")
+    pause_ticker_consensus_days = safe_int(pause_ticker_consensus_overlay.get("days"))
+    pause_ticker_consensus_beats = safe_int(pause_ticker_consensus_overlay.get("beat_base_days"))
+    pause_ticker_consensus_delta = safe_float(pause_ticker_consensus_overlay.get("delta_total_rub"))
+    pause_ticker_consensus_latest_delta = safe_float(pause_ticker_consensus_overlay.get("latest_day_delta_rub"))
+    current_pause_ticker_limit = active.get("pause_ticker_after_losses")
+    if (
+        pause_ticker_consensus_limit is not None
+        and pause_ticker_consensus_days >= 2
+        and pause_ticker_consensus_beats >= pause_ticker_consensus_days
+        and pause_ticker_consensus_delta >= 1_500
+        and pause_ticker_consensus_latest_delta >= 0
+        and (
+            current_pause_ticker_limit in (None, "")
+            or safe_int(current_pause_ticker_limit, 99) > pause_ticker_consensus_limit
+        )
+    ):
+        active["pause_ticker_after_losses"] = pause_ticker_consensus_limit
+        active["pause_after_loss_minutes"] = max(int(active.get("pause_after_loss_minutes") or 0), 120)
+        active["notes"].append(
+            f"Авто-policy: тикер ставится на паузу после {pause_ticker_consensus_limit} убыточн. закрыт. на 120 минут, "
+            f"потому что {pause_ticker_consensus_scenario} устойчиво улучшает все последние дни против base."
+        )
+    pause_family_consensus_scenario = str(pause_family_consensus_overlay.get("scenario") or "")
+    pause_family_consensus_limit = scenario_loss_limit(pause_family_consensus_scenario, "pause_family_after_")
+    pause_family_consensus_days = safe_int(pause_family_consensus_overlay.get("days"))
+    pause_family_consensus_beats = safe_int(pause_family_consensus_overlay.get("beat_base_days"))
+    pause_family_consensus_delta = safe_float(pause_family_consensus_overlay.get("delta_total_rub"))
+    pause_family_consensus_latest_delta = safe_float(pause_family_consensus_overlay.get("latest_day_delta_rub"))
+    current_pause_family_limit = active.get("pause_family_after_losses")
+    if (
+        pause_family_consensus_limit is not None
+        and pause_family_consensus_days >= 2
+        and pause_family_consensus_beats >= pause_family_consensus_days
+        and pause_family_consensus_delta >= 1_200
+        and pause_family_consensus_latest_delta >= 0
+        and (
+            current_pause_family_limit in (None, "")
+            or safe_int(current_pause_family_limit, 99) > pause_family_consensus_limit
+        )
+    ):
+        active["pause_family_after_losses"] = pause_family_consensus_limit
+        active["pause_after_loss_minutes"] = max(int(active.get("pause_after_loss_minutes") or 0), 120)
+        active["notes"].append(
+            f"Авто-policy: семейство ставится на паузу после {pause_family_consensus_limit} убыточн. закрыт. на 120 минут, "
+            f"потому что {pause_family_consensus_scenario} устойчиво улучшает все последние дни против base."
         )
 
     strict_consensus_overlay = next((row for row in research_consensus if str(row.get("scenario") or "") == "contour_only_strict"), {})
