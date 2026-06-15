@@ -1334,6 +1334,18 @@ def build_auto_policy(
         )
 
     latest_scenario = str(best_latest_overlay.get("scenario") or "")
+    latest_blacklist_portfolio = scenario_blacklist_portfolio(latest_scenario)
+    if latest_blacklist_portfolio:
+        portfolio_total = by_portfolio.get(latest_blacklist_portfolio) or {}
+        portfolio_trades = safe_int(portfolio_total.get("trades"))
+        portfolio_net = safe_float(portfolio_total.get("net_rub"))
+        latest_portfolio_delta = safe_float(best_latest_overlay.get("net_rub")) - safe_float(base_day_overlay.get("net_rub"))
+        if portfolio_trades >= 1 and portfolio_net <= -2_000 and latest_portfolio_delta >= 2_500:
+            active["observe_only_portfolios"].append(latest_blacklist_portfolio)
+            active["notes"].append(
+                f"Авто-policy: контур {latest_blacklist_portfolio} переведён в observe-only, "
+                f"потому что {latest_scenario} резко улучшает текущий день против base."
+            )
     pause_ticker_day_delta = safe_float(pause_ticker_day_overlay.get("net_rub")) - safe_float(base_day_overlay.get("net_rub"))
     if (
         pause_ticker_day_overlay
