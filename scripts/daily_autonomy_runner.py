@@ -358,6 +358,7 @@ def evaluate_pause_after_losses(
     max_losses: int,
     scope: str,
     note: str,
+    cap_rub: int | None = None,
 ) -> dict:
     loss_counts: dict[str, int] = defaultdict(int)
     selected: list[dict] = []
@@ -375,12 +376,17 @@ def evaluate_pause_after_losses(
         selected.append(row)
         if parse_trade_net(row) < 0:
             loss_counts[key] += 1
-    out = evaluate_scenario(name, selected, profiles, note=note)
+    out = evaluate_scenario(name, selected, profiles, cap_rub=cap_rub, note=note)
     out["skipped_trades"] = skipped
     return out
 
 
-def build_research_scenarios(all_rows: list[dict], sample_rows: list[dict], profiles: dict[str, dict]) -> list[dict]:
+def build_research_scenarios(
+    all_rows: list[dict],
+    sample_rows: list[dict],
+    profiles: dict[str, dict],
+    include_combo_scenarios: bool = True,
+) -> list[dict]:
     scenarios: list[dict] = []
     scenarios.append(evaluate_scenario("base", sample_rows, profiles, note="current live policy"))
 
@@ -485,6 +491,51 @@ def build_research_scenarios(all_rows: list[dict], sample_rows: list[dict], prof
             )
         )
 
+    if include_combo_scenarios:
+        scenarios.append(
+            evaluate_scenario(
+                "combo_stop_cap_500__contour_only_strict",
+                sample_rows,
+                profiles,
+                predicate=lambda row: str(row.get("contour") or "") == "strict",
+                cap_rub=500,
+                note="strict layer only + 500 RUB stop cap",
+            )
+        )
+        scenarios.append(
+            evaluate_pause_after_losses(
+                "combo_stop_cap_500__pause_ticker_after_1_loss",
+                sample_rows,
+                profiles,
+                max_losses=1,
+                scope="ticker",
+                cap_rub=500,
+                note="500 RUB stop cap + ticker pause after first losing close",
+            )
+        )
+        scenarios.append(
+            evaluate_pause_after_losses(
+                "combo_stop_cap_500__pause_family_after_2_losses",
+                sample_rows,
+                profiles,
+                max_losses=2,
+                scope="family",
+                cap_rub=500,
+                note="500 RUB stop cap + family pause after second losing close",
+            )
+        )
+        for family in weak_families[:4]:
+            scenarios.append(
+                evaluate_scenario(
+                    f"combo_stop_cap_500__blacklist_family_{family}",
+                    sample_rows,
+                    profiles,
+                    predicate=lambda row, family=family: family_for_row(row, profiles) != family,
+                    cap_rub=500,
+                    note="500 RUB stop cap + remove one weak family",
+                )
+            )
+
     scenarios.sort(key=lambda row: (row["net_rub"], row["expectancy_rub"], row["trades"]), reverse=True)
     return scenarios
 
@@ -584,7 +635,7 @@ def build_scenario_history(all_rows: list[dict], profiles: dict[str, dict]) -> l
     for trade_date in dates:
         history_rows = [row for row in all_rows if trade_date_value(row) <= trade_date]
         day_rows = filter_trade_date(all_rows, trade_date)
-        scenarios = build_research_scenarios(history_rows, day_rows, profiles)
+        scenarios = build_research_scenarios(history_rows, day_rows, profiles, include_combo_scenarios=False)
         for idx, scenario in enumerate(scenarios, start=1):
             item = dict(scenario)
             item["trade_date"] = trade_date
@@ -669,6 +720,8 @@ def pick_best_consensus_scenario(rows: list[dict]) -> dict:
 
 
 def scenario_kind(name: str) -> str:
+    if name.startswith("combo_"):
+        return "combo_overlay"
     if name.startswith("stop_cap_"):
         return "stop_cap_rub"
     if name.startswith("no_new_after_"):
@@ -687,6 +740,8 @@ def scenario_kind(name: str) -> str:
 
 
 def recommended_use_for_scenario(kind: str) -> str:
+    if kind == "combo_overlay":
+        return "candidate_runtime_combo"
     if kind in {"entry_cutoff", "stop_cap_rub"}:
         return "candidate_runtime_tune"
     if kind in {
