@@ -1852,6 +1852,11 @@ def split_portfolio_contour_key(value: str) -> tuple[str, str]:
     return portfolio_name, contour_name
 
 
+def group_family_portfolio_contour_key(value: str) -> str:
+    portfolio_name, contour_name, _family_name = split_group_family_key(value)
+    return normalize_group_blackout_slice(f"{portfolio_name}/{contour_name}")
+
+
 def build_auto_policy(
     all_rows: list[dict],
     profiles: dict[str, dict],
@@ -1876,6 +1881,12 @@ def build_auto_policy(
         all_rows,
         lambda row: f"{str(row.get('portfolio_group') or '').upper()}/{str(row.get('contour') or '').upper()}::{family_for_row(row, profiles).upper()}",
     )
+    portfolio_contour_families: dict[str, set[str]] = {}
+    for group_family_key in by_group_family:
+        portfolio_name, contour_name, family_name = split_group_family_key(group_family_key)
+        portfolio_contour_key = normalize_group_blackout_slice(f"{portfolio_name}/{contour_name}")
+        if portfolio_contour_key and family_name:
+            portfolio_contour_families.setdefault(portfolio_contour_key, set()).add(family_name)
     by_ticker_contour = metrics_map(all_rows, lambda row: f"{row.get('secid') or ''}::{row.get('contour') or ''}")
     by_family_contour = metrics_map(all_rows, lambda row: f"{family_for_row(row, profiles)}::{row.get('contour') or ''}")
 
@@ -2006,6 +2017,8 @@ def build_auto_policy(
         (row for row in research_all if scenario_kind(str(row.get("scenario") or "")) == "combo_overlay"),
         {},
     )
+    research_all_by_scenario = {str(row.get("scenario") or ""): row for row in research_all}
+    research_day_by_scenario = {str(row.get("scenario") or ""): row for row in research_day}
 
     proposed = {
         "best_latest_overlay": best_latest_overlay,
@@ -2102,6 +2115,17 @@ def build_auto_policy(
     group_blackout_consensus_delta = safe_float(best_consensus_group_blackout_overlay.get("delta_total_rub"))
     group_blackout_consensus_latest_delta = safe_float(best_consensus_group_blackout_overlay.get("latest_day_delta_rub"))
     group_blackout_consensus_windows = scenario_group_blackout_windows(group_blackout_consensus_scenario)
+    group_blackout_consensus_all_overlay = research_all_by_scenario.get(group_blackout_consensus_scenario) if group_blackout_consensus_scenario else {}
+    group_blackout_consensus_all_trades = safe_int(group_blackout_consensus_all_overlay.get("trades")) if isinstance(group_blackout_consensus_all_overlay, dict) else 0
+    group_blackout_consensus_all_net = safe_float(group_blackout_consensus_all_overlay.get("net_rub")) if isinstance(group_blackout_consensus_all_overlay, dict) else 0.0
+    group_blackout_consensus_decisive = (
+        group_blackout_consensus_days >= 1
+        and group_blackout_consensus_delta >= 3_000
+        and group_blackout_consensus_latest_delta >= 1_500
+        and group_blackout_consensus_all_trades >= 4
+        and group_blackout_consensus_all_net > 0
+    )
+    activated_group_blackout_scenarios: list[str] = []
     if (
         consensus_entry_start
         and consensus_days >= 2
@@ -2164,11 +2188,15 @@ def build_auto_policy(
             and group_blackout_consensus_latest_delta >= 500
             and group_blackout_consensus_trades >= 2
             and group_blackout_consensus_net < 0
+        ) or (
+            group_blackout_consensus_decisive
+            and group_blackout_consensus_net <= -2_500
         ):
             active["entry_blackout_group_windows"] = merge_group_blackout_windows(
                 policy_group_blackout_windows(active),
                 group_blackout_consensus_windows,
             )
+            activated_group_blackout_scenarios.append(group_blackout_consensus_scenario)
             active["notes"].append(
                 f"Авто-policy: для {group_blackout_consensus_key} новые входы блокируются в окне "
                 f"{', '.join(group_blackout_consensus_windows[group_blackout_consensus_key])}, "
@@ -2179,17 +2207,31 @@ def build_auto_policy(
     base_day_net = safe_float(base_day_overlay.get("net_rub"))
     latest_group_blackout_scenario = str(best_latest_group_blackout_overlay.get("scenario") or "")
     latest_group_blackout_windows = scenario_group_blackout_windows(latest_group_blackout_scenario)
+    latest_group_blackout_all_overlay = research_all_by_scenario.get(latest_group_blackout_scenario) if latest_group_blackout_scenario else {}
+    latest_group_blackout_all_trades = safe_int(latest_group_blackout_all_overlay.get("trades")) if isinstance(latest_group_blackout_all_overlay, dict) else 0
+    latest_group_blackout_all_net = safe_float(latest_group_blackout_all_overlay.get("net_rub")) if isinstance(latest_group_blackout_all_overlay, dict) else 0.0
     if latest_group_blackout_windows:
         latest_group_blackout_key = next(iter(latest_group_blackout_windows))
         latest_group_blackout_total = by_portfolio_contour.get(latest_group_blackout_key) or {}
         latest_group_blackout_trades = safe_int(latest_group_blackout_total.get("trades"))
         latest_group_blackout_net = safe_float(latest_group_blackout_total.get("net_rub"))
         latest_group_blackout_delta = safe_float(best_latest_group_blackout_overlay.get("net_rub")) - base_day_net
-        if latest_group_blackout_trades >= 2 and latest_group_blackout_net <= -1_500 and latest_group_blackout_delta >= 1_500:
+        if (
+            latest_group_blackout_trades >= 2
+            and latest_group_blackout_net <= -1_500
+            and latest_group_blackout_delta >= 1_500
+        ) or (
+            latest_group_blackout_trades >= 1
+            and latest_group_blackout_net <= -2_500
+            and latest_group_blackout_delta >= 2_500
+            and latest_group_blackout_all_trades >= 4
+            and latest_group_blackout_all_net > 0
+        ):
             active["entry_blackout_group_windows"] = merge_group_blackout_windows(
                 policy_group_blackout_windows(active),
                 latest_group_blackout_windows,
             )
+            activated_group_blackout_scenarios.append(latest_group_blackout_scenario)
             active["notes"].append(
                 f"Авто-policy: для {latest_group_blackout_key} новые входы блокируются в окне "
                 f"{', '.join(latest_group_blackout_windows[latest_group_blackout_key])}, "
@@ -2245,10 +2287,27 @@ def build_auto_policy(
     strict_total_net = safe_float(strict_consensus_overlay.get("total_net_rub"))
     strict_delta = safe_float(strict_consensus_overlay.get("delta_total_rub"))
     strict_latest_delta = safe_float(strict_consensus_overlay.get("latest_day_delta_rub"))
+    strict_latest_net = safe_float(strict_consensus_overlay.get("latest_day_rub"))
     futures_families = sorted(
         family
         for family in by_family
         if family and "PERPA" not in str(family).upper()
+    )
+    best_active_group_blackout_all_net = 0.0
+    best_active_group_blackout_day_net = 0.0
+    if activated_group_blackout_scenarios:
+        best_active_group_blackout_all_net = max(
+            safe_float((research_all_by_scenario.get(scenario) or {}).get("net_rub"))
+            for scenario in activated_group_blackout_scenarios
+        )
+        best_active_group_blackout_day_net = max(
+            safe_float((research_day_by_scenario.get(scenario) or {}).get("net_rub"))
+            for scenario in activated_group_blackout_scenarios
+        )
+    group_blackout_beats_blanket_strict = (
+        bool(activated_group_blackout_scenarios)
+        and best_active_group_blackout_all_net >= strict_total_net
+        and best_active_group_blackout_day_net >= strict_latest_net
     )
     if (
         futures_families
@@ -2257,11 +2316,16 @@ def build_auto_policy(
         and strict_delta >= 2_000
         and strict_latest_delta >= 1_000
         and latest_scenario == "contour_only_strict"
+        and not group_blackout_beats_blanket_strict
     ):
         active["strict_only_families"].extend(futures_families)
         active["notes"].append(
             "Авто-policy: все фьючерсные семьи переведены в strict-only для новых входов, "
             "потому что contour_only_strict дал сильный прирост на последнем дне и не уходит в минус по накопленной серии."
+        )
+    elif futures_families and strict_days >= 2 and group_blackout_beats_blanket_strict:
+        active["notes"].append(
+            "Авто-policy: blanket strict-only не активируется, потому что адресный group blackout даёт не хуже результат и сохраняет больше торгового потока."
         )
 
     consensus_blacklist_family = scenario_blacklist_family(consensus_scenario)
@@ -2435,9 +2499,12 @@ def build_auto_policy(
                 f"Авто-policy: все фьючерсные семьи переведены в strict-only для новых входов, "
                 f"потому что strongest combo {best_combo_scenario} уже даёт положительный результат на общей и последней выборке."
             )
+        elif group_blackout_beats_blanket_strict:
+            active["notes"].append(
+                f"Авто-policy: strongest combo {best_combo_scenario} не переводит все семьи в strict-only, "
+                "потому что адресный group blackout уже перекрывает основной ущерб мягче."
+            )
 
-    research_all_by_scenario = {str(row.get("scenario") or ""): row for row in research_all}
-    research_day_by_scenario = {str(row.get("scenario") or ""): row for row in research_day}
     allowed_aggressive_by_group: dict[str, dict] = {}
     for scenario_name, scenario_row in research_all_by_scenario.items():
         group_key = scenario_allow_aggressive_group_family(scenario_name)
@@ -2531,12 +2598,22 @@ def build_auto_policy(
         for key, windows in policy_group_blackout_windows(active).items()
         if split_portfolio_contour_key(key)[0] not in covered_portfolios
     }
+    single_family_group_blackout_keys = {
+        key
+        for key in policy_group_blackout_windows(active)
+        if len(portfolio_contour_families.get(key) or set()) <= 1
+    }
     active["observe_only_group_families"] = [
         value
         for value in (active.get("observe_only_group_families") or [])
         if (
-            (lambda portfolio_name, _contour_name, family_name: portfolio_name not in covered_portfolios and family_name not in covered_families)(
-                *split_group_family_key(str(value))
+            (lambda portfolio_name, _contour_name, family_name, portfolio_contour_key: (
+                portfolio_name not in covered_portfolios
+                and family_name not in covered_families
+                and portfolio_contour_key not in single_family_group_blackout_keys
+            ))(
+                *split_group_family_key(str(value)),
+                group_family_portfolio_contour_key(str(value)),
             )
         )
     ]
