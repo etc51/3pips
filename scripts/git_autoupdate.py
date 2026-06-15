@@ -1,12 +1,18 @@
 from __future__ import annotations
 
 import argparse
+import json
 import shutil
 import subprocess
 import time
+from datetime import datetime, time as dt_time
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from autonomy_common import now_str
+
+
+MSK = ZoneInfo("Europe/Moscow")
 
 
 def log(path: Path, message: str) -> None:
@@ -25,6 +31,38 @@ def git_cmd(project_root: Path, *args: str) -> list[str]:
     return ["git", "-c", f"safe.directory={project_root}", *args]
 
 
+def runtime_open_positions(project_root: Path, run_name: str) -> tuple[int, list[str]]:
+    run_dir = project_root / "reports" / "paper_runs" / run_name
+    total = 0
+    details: list[str] = []
+    for path in sorted(run_dir.glob("*_health.json")):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        count = int(payload.get("open_positions") or 0)
+        total += count
+        if count > 0:
+            details.append(f"{path.stem.removesuffix('_health')}={count}")
+    return total, details
+
+
+def restart_allowed_now(project_root: Path, run_name: str) -> tuple[bool, str]:
+    now_msk = datetime.now(MSK)
+    weekday = now_msk.weekday() < 5
+    current = now_msk.time()
+    # Keep the runtime untouched through the active session and late neo handling window.
+    if weekday and dt_time(10, 0) <= current <= dt_time(23, 55):
+        return False, f"trading_window {now_msk.strftime('%H:%M')}"
+    open_count, details = runtime_open_positions(project_root, run_name)
+    if open_count > 0:
+        suffix = f" {' '.join(details[:6])}" if details else ""
+        return False, f"open_positions={open_count}{suffix}"
+    return True, f"safe_window {now_msk.strftime('%H:%M')}"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--project-root", default="/opt/3pips")
@@ -34,11 +72,14 @@ def main() -> int:
     parser.add_argument("--venv-python", default="/opt/3pips/.venv-a26cf99/bin/python")
     parser.add_argument("--log-path", default="")
     parser.add_argument("--restart-wait-sec", type=int, default=20)
+    parser.add_argument("--run-name", default="v7_live_20260525")
+    parser.add_argument("--pending-restart-path", default="")
     args = parser.parse_args()
 
     project_root = Path(args.project_root).resolve()
     runtime_dir = project_root / "reports" / "runtime"
     log_path = Path(args.log_path) if args.log_path else runtime_dir / "git_autoupdate.log"
+    pending_restart_path = Path(args.pending_restart_path) if args.pending_restart_path else runtime_dir / "git_autoupdate_pending_restart.json"
 
     status = run(git_cmd(project_root, "status", "--porcelain", "--untracked-files=no"), project_root)
     if status.returncode != 0:
@@ -60,38 +101,68 @@ def main() -> int:
         return 0
     head_sha = head.stdout.strip()
     remote_sha = remote_head.stdout.strip()
-    if head_sha == remote_sha:
+    pending_payload: dict[str, str] = {}
+    if pending_restart_path.exists():
+        try:
+            pending_payload = json.loads(pending_restart_path.read_text(encoding="utf-8"))
+        except Exception:
+            pending_payload = {}
+
+    need_restart = False
+    update_reason = ""
+    previous_head = head_sha
+
+    if head_sha != remote_sha:
+        ff = run(git_cmd(project_root, "merge", "--ff-only", remote_sha), project_root)
+        if ff.returncode != 0:
+            log(log_path, f"fail reason=ff_merge_failed rc={ff.returncode} stderr={ff.stderr.strip()[:300]}")
+            return 1
+
+        pip_install = run([args.venv_python, "-m", "pip", "install", "-r", "requirements.txt"], project_root)
+        log(log_path, f"pip rc={pip_install.returncode} stdout_len={len(pip_install.stdout)} stderr_len={len(pip_install.stderr)}")
+
+        deploy_dir = project_root / "deploy"
+        unit_names = [
+            "3pips-paper-a26.service",
+            "3pips-watchdog.service",
+            "3pips-watchdog.timer",
+            "3pips-daily-autonomy.service",
+            "3pips-daily-autonomy.timer",
+            "3pips-git-autoupdate.service",
+            "3pips-git-autoupdate.timer",
+        ]
+        units_installed = 0
+        for name in unit_names:
+            src = deploy_dir / name
+            dst = Path("/etc/systemd/system") / name
+            if src.exists():
+                shutil.copy2(src, dst)
+                units_installed += 1
+        if units_installed:
+            daemon_reload = run(["systemctl", "daemon-reload"], project_root)
+            log(log_path, f"daemon_reload rc={daemon_reload.returncode} units_installed={units_installed}")
+        need_restart = True
+        update_reason = f"updated old={previous_head} new={remote_sha}"
+    elif pending_payload:
+        need_restart = True
+        update_reason = f"pending_restart old={pending_payload.get('old_head','')} new={pending_payload.get('new_head', head_sha)}"
+    else:
         log(log_path, f"skip reason=up_to_date head={head_sha}")
         return 0
 
-    ff = run(git_cmd(project_root, "merge", "--ff-only", remote_sha), project_root)
-    if ff.returncode != 0:
-        log(log_path, f"fail reason=ff_merge_failed rc={ff.returncode} stderr={ff.stderr.strip()[:300]}")
-        return 1
-
-    pip_install = run([args.venv_python, "-m", "pip", "install", "-r", "requirements.txt"], project_root)
-    log(log_path, f"pip rc={pip_install.returncode} stdout_len={len(pip_install.stdout)} stderr_len={len(pip_install.stderr)}")
-
-    deploy_dir = project_root / "deploy"
-    unit_names = [
-        "3pips-paper-a26.service",
-        "3pips-watchdog.service",
-        "3pips-watchdog.timer",
-        "3pips-daily-autonomy.service",
-        "3pips-daily-autonomy.timer",
-        "3pips-git-autoupdate.service",
-        "3pips-git-autoupdate.timer",
-    ]
-    units_installed = 0
-    for name in unit_names:
-        src = deploy_dir / name
-        dst = Path("/etc/systemd/system") / name
-        if src.exists():
-            shutil.copy2(src, dst)
-            units_installed += 1
-    if units_installed:
-        daemon_reload = run(["systemctl", "daemon-reload"], project_root)
-        log(log_path, f"daemon_reload rc={daemon_reload.returncode} units_installed={units_installed}")
+    allowed, why = restart_allowed_now(project_root, args.run_name)
+    if not allowed:
+        pending = {
+            "updated_at": now_str(),
+            "old_head": pending_payload.get("old_head", previous_head),
+            "new_head": remote_sha if remote_sha else head_sha,
+            "reason": update_reason or "pending_restart",
+            "deferred_because": why,
+        }
+        pending_restart_path.parent.mkdir(parents=True, exist_ok=True)
+        pending_restart_path.write_text(json.dumps(pending, ensure_ascii=False, indent=2), encoding="utf-8")
+        log(log_path, f"defer reason={why} {pending['reason']}")
+        return 0
 
     restart = run(["systemctl", "restart", args.service_name], project_root)
     if restart.returncode != 0:
@@ -104,7 +175,9 @@ def main() -> int:
         log(log_path, f"fail reason=service_not_active status={active.stdout.strip()} stderr={active.stderr.strip()[:300]}")
         return 1
 
-    log(log_path, f"updated old={head_sha} new={remote_sha} service={args.service_name}")
+    if pending_restart_path.exists():
+        pending_restart_path.unlink()
+    log(log_path, f"{update_reason} service={args.service_name} restart={why}")
     return 0
 
 
