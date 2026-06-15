@@ -7,7 +7,14 @@ from urllib.parse import urlsplit, urlunsplit
 from urllib.request import urlopen
 
 from autonomy_common import write_json
-from auto_policy_merge import merge_policy_views, strip_watchdog_overrides, summarize_active_policy
+from auto_policy_merge import (
+    merge_policy_views,
+    normalize_notes,
+    normalize_policy_view,
+    policy_functional_signature,
+    strip_watchdog_overrides,
+    summarize_active_policy,
+)
 from auto_policy_utils import normalize_upper_list, policy_group_blackout_windows
 
 
@@ -186,6 +193,47 @@ def load_dashboard_state(dashboard_url: str) -> dict:
     except Exception:
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def normalize_watchdog_overrides(overrides: dict | None) -> dict:
+    overrides = overrides if isinstance(overrides, dict) else {}
+    return {
+        "trade_date": str(overrides.get("trade_date") or ""),
+        "observe_only_group_families": normalize_upper_list(overrides.get("observe_only_group_families")),
+        "observe_only_tickers": normalize_upper_list(overrides.get("observe_only_tickers")),
+        "observe_only_families": normalize_upper_list(overrides.get("observe_only_families")),
+        "entry_blackout_group_windows": policy_group_blackout_windows(overrides),
+        "notes": normalize_notes(overrides.get("notes")),
+    }
+
+
+def diff_watchdog_policy_reasons(
+    current_overrides: dict | None,
+    next_overrides: dict | None,
+    current_active_base: dict | None,
+    next_active_base: dict | None,
+    current_active: dict | None,
+    next_active: dict | None,
+    include_notes: bool = True,
+) -> list[str]:
+    current_norm = normalize_watchdog_overrides(current_overrides)
+    next_norm = normalize_watchdog_overrides(next_overrides)
+    reasons: list[str] = []
+    for key in (
+        "observe_only_group_families",
+        "observe_only_tickers",
+        "observe_only_families",
+        "entry_blackout_group_windows",
+    ):
+        if current_norm.get(key) != next_norm.get(key):
+            reasons.append(key)
+    if include_notes and current_norm.get("notes") != next_norm.get("notes"):
+        reasons.append("notes")
+    if policy_functional_signature(current_active_base) != policy_functional_signature(next_active_base):
+        reasons.append("active_base")
+    if policy_functional_signature(current_active) != policy_functional_signature(next_active):
+        reasons.append("active")
+    return reasons
 
 
 def compute_intraday_watchdog_overrides(
@@ -376,16 +424,17 @@ def refresh_intraday_killer_policy(project_root: Path, run_dir: Path, dashboard_
             active_base,
         )
     merged_active = merge_policy_views(active_base, overrides)
-
-    changed = (
-        normalize_upper_list((current_overrides or {}).get("observe_only_group_families")) != normalize_upper_list(overrides.get("observe_only_group_families"))
-        or normalize_upper_list((current_overrides or {}).get("observe_only_tickers")) != normalize_upper_list(overrides.get("observe_only_tickers"))
-        or normalize_upper_list((current_overrides or {}).get("observe_only_families")) != normalize_upper_list(overrides.get("observe_only_families"))
-        or policy_group_blackout_windows(current_overrides) != policy_group_blackout_windows(overrides)
-        or [str(item) for item in ((current_overrides or {}).get("notes") or []) if str(item).strip()] != [str(item) for item in (overrides.get("notes") or []) if str(item).strip()]
-        or payload.get("active_base") != active_base
-        or payload.get("active") != merged_active
+    change_reasons = diff_watchdog_policy_reasons(
+        current_overrides,
+        overrides,
+        payload.get("active_base"),
+        active_base,
+        payload.get("active"),
+        merged_active,
+        include_notes=False,
     )
+    note_drift = normalize_watchdog_overrides(current_overrides).get("notes") != normalize_watchdog_overrides(overrides).get("notes")
+    changed = bool(change_reasons)
 
     payload["active_base"] = active_base
     payload["watchdog_overrides"] = overrides
@@ -399,5 +448,7 @@ def refresh_intraday_killer_policy(project_root: Path, run_dir: Path, dashboard_
         f"trade_date={trade_date or '-'} "
         f"group_families={','.join(overrides.get('observe_only_group_families') or []) or '-'} "
         f"families={','.join(overrides.get('observe_only_families') or []) or '-'} "
-        f"tickers={','.join(overrides.get('observe_only_tickers') or []) or '-'}"
+        f"tickers={','.join(overrides.get('observe_only_tickers') or []) or '-'} "
+        f"reasons={','.join(change_reasons) or '-'} "
+        f"note_drift={'yes' if note_drift else 'no'}"
     )

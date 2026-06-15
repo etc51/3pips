@@ -19,6 +19,37 @@ NUMERIC_POLICY_KEYS = (
 )
 
 
+def normalize_notes(values: object) -> list[str]:
+    if not isinstance(values, (list, tuple, set)):
+        return []
+    return sorted({str(value).strip() for value in values if str(value).strip()})
+
+
+def normalize_policy_view(view: dict | None) -> dict:
+    view = view if isinstance(view, dict) else {}
+    normalized: dict = {
+        "observe_only_portfolios": normalize_upper_list(view.get("observe_only_portfolios")),
+        "observe_only_group_families": normalize_upper_list(view.get("observe_only_group_families")),
+        "allow_aggressive_group_families": normalize_upper_list(view.get("allow_aggressive_group_families")),
+        "observe_only_tickers": normalize_upper_list(view.get("observe_only_tickers")),
+        "observe_only_families": normalize_upper_list(view.get("observe_only_families")),
+        "strict_only_tickers": normalize_upper_list(view.get("strict_only_tickers")),
+        "strict_only_families": normalize_upper_list(view.get("strict_only_families")),
+        "entry_blackout_windows": normalize_blackout_windows(view.get("entry_blackout_windows")),
+        "entry_blackout_group_windows": policy_group_blackout_windows(view),
+        "notes": normalize_notes(view.get("notes")),
+    }
+    for key in NUMERIC_POLICY_KEYS:
+        normalized[key] = view.get(key)
+    return normalized
+
+
+def policy_functional_signature(view: dict | None) -> dict:
+    normalized = normalize_policy_view(view)
+    normalized.pop("notes", None)
+    return normalized
+
+
 def merge_policy_views(base_active: dict, overrides: dict) -> dict:
     merged = dict(base_active) if isinstance(base_active, dict) else {}
     base_active = base_active if isinstance(base_active, dict) else {}
@@ -72,7 +103,7 @@ def strip_watchdog_overrides(active: dict, overrides: dict) -> dict:
 
 
 def summarize_active_policy(active: dict) -> dict[str, int]:
-    active = active if isinstance(active, dict) else {}
+    active = normalize_policy_view(active)
     return {
         "active_rule_count": (
             len(active.get("observe_only_portfolios") or [])
