@@ -1152,6 +1152,9 @@ HTML = r"""<!doctype html>
         if (autoPolicyActive.entry_no_new_after !== undefined && autoPolicyActive.entry_no_new_after !== null && autoPolicyActive.entry_no_new_after !== '') {
           policyBits.push(`no new after: ${autoPolicyActive.entry_no_new_after}`);
         }
+        if ((autoPolicyActive.entry_blackout_windows || []).length) {
+          policyBits.push(`blackout: ${(autoPolicyActive.entry_blackout_windows || []).join(', ')}`);
+        }
         if (autoPolicyActive.entry_max_full_stop_rub !== undefined && autoPolicyActive.entry_max_full_stop_rub !== null && autoPolicyActive.entry_max_full_stop_rub !== '') {
           policyBits.push(`entry stop cap: ${fmt(autoPolicyActive.entry_max_full_stop_rub, 0)} ₽`);
         }

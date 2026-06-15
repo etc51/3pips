@@ -129,6 +129,7 @@ def empty_auto_policy() -> dict:
         "observe_only_families": [],
         "strict_only_tickers": [],
         "strict_only_families": [],
+        "entry_blackout_windows": [],
         "entry_no_trade_before": None,
         "entry_no_new_after": None,
         "entry_max_full_stop_rub": None,
@@ -186,6 +187,31 @@ def normalize_clock_hhmm(value: object) -> str | None:
     return f"{hour:02d}:{minute:02d}"
 
 
+def normalize_blackout_window(value: object) -> str | None:
+    text = str(value or "").strip()
+    if not text or "-" not in text:
+        return None
+    start_raw, end_raw = text.split("-", 1)
+    start_norm = normalize_clock_hhmm(start_raw)
+    end_norm = normalize_clock_hhmm(end_raw)
+    if not start_norm or not end_norm or start_norm > end_norm:
+        return None
+    return f"{start_norm}-{end_norm}"
+
+
+def normalize_blackout_windows(values: object) -> list[str]:
+    if isinstance(values, str):
+        values = [part.strip() for part in values.split(",")]
+    if not isinstance(values, (list, tuple, set)):
+        return []
+    out: list[str] = []
+    for value in values:
+        normalized = normalize_blackout_window(value)
+        if normalized:
+            out.append(normalized)
+    return sorted(set(out))
+
+
 def parse_auto_policy_payload(payload: object) -> dict:
     if not isinstance(payload, dict):
         return empty_auto_policy()
@@ -200,6 +226,7 @@ def parse_auto_policy_payload(payload: object) -> dict:
         "observe_only_families": normalize_policy_names(active.get("observe_only_families")),
         "strict_only_tickers": normalize_policy_names(active.get("strict_only_tickers")),
         "strict_only_families": normalize_policy_names(active.get("strict_only_families")),
+        "entry_blackout_windows": normalize_blackout_windows(active.get("entry_blackout_windows")),
         "entry_no_trade_before": normalize_clock_hhmm(active.get("entry_no_trade_before")),
         "entry_no_new_after": normalize_clock_hhmm(active.get("entry_no_new_after")),
         "entry_max_full_stop_rub": normalize_rub_cap(active.get("entry_max_full_stop_rub")),
@@ -250,6 +277,7 @@ def refresh_auto_policy(cache: dict, force: bool = False) -> dict:
     observe_count = len(payload["observe_only_portfolios"]) + len(payload["observe_only_group_families"]) + len(payload["observe_only_tickers"]) + len(payload["observe_only_families"])
     allow_aggressive_count = len(payload["allow_aggressive_group_families"])
     strict_count = len(payload["strict_only_tickers"]) + len(payload["strict_only_families"])
+    blackout_windows = payload.get("entry_blackout_windows") or []
     entry_start = payload.get("entry_no_trade_before")
     entry_cutoff = payload.get("entry_no_new_after")
     stop_cap = payload.get("entry_max_full_stop_rub")
@@ -258,6 +286,7 @@ def refresh_auto_policy(cache: dict, force: bool = False) -> dict:
     print(
         f"{now_str()} AUTO_POLICY loaded trade_date={payload.get('trade_date') or '-'} "
         f"observe={observe_count} allow_aggressive={allow_aggressive_count} strict_only={strict_count} "
+        f"entry_blackout_windows={','.join(blackout_windows) if blackout_windows else '-'} "
         f"entry_no_trade_before={entry_start or '-'} "
         f"entry_no_new_after={entry_cutoff or '-'} "
         f"stop_cap_rub={stop_cap if stop_cap is not None else '-'} "
@@ -317,6 +346,13 @@ def effective_no_new_after(base_no_new_after: int | None, policy: dict) -> int |
     if policy_no_new_after is None:
         return base_no_new_after
     return min(base_no_new_after, policy_no_new_after)
+
+
+def effective_entry_blackout_windows(base_windows: object, policy: dict) -> list[str]:
+    return sorted(
+        set(normalize_blackout_windows(base_windows))
+        | set(normalize_blackout_windows(policy.get("entry_blackout_windows") if isinstance(policy, dict) else None))
+    )
 
 
 def apply_auto_loss_pause(st: State, states: list[State], net: float, policy: dict) -> None:
@@ -985,13 +1021,32 @@ def clock_seconds_now() -> int:
     return current.hour * 3600 + current.minute * 60 + current.second
 
 
-def daily_trading_enabled(no_trade_before: int | None, no_new_after: int | None) -> bool:
+def blackout_window_active(now_sec: int, window: str) -> bool:
+    normalized = normalize_blackout_window(window)
+    if not normalized:
+        return False
+    start_raw, end_raw = normalized.split("-", 1)
+    start_sec = parse_clock_time(start_raw)
+    end_sec = parse_clock_time(end_raw)
+    if start_sec is None or end_sec is None:
+        return False
+    return start_sec <= now_sec < (end_sec + 60)
+
+
+def daily_trading_block_reason(no_trade_before: int | None, no_new_after: int | None, blackout_windows: list[str] | None = None) -> str | None:
     now_sec = clock_seconds_now()
     if no_trade_before is not None and now_sec < no_trade_before:
-        return False
+        return "before_start"
     if no_new_after is not None and now_sec >= no_new_after:
-        return False
-    return True
+        return "after_cutoff"
+    for window in blackout_windows or []:
+        if blackout_window_active(now_sec, window):
+            return f"blackout_window {window}"
+    return None
+
+
+def daily_trading_enabled(no_trade_before: int | None, no_new_after: int | None, blackout_windows: list[str] | None = None) -> bool:
+    return daily_trading_block_reason(no_trade_before, no_new_after, blackout_windows) is None
 
 
 def daily_force_close_due(force_close_at: int | None) -> bool:
@@ -1474,8 +1529,14 @@ def poll_market_fallback(
                                 )
                             if rate_limited:
                                 break
+                        active_auto_policy_poll = refresh_auto_policy(auto_policy_state)
+                        poll_trading_enabled = daily_trading_enabled(
+                            effective_no_trade_before(parse_clock_time(getattr(args, "no_trade_before", "")), active_auto_policy_poll),
+                            effective_no_new_after(parse_clock_time(getattr(args, "no_new_after", "")), active_auto_policy_poll),
+                            effective_entry_blackout_windows(normalize_blackout_windows(getattr(args, "entry_blackout_window", [])), active_auto_policy_poll),
+                        )
                         write_open_positions(Path(args.open_positions_log), states)
-                        write_microstructure_snapshot(Path(args.snapshot_log), states, trading_enabled=True)
+                        write_microstructure_snapshot(Path(args.snapshot_log), states, trading_enabled=poll_trading_enabled)
                         write_bot_health(
                             Path(args.health_log),
                             states,
@@ -1485,7 +1546,7 @@ def poll_market_fallback(
                             int(runtime_state.get("reconnect_count", 0)),
                             str(runtime_state.get("last_stream_error", "")),
                             "polling_fallback",
-                            refresh_auto_policy(auto_policy_state),
+                            active_auto_policy_poll,
                         )
                     print(f"{now_str()} POLL fallback active stale_sec={time.monotonic() - last_stream_event[0]:.1f}", flush=True)
         except Exception as exc:
@@ -1821,6 +1882,7 @@ def main() -> None:
     parser.add_argument("--snapshot-sec", type=int, default=10)
     parser.add_argument("--no-trade-before", default="")
     parser.add_argument("--no-new-after", default="")
+    parser.add_argument("--entry-blackout-window", action="append", default=[])
     parser.add_argument("--force-close-at", default="")
     parser.add_argument("--paper-capital", type=float, default=200_000.0)
     parser.add_argument("--max-total-margin-pct", type=float, default=0.80)
@@ -1993,6 +2055,7 @@ def main() -> None:
         by_figi = {s.figi: s for s in specs}
         by_uid = {s.uid: s for s in specs}
         state_by_uid = {(s.spec.uid, s.contour): s for s in states}
+        base_blackout_windows = normalize_blackout_windows(getattr(args, "entry_blackout_window", []))
         print(
             f"{now_str()} multi_paper start instruments={len(specs)} contours=2 "
             f"runtime_sec={args.runtime_sec} paper_capital={portfolio.initial_capital:.0f} "
@@ -2000,7 +2063,10 @@ def main() -> None:
             f"max_position_margin_pct={portfolio.max_position_margin_pct:.2f} "
             f"max_full_stop_rub={float(args.max_full_stop_rub):.0f} "
             f"auto_policy_path={args.auto_policy_path or '-'} "
-            f"no_new_after={args.no_new_after or '-'} force_close_at={args.force_close_at or '-'}"
+            f"no_trade_before={args.no_trade_before or '-'} "
+            f"no_new_after={args.no_new_after or '-'} "
+            f"entry_blackout_windows={','.join(base_blackout_windows) if base_blackout_windows else '-'} "
+            f"force_close_at={args.force_close_at or '-'}"
         )
         started = time.monotonic()
         next_report = started + args.report_sec
@@ -2053,10 +2119,13 @@ def main() -> None:
             nonlocal next_report, next_snapshot
             now = time.monotonic()
             active_auto_policy_local = refresh_auto_policy(auto_policy_state)
-            trading_enabled = daily_trading_enabled(
+            effective_blackout_windows = effective_entry_blackout_windows(base_blackout_windows, active_auto_policy_local)
+            trading_gate_reason = daily_trading_block_reason(
                 effective_no_trade_before(no_trade_before, active_auto_policy_local),
                 effective_no_new_after(no_new_after, active_auto_policy_local),
+                effective_blackout_windows,
             )
+            trading_enabled = trading_gate_reason is None
             force_close_due = daily_force_close_due(force_close_at)
             uid = ""
             price = None
@@ -2106,6 +2175,9 @@ def main() -> None:
                         )
                         if has_active_shadow(st):
                             continue
+                    if st.position is None and not trading_enabled and trading_gate_reason:
+                        if not st.last_reason.startswith("auto_policy pause_"):
+                            st.last_reason = f"time_gate {trading_gate_reason}"
                     if st.position is None and trading_enabled and not force_close_due:
                         if st.attempts >= st.profile.max_attempts:
                             st.last_reason = "attempt_filter max_attempts_reached"

@@ -162,6 +162,51 @@ def normalize_upper_list(values: object) -> list[str]:
     return sorted(set(out))
 
 
+def normalize_clock_hhmm(value: object) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if ":" in text:
+        parts = text.split(":", 1)
+    elif len(text) == 4 and text.isdigit():
+        parts = [text[:2], text[2:]]
+    else:
+        return ""
+    try:
+        hour = int(parts[0])
+        minute = int(parts[1])
+    except Exception:
+        return ""
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return ""
+    return f"{hour:02d}:{minute:02d}"
+
+
+def normalize_blackout_window(value: object) -> str:
+    text = str(value or "").strip()
+    if not text or "-" not in text:
+        return ""
+    start_raw, end_raw = text.split("-", 1)
+    start_norm = normalize_clock_hhmm(start_raw)
+    end_norm = normalize_clock_hhmm(end_raw)
+    if not start_norm or not end_norm or start_norm > end_norm:
+        return ""
+    return f"{start_norm}-{end_norm}"
+
+
+def normalize_blackout_windows(values: object) -> list[str]:
+    if isinstance(values, str):
+        values = [part.strip() for part in values.split(",")]
+    if not isinstance(values, (list, tuple, set)):
+        return []
+    out: list[str] = []
+    for value in values:
+        normalized = normalize_blackout_window(value)
+        if normalized:
+            out.append(normalized)
+    return sorted(set(out))
+
+
 def family_from_ticker(ticker: str) -> str:
     secid = str(ticker or "").strip()
     if not secid:
@@ -365,6 +410,7 @@ def merge_policy_views(base_active: dict, overrides: dict) -> dict:
     )
     merged["strict_only_tickers"] = normalize_upper_list(base_active.get("strict_only_tickers"))
     merged["strict_only_families"] = normalize_upper_list(base_active.get("strict_only_families"))
+    merged["entry_blackout_windows"] = normalize_blackout_windows(base_active.get("entry_blackout_windows"))
     for key in (
         "entry_no_trade_before",
         "entry_no_new_after",
@@ -568,6 +614,7 @@ def refresh_intraday_killer_policy(project_root: Path, run_dir: Path, dashboard_
         + len(merged_active.get("observe_only_families") or [])
         + len(merged_active.get("strict_only_tickers") or [])
         + len(merged_active.get("strict_only_families") or [])
+        + len(merged_active.get("entry_blackout_windows") or [])
         + sum(
             1
             for key in (
