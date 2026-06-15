@@ -315,6 +315,7 @@ def compute_intraday_watchdog_overrides(run_dir: Path, trade_date: str, dashboar
         for secid, bucket in by_ticker.items()
         if (
             (bucket["losses"] >= 1 and bucket["closed_net_rub"] <= -2000.0)
+            or (bucket["losses"] >= 2 and bucket["closed_net_rub"] <= -1500.0)
             or (bucket["closed_net_rub"] + bucket["open_net_rub"] <= -2000.0 and bucket["open_positions"] >= 1)
             or (bucket["open_net_rub"] <= -1200.0 and bucket["open_positions"] >= 1 and bucket["losses"] >= 1)
         )
