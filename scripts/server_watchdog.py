@@ -256,6 +256,8 @@ def merge_policy_views(base_active: dict, overrides: dict) -> dict:
     )
     merged["strict_only_tickers"] = normalize_upper_list(base_active.get("strict_only_tickers"))
     merged["strict_only_families"] = normalize_upper_list(base_active.get("strict_only_families"))
+    for key in ("entry_max_full_stop_rub", "pause_ticker_after_losses", "pause_family_after_losses", "pause_after_loss_minutes"):
+        merged[key] = base_active.get(key)
     base_notes = [str(item) for item in (base_active.get("notes") or []) if str(item).strip()]
     override_notes = [str(item) for item in (overrides.get("notes") or []) if str(item).strip()]
     merged["notes"] = list(dict.fromkeys(base_notes + override_notes))[:12]
