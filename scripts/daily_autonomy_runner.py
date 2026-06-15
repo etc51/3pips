@@ -41,6 +41,7 @@ from auto_policy_utils import (  # noqa: E402
     policy_group_blackout_windows,
 )
 from auto_policy_merge import merge_watchdog_overrides, summarize_active_policy  # noqa: E402
+from auto_policy_candidate import advance_candidate_gate, apply_promoted_candidates, summarize_candidate_gate  # noqa: E402
 from daily_autonomy_outputs import (  # noqa: E402
     build_manifest_payload,
     copy_bundle_outputs,
@@ -1401,9 +1402,11 @@ def build_nightly_cycle_status(
     restriction_rows: list[dict],
     auto_policy: dict,
     email_to: str,
+    candidate_gate: dict | None = None,
 ) -> dict:
     active = auto_policy.get("active") if isinstance(auto_policy.get("active"), dict) else {}
     email_settings = smtp_settings(default_recipient=email_to)
+    candidate_summary = summarize_candidate_gate(candidate_gate or {})
     return {
         "trade_date": trade_date,
         "generated_at": now_str(),
@@ -1434,6 +1437,12 @@ def build_nightly_cycle_status(
                 "status": "ok",
                 "active_rule_count": summarize_active_policy(active)["active_rule_count"],
                 "rows": len(restriction_rows),
+            },
+            "candidate_gate": {
+                "status": "ok",
+                "pending": safe_int(candidate_summary.get("pending_count")),
+                "promoted_now": safe_int(candidate_summary.get("promoted_now_count")),
+                "rejected_now": safe_int(candidate_summary.get("rejected_now_count")),
             },
             "summary": {
                 "status": "ok",
@@ -1878,10 +1887,15 @@ def build_auto_policy(
         "best_latest_group_blackout_overlay": best_latest_group_blackout_overlay,
         "best_consensus_group_blackout_overlay": best_consensus_group_blackout_overlay,
         "candidate_entry_start": "",
+        "candidate_entry_start_anchor": "",
         "candidate_entry_cutoff": "",
+        "candidate_entry_cutoff_anchor": "",
         "candidate_entry_blackout_windows": [],
+        "candidate_entry_blackout_anchor": "",
         "candidate_group_blackout_windows": {},
+        "candidate_group_blackout_anchor": "",
         "candidate_stop_cap_rub": None,
+        "candidate_stop_cap_anchor": "",
         "notes": [],
     }
     for candidate in [
@@ -1896,18 +1910,21 @@ def build_auto_policy(
         candidate_entry_start = scenario_entry_start(scenario)
         if candidate_entry_start and not proposed["candidate_entry_start"]:
             proposed["candidate_entry_start"] = candidate_entry_start
+            proposed["candidate_entry_start_anchor"] = scenario
             proposed["notes"].append(
                 f"Сценарий {scenario} дал лучший результат в исследовательском слое: это кандидат на более поздний старт {candidate_entry_start}, но пока не активируется автоматически."
             )
         candidate_entry_cutoff = scenario_entry_cutoff(scenario)
         if candidate_entry_cutoff and not proposed["candidate_entry_cutoff"]:
             proposed["candidate_entry_cutoff"] = candidate_entry_cutoff
+            proposed["candidate_entry_cutoff_anchor"] = scenario
             proposed["notes"].append(
                 f"Сценарий {scenario} дал лучший результат в исследовательском слое: это кандидат на ранний cutoff {candidate_entry_cutoff}, но пока не активируется автоматически."
             )
         candidate_blackout_windows = scenario_blackout_windows(scenario)
         if candidate_blackout_windows and not proposed["candidate_entry_blackout_windows"]:
             proposed["candidate_entry_blackout_windows"] = candidate_blackout_windows
+            proposed["candidate_entry_blackout_anchor"] = scenario
             proposed["notes"].append(
                 f"Сценарий {scenario} дал лучший результат в исследовательском слое: это кандидат на blackout новых входов {', '.join(candidate_blackout_windows)}."
             )
@@ -1919,6 +1936,8 @@ def build_auto_policy(
             )
             if merged_group_blackout_windows != normalize_group_blackout_windows(proposed.get("candidate_group_blackout_windows")):
                 proposed["candidate_group_blackout_windows"] = merged_group_blackout_windows
+                if not proposed["candidate_group_blackout_anchor"]:
+                    proposed["candidate_group_blackout_anchor"] = scenario
                 proposed["notes"].append(
                     f"Сценарий {scenario} дал лучший результат в исследовательском слое: "
                     f"это кандидат на точечный blackout {format_group_blackout_windows(candidate_group_blackout_windows, empty='-')}."
@@ -1929,6 +1948,7 @@ def build_auto_policy(
             except Exception:
                 proposed["candidate_stop_cap_rub"] = None
             if proposed["candidate_stop_cap_rub"] is not None:
+                proposed["candidate_stop_cap_anchor"] = scenario
                 proposed["notes"].append(
                     f"Сценарий {scenario} выглядит сильнее base: это кандидат на следующий тест лимита полного стопа."
                 )
@@ -2631,6 +2651,7 @@ def render_auto_policy_markdown(auto_policy: dict) -> str:
     best_consensus = proposed.get("best_consensus_overlay") if isinstance(proposed.get("best_consensus_overlay"), dict) else {}
     best_latest_group_blackout = proposed.get("best_latest_group_blackout_overlay") if isinstance(proposed.get("best_latest_group_blackout_overlay"), dict) else {}
     best_consensus_group_blackout = proposed.get("best_consensus_group_blackout_overlay") if isinstance(proposed.get("best_consensus_group_blackout_overlay"), dict) else {}
+    candidate_gate = auto_policy.get("candidate_gate") if isinstance(auto_policy.get("candidate_gate"), dict) else {}
     lines.append(f"- best_latest_overlay: {best_latest.get('scenario') or '-'}")
     lines.append(f"- best_consensus_overlay: {best_consensus.get('scenario') or '-'}")
     lines.append(f"- best_latest_group_blackout_overlay: {best_latest_group_blackout.get('scenario') or '-'}")
@@ -2643,6 +2664,13 @@ def render_auto_policy_markdown(auto_policy: dict) -> str:
     lines.append("")
     for note in proposed.get("notes") or []:
         lines.append(f"- {note}")
+    lines.append("")
+    lines.append("## Candidate Gate")
+    lines.append("")
+    lines.append(f"- pending_count: {candidate_gate.get('pending_count') or 0}")
+    lines.append(f"- promoted_now_count: {candidate_gate.get('promoted_now_count') or 0}")
+    lines.append(f"- rejected_now_count: {candidate_gate.get('rejected_now_count') or 0}")
+    lines.append(f"- promoted_total: {candidate_gate.get('promoted_total') or 0}")
     lines.append("")
     return "\n".join(lines)
 
@@ -3386,6 +3414,19 @@ def main() -> int:
         research_all=research_all,
         research_consensus=scenario_consensus,
     )
+    candidate_state_path = manifest_root / "candidate_auto_policy.json"
+    candidate_gate = advance_candidate_gate(load_json(candidate_state_path), auto_policy, scenario_history, trade_date)
+    promoted_candidates = list(candidate_gate.get("promoted_now") or [])
+    if promoted_candidates:
+        active_base = auto_policy.get("active_base") if isinstance(auto_policy.get("active_base"), dict) else {}
+        promoted_active = apply_promoted_candidates(active_base, promoted_candidates)
+        auto_policy["active_base"] = promoted_active
+        auto_policy["active"] = dict(promoted_active)
+        auto_policy["summary"] = {
+            **(auto_policy.get("summary") if isinstance(auto_policy.get("summary"), dict) else {}),
+            **summarize_active_policy(promoted_active),
+        }
+    auto_policy["candidate_gate"] = candidate_gate.get("summary") if isinstance(candidate_gate.get("summary"), dict) else {}
     auto_policy = merge_watchdog_overrides(auto_policy, load_json(manifest_root / "latest_auto_policy.json"))
     optimizer_candidates = build_optimizer_candidates(research_day, research_all, scenario_consensus)
     strategy_lab = build_strategy_lab(
@@ -3470,6 +3511,9 @@ def main() -> int:
         strategy_lab=strategy_lab,
         markdown_top=markdown_top,
     )
+    write_json(analysis_dir / "candidate_auto_policy.json", candidate_gate)
+    write_json(research_dir / "candidate_auto_policy.json", candidate_gate)
+    write_json(candidate_state_path, candidate_gate)
 
     runtime_dir = project_root / "reports" / "runtime"
     shadow_rows = filter_trade_date(load_shadow_trades(run_dir), trade_date)
@@ -3482,6 +3526,7 @@ def main() -> int:
         analysis_dir=analysis_dir,
         research_dir=research_dir,
     )
+    write_json(bundle_dir / "candidate_auto_policy.json", candidate_gate)
     manifest_payload = build_manifest_payload(
         trade_date=trade_date,
         overall=overall,
@@ -3506,6 +3551,7 @@ def main() -> int:
         roll_watch=roll_watch,
         auto_policy=auto_policy,
     )
+    manifest_payload["candidate_gate"] = candidate_gate.get("summary") if isinstance(candidate_gate.get("summary"), dict) else {}
     write_json(bundle_dir / "manifest.json", manifest_payload)
 
     nightly_cycle_status = build_nightly_cycle_status(
@@ -3519,6 +3565,7 @@ def main() -> int:
         restriction_rows=restriction_rows,
         auto_policy=auto_policy,
         email_to=args.email_to,
+        candidate_gate=candidate_gate,
     )
     persist_nightly_cycle_status(
         nightly_cycle_status,

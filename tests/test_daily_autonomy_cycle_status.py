@@ -35,8 +35,10 @@ class DailyAutonomyCycleStatusTest(unittest.TestCase):
         stages = status["stages"]
         self.assertEqual(
             set(stages),
-            {"analyze", "research", "optimizer", "strategy_lab", "restrictions", "summary", "email"},
+            {"analyze", "research", "optimizer", "strategy_lab", "restrictions", "candidate_gate", "summary", "email"},
         )
+        self.assertEqual(stages["candidate_gate"]["status"], "ok")
+        self.assertEqual(stages["candidate_gate"]["pending"], 0)
         self.assertFalse(stages["summary"]["archive_ready"])
         self.assertEqual(stages["summary"]["archive_path"], "")
         self.assertEqual(stages["email"]["status"], "disabled_missing_smtp")
