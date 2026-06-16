@@ -314,6 +314,54 @@ class EntryShadowModelsTest(unittest.TestCase):
             self.assertIn("actual_candle_like_stop_fill", text)
             self.assertEqual(state.entry_shadow_decisions, [])
 
+    def test_write_entry_shadow_decisions_emits_runtime_log(self) -> None:
+        decisions = [
+            {
+                "entry_id": "e1",
+                "portfolio_group": "CLASSIC_CORE",
+                "contour": "STRICT",
+                "secid": "BRQ6",
+                "model": "tv_ema_rsi_adx_trend",
+                "allow": "true",
+            },
+            {
+                "entry_id": "e1",
+                "portfolio_group": "CLASSIC_CORE",
+                "contour": "STRICT",
+                "secid": "BRQ6",
+                "model": "forum_chop_donchian_guard",
+                "allow": "false",
+            },
+        ]
+
+        with tempfile.TemporaryDirectory() as tmp, patch("multi_futures_paper.now_str", return_value="2026-06-16 10:45:00"), patch(
+            "builtins.print"
+        ) as mock_print:
+            path = Path(tmp) / "classic_core_entry_shadow_models.csv"
+            mfp.write_entry_shadow_decisions(
+                path,
+                decisions,
+                closed_at="2026-06-16 10:44:30",
+                minutes_held=15,
+                exit_price=111.2,
+                exit_source="actual_candle_like_stop_fill",
+                net_rub=123.45,
+                ticks=12.0,
+            )
+
+            self.assertTrue(path.exists())
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("tv_ema_rsi_adx_trend", text)
+            mock_print.assert_called_once()
+            message = mock_print.call_args.args[0]
+            self.assertIn("ENTRY_SHADOW", message)
+            self.assertIn("rows=2", message)
+            self.assertIn("path=classic_core_entry_shadow_models.csv", message)
+            self.assertIn("exit_source=actual_candle_like_stop_fill", message)
+            self.assertIn("secids=BRQ6", message)
+            self.assertIn("models=forum_chop_donchian_guard,tv_ema_rsi_adx_trend", message)
+            self.assertTrue(mock_print.call_args.kwargs.get("flush"))
+
     @patch("multi_futures_paper.clock_seconds_now", return_value=10 * 3600 + 30 * 60)
     def test_open_position_shadow_state_round_trips_through_restore(self, _mock_clock: object) -> None:
         state = self.make_state()

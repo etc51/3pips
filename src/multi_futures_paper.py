@@ -1885,6 +1885,8 @@ def write_entry_shadow_decisions(
     net_rub: float,
     ticks: float,
 ) -> None:
+    if not decisions:
+        return
     for row in decisions:
         out = dict(row)
         out["closed_at"] = closed_at
@@ -1894,6 +1896,15 @@ def write_entry_shadow_decisions(
         out["net_rub"] = round(net_rub, 2)
         out["ticks"] = round(ticks, 3)
         append_schema_stable_csv(path, out)
+    sample_models = sorted({str(row.get("model") or "").strip() for row in decisions if str(row.get("model") or "").strip()})
+    sample_secids = sorted({str(row.get("secid") or "").strip() for row in decisions if str(row.get("secid") or "").strip()})
+    model_text = ",".join(sample_models[:3]) if sample_models else "-"
+    secid_text = ",".join(sample_secids[:3]) if sample_secids else "-"
+    print(
+        f"{now_str()} ENTRY_SHADOW rows={len(decisions)} closed_at={closed_at} path={path.name} "
+        f"exit_source={exit_source} secids={secid_text} models={model_text}",
+        flush=True,
+    )
 
 
 def finalize_shadow_only_entry_tracking(state: State, args: argparse.Namespace) -> None:
