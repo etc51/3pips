@@ -158,6 +158,84 @@ def check_automation_health(timer_names: list[str], git_autoupdate_status_path: 
     return issues
 
 
+def check_latest_autonomy_outputs(project_root: Path, latest_trade_date_value: str, max_age_sec: int) -> list[str]:
+    latest_root = project_root / "reports" / "autonomy" / "latest"
+    required_names = [
+        "latest_auto_policy.json",
+        "latest_nightly_cycle_status.json",
+        "latest_manifest.json",
+        "research_strategy_registry_summary.json",
+        "paper_candidate_shortlist_summary.json",
+        "research_strategy_targets_summary.json",
+    ]
+    payloads: dict[str, dict] = {}
+    issues: list[str] = []
+    now_epoch = time.time()
+
+    for name in required_names:
+        path = latest_root / name
+        if not path.exists():
+            issues.append(f"missing_latest_artifact[{name}]")
+            continue
+        age_sec = int(max(0.0, now_epoch - path.stat().st_mtime))
+        if age_sec > max_age_sec:
+            issues.append(f"stale_latest_artifact[{name}] age={age_sec}s")
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            issues.append(f"bad_latest_artifact[{name}] {exc}")
+            continue
+        if not isinstance(payload, dict):
+            issues.append(f"bad_latest_artifact[{name}] not_dict")
+            continue
+        payloads[name] = payload
+
+    auto_policy = payloads.get("latest_auto_policy.json")
+    if auto_policy is not None and latest_trade_date_value:
+        auto_trade_date = str(auto_policy.get("trade_date") or "")
+        if auto_trade_date != latest_trade_date_value:
+            issues.append(f"latest_auto_policy_trade_date_mismatch[{auto_trade_date or '-'}!={latest_trade_date_value}]")
+
+    nightly = payloads.get("latest_nightly_cycle_status.json")
+    if nightly is not None:
+        nightly_trade_date = str(nightly.get("trade_date") or "")
+        if latest_trade_date_value and nightly_trade_date != latest_trade_date_value:
+            issues.append(f"nightly_trade_date_mismatch[{nightly_trade_date or '-'}!={latest_trade_date_value}]")
+        nightly_status = str(nightly.get("status") or "")
+        if nightly_status != "ok":
+            issues.append(f"nightly_status_not_ok[{nightly_status or '-'}]")
+        summary_stage = ((nightly.get("stages") or {}).get("summary") or {})
+        summary_status = str(summary_stage.get("status") or "")
+        if summary_status != "ok":
+            issues.append(f"nightly_summary_status_not_ok[{summary_status or '-'}]")
+        if not bool(summary_stage.get("archive_ready")):
+            issues.append("nightly_archive_not_ready")
+
+    manifest = payloads.get("latest_manifest.json")
+    if manifest is not None:
+        manifest_trade_date = str(manifest.get("trade_date") or "")
+        if latest_trade_date_value and manifest_trade_date != latest_trade_date_value:
+            issues.append(f"latest_manifest_trade_date_mismatch[{manifest_trade_date or '-'}!={latest_trade_date_value}]")
+        for key in [
+            "nightly_cycle_status",
+            "archive",
+            "research_strategy_registry",
+            "paper_candidate_shortlist",
+            "research_strategy_targets",
+        ]:
+            if key not in manifest:
+                issues.append(f"latest_manifest_missing_key[{key}]")
+        manifest_nightly = manifest.get("nightly_cycle_status")
+        if isinstance(manifest_nightly, dict):
+            manifest_nightly_status = str(manifest_nightly.get("status") or "")
+            if manifest_nightly_status != "ok":
+                issues.append(f"latest_manifest_nightly_status_not_ok[{manifest_nightly_status or '-'}]")
+        else:
+            issues.append("latest_manifest_bad_nightly_cycle_status")
+
+    return issues
+
+
 def fingerprint(issues: list[str]) -> str:
     joined = " | ".join(sorted(issues))
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()
@@ -297,6 +375,7 @@ def main() -> int:
     parser.add_argument("--health-stale-sec", type=int, default=180)
     parser.add_argument("--git-autoupdate-status-path", default="")
     parser.add_argument("--git-autoupdate-max-age-sec", type=int, default=7200)
+    parser.add_argument("--autonomy-latest-max-age-sec", type=int, default=172800)
     parser.add_argument("--startup-wait-sec", type=int, default=25)
     parser.add_argument("--startup-grace-sec", type=int, default=180)
     parser.add_argument("--daily-autonomy-wait-sec", type=int, default=20)
@@ -341,32 +420,32 @@ def main() -> int:
     changed, summary = refresh_intraday_killer_policy(project_root, run_dir, args.dashboard_url)
     log(log_path, f"intraday_policy_refresh changed={changed} {summary}")
 
+    run_trade_date = latest_trade_date(run_dir)
     now_local = datetime.now()
     if should_check_daily_autonomy(now_local, state):
-        trade_date = latest_trade_date(run_dir)
         autonomy_trade_date = load_latest_autonomy_trade_date(project_root)
-        if trade_date and autonomy_trade_date != trade_date:
-            log(log_path, f"autonomy_backfill_needed latest_trades={trade_date} latest_autonomy={autonomy_trade_date or '-'}")
+        if run_trade_date and autonomy_trade_date != run_trade_date:
+            log(log_path, f"autonomy_backfill_needed latest_trades={run_trade_date} latest_autonomy={autonomy_trade_date or '-'}")
             if not args.no_remediate:
                 started, summary = run_daily_autonomy(args.daily_autonomy_service_name)
                 log(log_path, f"autonomy_backfill_start service={args.daily_autonomy_service_name} {summary}")
                 if started:
                     time.sleep(max(5, args.daily_autonomy_wait_sec))
                     autonomy_trade_date = load_latest_autonomy_trade_date(project_root)
-                    if autonomy_trade_date == trade_date:
+                    if autonomy_trade_date == run_trade_date:
                         state["last_autonomy_check_date"] = now_local.date().isoformat()
                         state["last_autonomy_trade_date"] = autonomy_trade_date
                         save_state(state_path, state)
-                        log(log_path, f"autonomy_backfill_recovered trade_date={trade_date}")
+                        log(log_path, f"autonomy_backfill_recovered trade_date={run_trade_date}")
                     else:
-                        log(log_path, f"autonomy_backfill_pending latest_trades={trade_date} latest_autonomy={autonomy_trade_date or '-'}")
+                        log(log_path, f"autonomy_backfill_pending latest_trades={run_trade_date} latest_autonomy={autonomy_trade_date or '-'}")
             else:
                 log(log_path, "autonomy_backfill_skipped no_remediate=true")
         else:
             state["last_autonomy_check_date"] = now_local.date().isoformat()
-            state["last_autonomy_trade_date"] = autonomy_trade_date or trade_date
+            state["last_autonomy_trade_date"] = autonomy_trade_date or run_trade_date
             save_state(state_path, state)
-            log(log_path, f"autonomy_backfill_ok trade_date={trade_date or '-'} autonomy={autonomy_trade_date or '-'}")
+            log(log_path, f"autonomy_backfill_ok trade_date={run_trade_date or '-'} autonomy={autonomy_trade_date or '-'}")
 
     issues: list[str] = []
     svc_age = service_age_sec(args.service_name)
@@ -388,6 +467,7 @@ def main() -> int:
             args.git_autoupdate_max_age_sec,
         )
     )
+    issues.extend(check_latest_autonomy_outputs(project_root, run_trade_date, args.autonomy_latest_max_age_sec))
 
     if not issues:
         save_state(
