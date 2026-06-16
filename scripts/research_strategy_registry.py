@@ -133,6 +133,50 @@ def rows_by_scenario(rows: list[dict]) -> dict[str, dict]:
     return out
 
 
+def derive_payout_fields(row: dict) -> dict[str, float | None]:
+    avg_win_rub = maybe_float(row.get("avg_win_rub"))
+    avg_loss_rub = maybe_float(row.get("avg_loss_rub"))
+    if avg_win_rub is not None or avg_loss_rub is not None:
+        return {
+            "avg_win_rub": avg_win_rub,
+            "avg_loss_rub": avg_loss_rub,
+            "top3_loss_rub": maybe_float(row.get("top3_loss_rub")),
+        }
+
+    wins = maybe_int(row.get("wins")) or 0
+    losses = maybe_int(row.get("losses")) or 0
+    net_rub = maybe_float(row.get("net_rub"))
+    profit_factor = maybe_float(row.get("profit_factor"))
+
+    if wins > 0 and losses > 0 and net_rub is not None and profit_factor is not None and abs(profit_factor - 1.0) > 1e-9:
+        gross_loss = net_rub / (profit_factor - 1.0)
+        if gross_loss > 0:
+            gross_win = profit_factor * gross_loss
+            return {
+                "avg_win_rub": round(gross_win / wins, 6),
+                "avg_loss_rub": round(-gross_loss / losses, 6),
+                "top3_loss_rub": maybe_float(row.get("top3_loss_rub")),
+            }
+
+    if wins > 0 and losses == 0 and net_rub is not None:
+        return {
+            "avg_win_rub": round(net_rub / wins, 6),
+            "avg_loss_rub": 0.0,
+            "top3_loss_rub": 0.0,
+        }
+    if losses > 0 and wins == 0 and net_rub is not None:
+        return {
+            "avg_win_rub": 0.0,
+            "avg_loss_rub": round(net_rub / losses, 6),
+            "top3_loss_rub": maybe_float(row.get("top3_loss_rub")),
+        }
+    return {
+        "avg_win_rub": None,
+        "avg_loss_rub": None,
+        "top3_loss_rub": maybe_float(row.get("top3_loss_rub")),
+    }
+
+
 def infer_strategy_lab_route(action_type: str, safe_mode: str) -> str:
     if safe_mode == "paper_autopolicy" or action_type == "runtime_policy":
         return "paper_autopolicy"
@@ -184,6 +228,8 @@ def strategy_lab_rows_to_registry(
             latest_day = optimizer
         if not all_sample and str(optimizer.get("source") or "") == "all_sample":
             all_sample = optimizer
+        sample_payout = derive_payout_fields(all_sample)
+        latest_day_payout = derive_payout_fields(latest_day)
         out.append(
             {
                 "registry_id": f"strategy_lab:{slug_token(row.get('hypothesis_id') or row.get('candidate'))}",
@@ -216,9 +262,9 @@ def strategy_lab_rows_to_registry(
                 "sample_win_rate_pct": maybe_float(all_sample.get("win_rate_pct")),
                 "sample_net_rub": maybe_float(all_sample.get("net_rub")),
                 "sample_expectancy_rub": maybe_float(all_sample.get("expectancy_rub")),
-                "sample_avg_win_rub": maybe_float(all_sample.get("avg_win_rub")),
-                "sample_avg_loss_rub": maybe_float(all_sample.get("avg_loss_rub")),
-                "sample_top3_loss_rub": maybe_float(all_sample.get("top3_loss_rub")),
+                "sample_avg_win_rub": sample_payout["avg_win_rub"],
+                "sample_avg_loss_rub": sample_payout["avg_loss_rub"],
+                "sample_top3_loss_rub": sample_payout["top3_loss_rub"],
                 "sample_profit_factor": maybe_float(all_sample.get("profit_factor")),
                 "latest_day_trades": maybe_int(latest_day.get("trades")),
                 "latest_day_wins": maybe_int(latest_day.get("wins")),
@@ -226,9 +272,9 @@ def strategy_lab_rows_to_registry(
                 "latest_day_win_rate_pct": maybe_float(latest_day.get("win_rate_pct")),
                 "latest_day_net_rub": maybe_float(latest_day.get("net_rub")),
                 "latest_day_expectancy_rub": maybe_float(latest_day.get("expectancy_rub")),
-                "latest_day_avg_win_rub": maybe_float(latest_day.get("avg_win_rub")),
-                "latest_day_avg_loss_rub": maybe_float(latest_day.get("avg_loss_rub")),
-                "latest_day_top3_loss_rub": maybe_float(latest_day.get("top3_loss_rub")),
+                "latest_day_avg_win_rub": latest_day_payout["avg_win_rub"],
+                "latest_day_avg_loss_rub": latest_day_payout["avg_loss_rub"],
+                "latest_day_top3_loss_rub": latest_day_payout["top3_loss_rub"],
                 "latest_day_profit_factor": maybe_float(latest_day.get("profit_factor")),
                 "stability_days": maybe_int(consensus.get("days")),
                 "positive_days": maybe_int(consensus.get("positive_days")),

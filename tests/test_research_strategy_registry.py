@@ -343,6 +343,78 @@ class ResearchStrategyRegistryTest(unittest.TestCase):
             self.assertEqual(rows[0]["latest_day_top3_loss_rub"], 433.18)
             self.assertEqual(rows[0]["latest_day_profit_factor"], 3.7361)
 
+    def test_build_and_persist_backfills_avg_win_and_avg_loss_from_legacy_policy_sweep_rows(self) -> None:
+        trade_date = "2026-06-16"
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp) / "project"
+            research_dir = project_root / "reports" / "autonomy" / "research" / trade_date
+            latest_dir = project_root / "reports" / "autonomy" / "latest"
+            write_csv(
+                research_dir / "strategy_lab_candidates.csv",
+                [
+                    {
+                        "hypothesis_id": "runtime_strict_primary",
+                        "priority": 98,
+                        "category": "runtime_policy",
+                        "candidate": "strict primary baseline",
+                        "scope": "all classic futures",
+                        "action_type": "runtime_policy",
+                        "safe_mode": "paper_autopolicy",
+                        "autopromote_ready": True,
+                        "evidence": "delta_total=4072.82",
+                        "recommended_next_step": "keep strict baseline",
+                        "required_features": "trade csv",
+                        "scenario_anchor": "contour_only_strict",
+                        "rank": 1,
+                    }
+                ],
+            )
+            write_csv(
+                research_dir / "policy_sweep_all_sample.csv",
+                [
+                    {
+                        "scenario": "contour_only_strict",
+                        "trades": 24,
+                        "wins": 20,
+                        "losses": 4,
+                        "win_rate_pct": 83.33,
+                        "net_rub": 3876.48,
+                        "expectancy_rub": 161.52,
+                        "profit_factor": 1.9597,
+                    }
+                ],
+            )
+            write_csv(
+                research_dir / "policy_sweep_latest_day.csv",
+                [
+                    {
+                        "scenario": "contour_only_strict",
+                        "trades": 20,
+                        "wins": 18,
+                        "losses": 2,
+                        "win_rate_pct": 90.0,
+                        "net_rub": 4989.81,
+                        "expectancy_rub": 249.49,
+                        "profit_factor": 3.7361,
+                    }
+                ],
+            )
+
+            rows, _summary = rsr.build_and_persist_research_strategy_registry(
+                project_root=project_root,
+                trade_date=trade_date,
+                manifest_payload={"trade_date": trade_date},
+                research_dir=research_dir,
+                latest_dir=latest_dir,
+            )
+
+            self.assertEqual(rows[0]["sample_avg_win_rub"], 395.787113)
+            self.assertEqual(rows[0]["sample_avg_loss_rub"], -1009.815567)
+            self.assertEqual(rows[0]["latest_day_avg_win_rub"], 378.528017)
+            self.assertEqual(rows[0]["latest_day_avg_loss_rub"], -911.847155)
+            self.assertIsNone(rows[0]["sample_top3_loss_rub"])
+            self.assertIsNone(rows[0]["latest_day_top3_loss_rub"])
+
     def test_build_and_persist_falls_back_to_manifest_strategy_lab_top_when_csv_unavailable(self) -> None:
         trade_date = "2026-06-16"
         with tempfile.TemporaryDirectory() as tmp:
