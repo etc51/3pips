@@ -320,6 +320,8 @@ class DailyAutonomyRunnerPersistenceTest(unittest.TestCase):
             latest_registry_summary_path = latest_root / "research_strategy_registry_summary.json"
             latest_shortlist_path = latest_root / "paper_candidate_shortlist.csv"
             latest_shortlist_summary_path = latest_root / "paper_candidate_shortlist_summary.json"
+            latest_targets_path = latest_root / "research_strategy_targets.csv"
+            latest_targets_summary_path = latest_root / "research_strategy_targets_summary.json"
 
             self.assertTrue(analysis_status_path.exists(), analysis_status_path)
             self.assertTrue(bundle_status_path.exists(), bundle_status_path)
@@ -330,6 +332,8 @@ class DailyAutonomyRunnerPersistenceTest(unittest.TestCase):
             self.assertTrue(latest_registry_summary_path.exists(), latest_registry_summary_path)
             self.assertTrue(latest_shortlist_path.exists(), latest_shortlist_path)
             self.assertTrue(latest_shortlist_summary_path.exists(), latest_shortlist_summary_path)
+            self.assertTrue(latest_targets_path.exists(), latest_targets_path)
+            self.assertTrue(latest_targets_summary_path.exists(), latest_targets_summary_path)
             self.assertTrue(state_path.exists(), state_path)
 
             analysis_status = json.loads(analysis_status_path.read_text(encoding="utf-8"))
@@ -339,6 +343,7 @@ class DailyAutonomyRunnerPersistenceTest(unittest.TestCase):
             latest_email_status = json.loads(latest_email_status_path.read_text(encoding="utf-8"))
             latest_registry_summary = json.loads(latest_registry_summary_path.read_text(encoding="utf-8"))
             latest_shortlist_summary = json.loads(latest_shortlist_summary_path.read_text(encoding="utf-8"))
+            latest_targets_summary = json.loads(latest_targets_summary_path.read_text(encoding="utf-8"))
             state_payload = json.loads(state_path.read_text(encoding="utf-8"))
 
             self.assertEqual(analysis_status, bundle_status)
@@ -364,8 +369,11 @@ class DailyAutonomyRunnerPersistenceTest(unittest.TestCase):
             self.assertIn("research_strategy_registry_top", latest_manifest)
             self.assertIn("paper_candidate_shortlist", latest_manifest)
             self.assertIn("paper_candidate_shortlist_top", latest_manifest)
+            self.assertIn("research_strategy_targets", latest_manifest)
+            self.assertIn("research_strategy_targets_top", latest_manifest)
             self.assertEqual(latest_registry_summary["trade_date"], trade_date)
             self.assertEqual(latest_shortlist_summary["trade_date"], trade_date)
+            self.assertEqual(latest_targets_summary["trade_date"], trade_date)
 
 
 if __name__ == "__main__":

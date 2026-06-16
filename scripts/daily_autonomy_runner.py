@@ -61,6 +61,7 @@ from daily_autonomy_outputs import (  # noqa: E402
     write_research_outputs,
 )
 from paper_candidate_shortlist import build_and_persist_paper_candidate_shortlist  # noqa: E402
+from research_strategy_targets import build_and_persist_research_strategy_targets  # noqa: E402
 from research_strategy_registry import build_and_persist_research_strategy_registry  # noqa: E402
 
 
@@ -4113,6 +4114,16 @@ def main() -> int:
     )
     manifest_payload["paper_candidate_shortlist"] = shortlist_summary
     manifest_payload["paper_candidate_shortlist_top"] = shortlist_rows[:10]
+    target_rows, target_summary = build_and_persist_research_strategy_targets(
+        project_root=project_root,
+        trade_date=trade_date,
+        shortlist_rows=shortlist_rows,
+        research_dir=research_dir,
+        latest_dir=manifest_root,
+        bundle_dir=bundle_dir,
+    )
+    manifest_payload["research_strategy_targets"] = target_summary
+    manifest_payload["research_strategy_targets_top"] = target_rows[:10]
     write_json(bundle_dir / "manifest.json", manifest_payload)
 
     nightly_cycle_status = build_nightly_cycle_status(
