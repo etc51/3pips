@@ -262,6 +262,7 @@ def runtime_group_from_stem(name: str) -> str:
         "_entry_shadow_models",
         "_shadow_exit_models",
         "_gpt_shadow_trades",
+        "_multi_futures_paper_trades",
         "_paper_open_positions",
         "_health",
         "_startup_status",
@@ -299,6 +300,7 @@ def build_entry_shadow_collection(run_dir: Path, trade_date: str) -> tuple[list[
     for pattern in [
         "*_entry_shadow_models.csv",
         "*_shadow_exit_models.csv",
+        "*_multi_futures_paper_trades.csv",
         "*_paper_open_positions.json",
         "*_health.json",
         "*_startup_status.csv",
@@ -1752,6 +1754,12 @@ def build_nightly_cycle_status(
             "strategy_review": {
                 "status": "ok" if review_generated else "not_generated",
                 "generated": review_generated,
+                "candidate_count": safe_int(review.get("candidate_count")),
+                "entry_shadow_rows_day": safe_int(review.get("entry_shadow_rows_day")),
+                "entry_shadow_rows_all": safe_int(review.get("entry_shadow_rows_all")),
+                "shadow_rows_all": safe_int(review.get("shadow_rows_all")),
+                "collection_status": str(review.get("collection_status") or ("ok" if review_generated else "not_generated")),
+                "missing_entry_files": list(review.get("missing_entry_files") or []),
                 "summary_path": str(review.get("summary_path") or ""),
                 "artifacts": list(review.get("artifacts") or []),
             },
@@ -3196,8 +3204,19 @@ def build_strategy_review(
         write_csv_rows(candidates_path, [], fieldnames=candidate_fields)
         return {
             "generated": True,
+            "collection_status": str(entry_shadow_collection.get("status") or "awaiting_first_close"),
+            "collection_note": (
+                "No closed entry shadow rows yet. "
+                f"shadow_rows_all={safe_int(entry_shadow_collection.get('shadow_rows_all'))}; "
+                f"missing_entry_files={', '.join(entry_shadow_collection.get('missing_entry_files') or []) or 'none'}; "
+                f"last_shadow_closed_at={entry_shadow_collection.get('last_shadow_closed_at') or '-'}"
+            ),
             "summary_path": summary_rel,
             "artifacts": [summary_rel, candidates_rel],
+            "entry_shadow_rows_day": 0,
+            "entry_shadow_rows_all": 0,
+            "shadow_rows_all": safe_int(entry_shadow_collection.get("shadow_rows_all")),
+            "missing_entry_files": list(entry_shadow_collection.get("missing_entry_files") or []),
             "top_models": [],
             "top_slices": [],
             "candidates": [],
@@ -3327,8 +3346,14 @@ def build_strategy_review(
     write_csv_rows(candidates_path, candidates, fieldnames=candidate_fields)
     return {
         "generated": True,
+        "collection_status": str(entry_shadow_collection.get("status") or "collecting"),
+        "collection_note": "",
         "summary_path": summary_rel,
         "artifacts": [summary_rel, candidates_rel],
+        "entry_shadow_rows_day": len(day_rows),
+        "entry_shadow_rows_all": len(all_rows),
+        "shadow_rows_all": safe_int(entry_shadow_collection.get("shadow_rows_all")),
+        "missing_entry_files": list(entry_shadow_collection.get("missing_entry_files") or []),
         "top_models": all_by_model[:10],
         "top_slices": all_by_slice[:10],
         "candidates": candidates[:20],
@@ -3974,6 +3999,7 @@ def build_summary_markdown(
     best_research_all: list[dict],
     best_research_consensus: list[dict],
     strategy_lab: list[dict],
+    strategy_review: dict,
     runtime_trade_model: dict,
 ) -> str:
     fee_model = runtime_trade_model.get("fee_model") if isinstance(runtime_trade_model.get("fee_model"), dict) else dict(DEFAULT_FEE_MODEL)
@@ -3998,8 +4024,17 @@ def build_summary_markdown(
         f"- fee_model: {fee_summary}",
         f"- open_positions_count: {open_summary.get('count')}",
         f"- open_positions_net_rub: {open_summary.get('net_rub')}",
+        f"- entry_shadow_collection_status: {str(strategy_review.get('collection_status') or ('ok' if strategy_review.get('generated') else 'not_generated'))}",
+        f"- entry_shadow_rows_day: {safe_int(strategy_review.get('entry_shadow_rows_day'))}",
+        f"- entry_shadow_rows_all: {safe_int(strategy_review.get('entry_shadow_rows_all'))}",
+        f"- entry_shadow_shadow_rows_all: {safe_int(strategy_review.get('shadow_rows_all'))}",
+        f"- entry_shadow_candidate_count: {safe_int(strategy_review.get('candidate_count'))}",
+        f"- entry_shadow_missing_files: {', '.join(strategy_review.get('missing_entry_files') or []) or 'none'}",
         "",
     ]
+    entry_shadow_note = str(strategy_review.get("collection_note") or "")
+    if entry_shadow_note:
+        lines.insert(len(lines) - 1, f"- entry_shadow_note: {entry_shadow_note}")
     if recommendations:
         lines.append("## Что делать дальше\n")
         for note in recommendations:
@@ -4227,6 +4262,7 @@ def main() -> int:
         research_all,
         scenario_consensus,
         strategy_lab,
+        strategy_review,
         runtime_trade_model,
     )
     best_consensus_scenario = pick_best_consensus_scenario(scenario_consensus)

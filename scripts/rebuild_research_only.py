@@ -285,6 +285,12 @@ def main() -> int:
                 f"- mode: research_only",
                 f"- runtime_ready_candidates: {shortlist_summary.get('runtime_ready')}",
                 f"- launch_ready_targets: {target_summary.get('launch_ready')}",
+                f"- entry_shadow_collection_status: {str(strategy_review.get('collection_status') or ('ok' if strategy_review.get('generated') else 'not_generated'))}",
+                f"- entry_shadow_rows_day: {dar.safe_int(strategy_review.get('entry_shadow_rows_day'))}",
+                f"- entry_shadow_rows_all: {dar.safe_int(strategy_review.get('entry_shadow_rows_all'))}",
+                f"- entry_shadow_shadow_rows_all: {dar.safe_int(strategy_review.get('shadow_rows_all'))}",
+                f"- entry_shadow_candidate_count: {dar.safe_int(strategy_review.get('candidate_count'))}",
+                f"- entry_shadow_missing_files: {', '.join(strategy_review.get('missing_entry_files') or []) or 'none'}",
             ]
         )
         + "\n",

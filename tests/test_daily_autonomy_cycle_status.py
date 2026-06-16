@@ -29,6 +29,12 @@ class DailyAutonomyCycleStatusTest(unittest.TestCase):
                 strategy_lab=[{"candidate": "strict_plus_aggressive"}],
                 strategy_review={
                     "generated": True,
+                    "candidate_count": 0,
+                    "entry_shadow_rows_day": 0,
+                    "entry_shadow_rows_all": 0,
+                    "shadow_rows_all": 75,
+                    "collection_status": "waiting_for_runtime_rows",
+                    "missing_entry_files": ["CLASSIC_CORE", "GL_WATCH"],
                     "summary_path": r"reports\autonomy\research\2026-06-15\strategy_review_summary.md",
                     "artifacts": [
                         r"reports\autonomy\research\2026-06-15\strategy_review_summary.md",
@@ -71,6 +77,12 @@ class DailyAutonomyCycleStatusTest(unittest.TestCase):
         self.assertEqual(stages["candidate_gate"]["pending"], 0)
         self.assertEqual(stages["strategy_review"]["status"], "ok")
         self.assertTrue(stages["strategy_review"]["generated"])
+        self.assertEqual(stages["strategy_review"]["candidate_count"], 0)
+        self.assertEqual(stages["strategy_review"]["entry_shadow_rows_day"], 0)
+        self.assertEqual(stages["strategy_review"]["entry_shadow_rows_all"], 0)
+        self.assertEqual(stages["strategy_review"]["shadow_rows_all"], 75)
+        self.assertEqual(stages["strategy_review"]["collection_status"], "waiting_for_runtime_rows")
+        self.assertEqual(stages["strategy_review"]["missing_entry_files"], ["CLASSIC_CORE", "GL_WATCH"])
         self.assertEqual(
             stages["strategy_review"]["summary_path"],
             r"reports\autonomy\research\2026-06-15\strategy_review_summary.md",

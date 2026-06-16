@@ -199,6 +199,13 @@ class DailyAutonomyRunnerPersistenceTest(unittest.TestCase):
         strategy_lab = [{"candidate": "strict_plus_aggressive", "action_type": "runtime_policy", "autopromote_ready": True}]
         strategy_review = {
             "generated": True,
+            "collection_status": "waiting_for_runtime_rows",
+            "collection_note": "No closed entry shadow rows yet. Runtime first needs to write `*_entry_shadow_models.csv`.",
+            "entry_shadow_rows_day": 0,
+            "entry_shadow_rows_all": 0,
+            "shadow_rows_all": 75,
+            "candidate_count": 0,
+            "missing_entry_files": ["CLASSIC_CORE", "GL_WATCH"],
             "summary_path": strategy_review_summary,
             "artifacts": [strategy_review_summary, strategy_review_candidates],
         }
@@ -372,8 +379,15 @@ class DailyAutonomyRunnerPersistenceTest(unittest.TestCase):
             self.assertEqual(latest_status["stages"]["candidate_gate"]["pending"], 1)
             self.assertEqual(latest_status["stages"]["strategy_review"]["status"], "ok")
             self.assertTrue(latest_status["stages"]["strategy_review"]["generated"])
+            self.assertEqual(latest_status["stages"]["strategy_review"]["collection_status"], "waiting_for_runtime_rows")
+            self.assertEqual(latest_status["stages"]["strategy_review"]["entry_shadow_rows_all"], 0)
+            self.assertEqual(latest_status["stages"]["strategy_review"]["shadow_rows_all"], 75)
+            self.assertEqual(latest_status["stages"]["strategy_review"]["missing_entry_files"], ["CLASSIC_CORE", "GL_WATCH"])
             self.assertEqual(latest_status["stages"]["strategy_review"]["summary_path"], strategy_review_summary)
             self.assertEqual(latest_status["stages"]["strategy_review"]["artifacts"], [strategy_review_summary, strategy_review_candidates])
+            self.assertEqual(latest_manifest["strategy_review"]["collection_status"], "waiting_for_runtime_rows")
+            self.assertEqual(latest_manifest["strategy_review"]["entry_shadow_rows_all"], 0)
+            self.assertEqual(latest_manifest["strategy_review"]["missing_entry_files"], ["CLASSIC_CORE", "GL_WATCH"])
             self.assertEqual(latest_status["stages"]["intervention_proposals"]["status"], "ok")
             self.assertTrue(latest_status["stages"]["intervention_proposals"]["generated"])
             self.assertGreaterEqual(latest_status["stages"]["intervention_proposals"]["evidence_backed_rows"], 0)
