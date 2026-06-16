@@ -54,6 +54,10 @@ def maybe_float(value: object) -> float | None:
 def maybe_int(value: object) -> int | None:
     if value in (None, ""):
         return None
+    try:
+        return int(float(value))
+    except Exception:
+        return None
 
 
 def filter_snapshot_date(rows: list[dict], trade_date: str) -> list[dict]:
@@ -77,10 +81,6 @@ def metrics_map(rows: list[dict], key_fn) -> dict[str, dict]:
             "expectancy_rub": round(net_rub / trades, 2) if trades else 0.0,
         }
     return out
-    try:
-        return int(float(value))
-    except Exception:
-        return None
 
 
 def markdown_table(rows: list[dict], columns: list[str], limit: int = 20) -> str:
@@ -434,9 +434,11 @@ def main() -> int:
         f"rows={summary['rows']} backtest_candidates={summary['backtest_candidates']}",
         flush=True,
     )
-    if rows:
+    if summary.get("top_candidate_group"):
         print(
-            f"top_candidate={rows[0].get('group')} threshold={rows[0].get('threshold_ratio')} sample={rows[0].get('sample')}",
+            f"top_candidate={summary.get('top_candidate_group')} "
+            f"threshold={summary.get('top_candidate_threshold')} "
+            f"sample={summary.get('top_candidate_sample')}",
             flush=True,
         )
     return 0

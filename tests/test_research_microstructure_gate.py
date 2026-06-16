@@ -17,6 +17,12 @@ import research_microstructure_gate as rmg  # noqa: E402
 
 
 class ResearchMicrostructureGateTest(unittest.TestCase):
+    def test_maybe_int_parses_numeric_text(self) -> None:
+        self.assertEqual(rmg.maybe_int("7"), 7)
+        self.assertEqual(rmg.maybe_int("7.0"), 7)
+        self.assertIsNone(rmg.maybe_int(""))
+        self.assertIsNone(rmg.maybe_int("nan-value"))
+
     def test_build_and_persist_selects_best_threshold_for_negative_slice(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             project_root = Path(tmp) / "project"
