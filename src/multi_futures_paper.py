@@ -1958,6 +1958,7 @@ def process_open_state_exit(
                 st.shadow_close_details = {}
                 st.shadow_entry_mode = ""
                 st.shadow_entry_anchor_model = ""
+                write_open_positions(Path(args.open_positions_log), states)
         return
 
     pos = st.position
@@ -2397,6 +2398,16 @@ def write_roll_state(path: Path, roll_events: list[dict], specs: list[Spec], arg
 
 
 def write_open_positions(path: Path, states: list[State]) -> None:
+    def serialize_position_payload(pos: Position) -> dict:
+        return {
+            "direction": pos.direction,
+            "entry_price": pos.entry_price,
+            "qty": pos.qty,
+            "best_price": pos.best_price,
+            "stop_price": pos.stop_price,
+            "opened_at": pos.opened_at,
+        }
+
     rows = []
     for st in states:
         if st.position is None:
@@ -2421,9 +2432,55 @@ def write_open_positions(path: Path, states: list[State]) -> None:
             }
         )
     atomic_write_text(path, json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
+    shadow_rows = []
+    for st in states:
+        if (
+            not st.shadow_positions
+            and not st.entry_shadow_decisions
+            and not st.shadow_close_details
+            and not st.shadow_entry_mode
+            and not st.shadow_entry_anchor_model
+        ):
+            continue
+        shadow_rows.append(
+            {
+                "contour": st.contour,
+                "ticker": st.spec.secid,
+                "shadow_entry_mode": st.shadow_entry_mode,
+                "shadow_entry_anchor_model": st.shadow_entry_anchor_model,
+                "entry_shadow_decisions": list(st.entry_shadow_decisions),
+                "shadow_positions": {
+                    model: serialize_position_payload(pos)
+                    for model, pos in st.shadow_positions.items()
+                },
+                "shadow_closed": dict(st.shadow_closed),
+                "shadow_close_details": dict(st.shadow_close_details),
+            }
+        )
+    if shadow_rows:
+        rows = [{"_kind": "shadow_state", "states": shadow_rows}] + rows
+    atomic_write_text(path, json.dumps(rows, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def restore_open_positions(path: Path, states: list[State]) -> int:
+    def deserialize_position_payload(payload: object) -> Position | None:
+        if not isinstance(payload, dict):
+            return None
+        try:
+            return Position(
+                direction=str(payload["direction"]),
+                entry_price=float(payload["entry_price"]),
+                qty=int(float(payload["qty"])),
+                best_price=float(payload["best_price"]),
+                stop_price=float(payload["stop_price"]),
+                opened_at=str(payload.get("opened_at") or now_str()),
+            )
+        except Exception:
+            return None
+
+    def shadow_state_path(base_path: Path) -> Path:
+        return base_path.with_name(f"{base_path.stem}_shadow_state{base_path.suffix}")
+
     if not path.exists() or path.stat().st_size == 0:
         return 0
     try:
@@ -2435,8 +2492,14 @@ def restore_open_positions(path: Path, states: list[State]) -> int:
         return 0
     by_key = {(st.contour, st.spec.secid): st for st in states}
     restored = 0
+    embedded_shadow_rows: list[dict] = []
     for row in rows:
         if not isinstance(row, dict):
+            continue
+        if str(row.get("_kind") or "") == "shadow_state":
+            payload = row.get("states")
+            if isinstance(payload, list):
+                embedded_shadow_rows.extend(item for item in payload if isinstance(item, dict))
             continue
         key = (str(row.get("contour") or ""), str(row.get("ticker") or ""))
         st = by_key.get(key)
@@ -2466,6 +2529,53 @@ def restore_open_positions(path: Path, states: list[State]) -> int:
         restored += 1
     if restored:
         print(f"{now_str()} RESTORE open_positions count={restored} source={path}", flush=True)
+    shadow_rows_to_restore = embedded_shadow_rows
+    shadow_source = path
+    shadow_path = shadow_state_path(path)
+    shadow_restored = 0
+    if not shadow_rows_to_restore and shadow_path.exists() and shadow_path.stat().st_size > 0:
+        try:
+            shadow_rows = json.loads(shadow_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            print(f"{now_str()} RESTORE shadow_state_read_error={exc}", flush=True)
+            shadow_rows = []
+        if isinstance(shadow_rows, list):
+            shadow_rows_to_restore = [item for item in shadow_rows if isinstance(item, dict)]
+            shadow_source = shadow_path
+    for row in shadow_rows_to_restore:
+        key = (str(row.get("contour") or ""), str(row.get("ticker") or ""))
+        st = by_key.get(key)
+        if st is None:
+            continue
+        shadow_positions = {}
+        for model, payload in (row.get("shadow_positions") or {}).items():
+            pos = deserialize_position_payload(payload)
+            if pos is not None:
+                shadow_positions[str(model)] = pos
+        shadow_closed = {}
+        for model, value in (row.get("shadow_closed") or {}).items():
+            shadow_closed[str(model)] = bool(value)
+        shadow_close_details = {}
+        for model, payload in (row.get("shadow_close_details") or {}).items():
+            if isinstance(payload, dict):
+                shadow_close_details[str(model)] = dict(payload)
+        decisions = row.get("entry_shadow_decisions")
+        st.shadow_positions = shadow_positions
+        st.shadow_closed = shadow_closed
+        st.shadow_close_details = shadow_close_details
+        st.shadow_entry_mode = str(row.get("shadow_entry_mode") or "")
+        st.shadow_entry_anchor_model = str(row.get("shadow_entry_anchor_model") or "")
+        st.entry_shadow_decisions = [dict(item) for item in decisions if isinstance(item, dict)] if isinstance(decisions, list) else []
+        if (
+            st.shadow_positions
+            or st.entry_shadow_decisions
+            or st.shadow_close_details
+            or st.shadow_entry_mode
+            or st.shadow_entry_anchor_model
+        ):
+            shadow_restored += 1
+    if shadow_restored:
+        print(f"{now_str()} RESTORE shadow_state count={shadow_restored} source={shadow_source}", flush=True)
     return restored
 
 
@@ -3001,6 +3111,7 @@ def main() -> None:
                                 )
                                 st.last_entry_candle_count = len(st.candles)
                                 st.last_reason = f"{entry_shadow_gate_reason} shadow_only_tracking"
+                                write_open_positions(Path(args.open_positions_log), states)
                                 continue
                             st.attempts += 1
                             st.position = open_position(direction, entry_price, qty, st.profile.stop_ticks, st.profile.trail_ticks, spec)

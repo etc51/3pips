@@ -544,6 +544,8 @@ def build_state(base_dir: Path) -> dict:
         opened = read_json(portfolio_path(base_dir, portfolio, "paper_open_positions.json"))
         if isinstance(opened, list):
             for item in opened:
+                if isinstance(item, dict) and str(item.get("_kind") or "") == "shadow_state":
+                    continue
                 if isinstance(item, dict):
                     item = {**item, "portfolio": portfolio}
                 open_positions.append(item)

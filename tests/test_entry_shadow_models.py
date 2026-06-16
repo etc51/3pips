@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import types
@@ -256,6 +257,115 @@ class EntryShadowModelsTest(unittest.TestCase):
             self.assertEqual(state.shadow_entry_anchor_model, "")
             self.assertEqual(state.shadow_close_details, {})
             self.assertIn("shadow_only::candle_like_stop_fill", path.read_text(encoding="utf-8"))
+
+    @patch("multi_futures_paper.clock_seconds_now", return_value=10 * 3600 + 30 * 60)
+    def test_open_position_shadow_state_round_trips_through_restore(self, _mock_clock: object) -> None:
+        state = self.make_state()
+        sizing = mfp.SizingDecision(
+            qty=1,
+            margin_qty=1,
+            risk_qty=1,
+            gross_stop_per_contract_rub=20.0,
+            round_turn_fee_per_contract_rub=0.4,
+            full_stop_per_contract_rub=20.4,
+            full_stop_rub=20.4,
+            reason="test",
+        )
+        decisions = mfp.evaluate_entry_shadow_models(
+            state=state,
+            portfolio_group="classic_core",
+            direction="long",
+            entry_price=110.0,
+            qty=1,
+            sizing=sizing,
+            aggressive=False,
+        )
+        state.position = mfp.open_position("long", 110.0, 1, state.profile.stop_ticks, state.profile.trail_ticks, state.spec)
+        state.shadow_positions = {
+            "stream_stoplimit": mfp.clone_position(state.position),
+            "candle_like": mfp.clone_position(state.position),
+        }
+        state.shadow_closed = {"stream_stoplimit": True}
+        state.shadow_close_details = {
+            "stream_stoplimit": {
+                "closed_at": "2026-06-16 10:45:00",
+                "minutes_held": 15,
+                "exit_price": 111.2,
+                "exit_source": "candle_like_stop_fill",
+                "net_rub": 123.45,
+                "ticks": 12.0,
+            }
+        }
+        state.entry_shadow_decisions = decisions
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "classic_core_paper_open_positions.json"
+            mfp.write_open_positions(path, [state])
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(payload[0]["_kind"], "shadow_state")
+            self.assertFalse(path.with_name(f"{path.stem}_shadow_state{path.suffix}").exists())
+
+            restored = self.make_state()
+            count = mfp.restore_open_positions(path, [restored])
+
+            self.assertEqual(count, 1)
+            self.assertIsNotNone(restored.position)
+            self.assertEqual(len(restored.entry_shadow_decisions), len(decisions))
+            self.assertEqual(set(restored.shadow_positions), {"stream_stoplimit", "candle_like"})
+            self.assertTrue(restored.shadow_closed.get("stream_stoplimit"))
+            self.assertEqual(
+                restored.shadow_close_details["stream_stoplimit"]["net_rub"],
+                123.45,
+            )
+
+    @patch("multi_futures_paper.clock_seconds_now", return_value=10 * 3600 + 30 * 60)
+    def test_blocked_entry_shadow_only_round_trips_through_restore(self, _mock_clock: object) -> None:
+        state = self.make_state()
+        sizing = mfp.SizingDecision(
+            qty=1,
+            margin_qty=1,
+            risk_qty=1,
+            gross_stop_per_contract_rub=20.0,
+            round_turn_fee_per_contract_rub=0.4,
+            full_stop_per_contract_rub=20.4,
+            full_stop_rub=20.4,
+            reason="test",
+        )
+        decisions = mfp.evaluate_entry_shadow_models(
+            state=state,
+            portfolio_group="classic_core",
+            direction="long",
+            entry_price=110.0,
+            qty=1,
+            sizing=sizing,
+            aggressive=False,
+        )
+        mfp.activate_blocked_entry_shadow_tracking(
+            state,
+            direction="long",
+            entry_price=110.0,
+            qty=1,
+            spec=state.spec,
+            actual_exit_model="candle_like",
+            decisions=decisions,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "classic_core_paper_open_positions.json"
+            mfp.write_open_positions(path, [state])
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(payload[0]["_kind"], "shadow_state")
+            self.assertFalse(path.with_name(f"{path.stem}_shadow_state{path.suffix}").exists())
+
+            restored = self.make_state()
+            count = mfp.restore_open_positions(path, [restored])
+
+            self.assertEqual(count, 0)
+            self.assertIsNone(restored.position)
+            self.assertEqual(restored.shadow_entry_mode, "blocked_entry")
+            self.assertEqual(restored.shadow_entry_anchor_model, "candle_like")
+            self.assertEqual(len(restored.entry_shadow_decisions), len(decisions))
+            self.assertEqual(set(restored.shadow_positions), {"stream_stoplimit", "candle_like"})
 
 
 if __name__ == "__main__":
