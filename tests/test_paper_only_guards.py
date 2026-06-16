@@ -9,8 +9,11 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
+SCRIPTS = ROOT / "scripts"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
+if str(SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS))
 
 if "requests" not in sys.modules:
     sys.modules["requests"] = types.ModuleType("requests")
@@ -26,6 +29,7 @@ if "matplotlib.pyplot" not in sys.modules:
 import leadlag_ng_paper_orderbook_monitor as leadlag  # noqa: E402
 import multi_futures_paper as mfp  # noqa: E402
 import ng_scalper_bot as ngsb  # noqa: E402
+import ubuntu_paper_supervisor as ups  # noqa: E402
 
 
 @pytest.mark.parametrize(
@@ -104,3 +108,22 @@ def test_paper_launchers_still_pass_explicit_paper_only_flag():
         ROOT / "scripts" / "watch_v7_paper_contours_20260525.ps1",
     ]:
         assert "--paper-only" in path.read_text(encoding="utf-8")
+
+
+def test_supervisor_bot_args_force_paper_only_for_every_portfolio(tmp_path):
+    args = types.SimpleNamespace(
+        project_root=str(tmp_path),
+        python="python",
+        dashboard_host="127.0.0.1",
+        dashboard_port="8768",
+        loop_sec=15,
+        stale_sec=90,
+        startup_grace_sec=180,
+        once=True,
+    )
+    supervisor = ups.Supervisor(args)
+    for name, secids in ups.PORTFOLIOS.items():
+        argv = supervisor.bot_args(name, secids[:1] or ["TEST"])
+        assert argv[0] == "src/multi_futures_paper.py"
+        assert "--paper-only" in argv
+        assert not any(str(part).lower().startswith("--live") for part in argv)
