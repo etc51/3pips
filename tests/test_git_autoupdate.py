@@ -240,6 +240,70 @@ class GitAutoupdateWindowTest(unittest.TestCase):
             self.assertEqual(payload.get("outcome"), "skipped")
             self.assertEqual(payload.get("reason"), "dirty_worktree")
 
+    def test_main_restart_completed_status_uses_new_head_and_cleared_rollout_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp) / "project"
+            runtime_dir = project_root / "reports" / "runtime"
+            runtime_dir.mkdir(parents=True)
+            run_dir = project_root / "reports" / "paper_runs" / "v7_live_20260525"
+            run_dir.mkdir(parents=True)
+            (run_dir / "classic_core_health.json").write_text('{"ok": true}', encoding="utf-8")
+            (run_dir / "classic_core_paper_open_positions.json").write_text("[]", encoding="utf-8")
+            status_path = runtime_dir / "git_autoupdate_status.json"
+            lock_path = runtime_dir / "git_autoupdate_rollout_lock.json"
+            pending_path = runtime_dir / "git_autoupdate_pending_restart.json"
+
+            def fake_run(cmd: list[str], cwd: Path):
+                if cmd[:4] == ["git", "-c", f"safe.directory={project_root}", "status"]:
+                    return SimpleNamespace(returncode=0, stdout="", stderr="")
+                if cmd[:4] == ["git", "-c", f"safe.directory={project_root}", "fetch"]:
+                    return SimpleNamespace(returncode=0, stdout="", stderr="")
+                if cmd[:4] == ["git", "-c", f"safe.directory={project_root}", "rev-parse"]:
+                    if cmd[-1] == "HEAD":
+                        return SimpleNamespace(returncode=0, stdout="oldsha\n", stderr="")
+                    if cmd[-1] == "origin/rollback-20260525-a26cf99":
+                        return SimpleNamespace(returncode=0, stdout="newsha\n", stderr="")
+                if cmd[:4] == ["git", "-c", f"safe.directory={project_root}", "diff"]:
+                    return SimpleNamespace(returncode=0, stdout="", stderr="")
+                if cmd[:4] == ["git", "-c", f"safe.directory={project_root}", "merge"]:
+                    return SimpleNamespace(returncode=0, stdout="Updating oldsha..newsha\n", stderr="")
+                if cmd[:2] == ["systemctl", "restart"]:
+                    return SimpleNamespace(returncode=0, stdout="", stderr="")
+                if cmd[:2] == ["systemctl", "is-active"]:
+                    return SimpleNamespace(returncode=0, stdout="active\n", stderr="")
+                raise AssertionError(f"unexpected command: {cmd}")
+
+            argv = [
+                "git_autoupdate.py",
+                "--project-root",
+                str(project_root),
+                "--status-path",
+                str(status_path),
+                "--rollout-lock-path",
+                str(lock_path),
+                "--pending-restart-path",
+                str(pending_path),
+                "--restart-wait-sec",
+                "0",
+            ]
+            with patch.object(gau, "run", side_effect=fake_run), patch.object(
+                gau, "restart_allowed_now", return_value=(True, "safe_window 18:10")
+            ), patch.object(
+                gau, "dashboard_ok", return_value=(True, "http_200")
+            ), patch.object(sys, "argv", argv):
+                rc = gau.main()
+
+            self.assertEqual(rc, 0)
+            self.assertFalse(lock_path.exists())
+            self.assertFalse(pending_path.exists())
+            payload = __import__("json").loads(status_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload.get("outcome"), "updated")
+            self.assertEqual(payload.get("reason"), "restart_completed")
+            self.assertEqual(payload.get("head"), "newsha")
+            self.assertEqual(payload.get("remote_head"), "newsha")
+            self.assertFalse(payload.get("pending_restart_exists"))
+            self.assertFalse(payload.get("rollout_lock_exists"))
+
 
 if __name__ == "__main__":
     unittest.main()
