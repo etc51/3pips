@@ -87,7 +87,7 @@ try {
     $py = Resolve-Python -Requested $PythonExe -Root $ProjectRoot
     Write-Log "Python=$($py.File) $($py.PrefixArgs -join ' ')"
 
-    $tokenPresent = [bool]($env:TBANK_TOKEN_READONLY) -or [bool]($env:TINKOFF_TOKEN)
+    $tokenPresent = [bool]($env:TBANK_TOKEN_READONLY)
     Write-Log "token_present=$tokenPresent"
 
     $checkArgs = @($py.PrefixArgs) + @("-c", "import pandas, numpy, requests, statsmodels; print('imports_ok')")

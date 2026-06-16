@@ -33,6 +33,20 @@ REGISTRY_FIELDS = [
     "leg2_secid",
     "direction",
     "horizon",
+    "sample_trades",
+    "sample_wins",
+    "sample_losses",
+    "sample_win_rate_pct",
+    "sample_net_rub",
+    "sample_expectancy_rub",
+    "sample_profit_factor",
+    "latest_day_trades",
+    "latest_day_wins",
+    "latest_day_losses",
+    "latest_day_win_rate_pct",
+    "latest_day_net_rub",
+    "latest_day_expectancy_rub",
+    "latest_day_profit_factor",
     "stability_days",
     "positive_days",
     "negative_days",
@@ -104,6 +118,15 @@ def safe_read_rows(path: Path) -> list[dict]:
         return []
 
 
+def rows_by_scenario(rows: list[dict]) -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    for row in rows:
+        scenario = str(row.get("scenario") or "").strip()
+        if scenario and scenario not in out:
+            out[scenario] = row
+    return out
+
+
 def infer_strategy_lab_route(action_type: str, safe_mode: str) -> str:
     if safe_mode == "paper_autopolicy" or action_type == "runtime_policy":
         return "paper_autopolicy"
@@ -127,6 +150,8 @@ def strategy_lab_rows_to_registry(
     strategy_lab_rows: list[dict],
     manifest_payload: dict,
     source_artifact: Path,
+    latest_day_by_scenario: dict[str, dict],
+    all_sample_by_scenario: dict[str, dict],
 ) -> list[dict]:
     optimizer_by_scenario = {
         str(row.get("scenario") or ""): row
@@ -147,6 +172,12 @@ def strategy_lab_rows_to_registry(
         anchor = str(row.get("scenario_anchor") or "")
         optimizer = optimizer_by_scenario.get(anchor, {})
         consensus = consensus_by_scenario.get(anchor, {})
+        latest_day = latest_day_by_scenario.get(anchor, {})
+        all_sample = all_sample_by_scenario.get(anchor, {})
+        if not latest_day and str(optimizer.get("source") or "") == "latest_day":
+            latest_day = optimizer
+        if not all_sample and str(optimizer.get("source") or "") == "all_sample":
+            all_sample = optimizer
         out.append(
             {
                 "registry_id": f"strategy_lab:{slug_token(row.get('hypothesis_id') or row.get('candidate'))}",
@@ -173,6 +204,20 @@ def strategy_lab_rows_to_registry(
                 "leg2_secid": "",
                 "direction": "",
                 "horizon": "",
+                "sample_trades": maybe_int(all_sample.get("trades")),
+                "sample_wins": maybe_int(all_sample.get("wins")),
+                "sample_losses": maybe_int(all_sample.get("losses")),
+                "sample_win_rate_pct": maybe_float(all_sample.get("win_rate_pct")),
+                "sample_net_rub": maybe_float(all_sample.get("net_rub")),
+                "sample_expectancy_rub": maybe_float(all_sample.get("expectancy_rub")),
+                "sample_profit_factor": maybe_float(all_sample.get("profit_factor")),
+                "latest_day_trades": maybe_int(latest_day.get("trades")),
+                "latest_day_wins": maybe_int(latest_day.get("wins")),
+                "latest_day_losses": maybe_int(latest_day.get("losses")),
+                "latest_day_win_rate_pct": maybe_float(latest_day.get("win_rate_pct")),
+                "latest_day_net_rub": maybe_float(latest_day.get("net_rub")),
+                "latest_day_expectancy_rub": maybe_float(latest_day.get("expectancy_rub")),
+                "latest_day_profit_factor": maybe_float(latest_day.get("profit_factor")),
                 "stability_days": maybe_int(consensus.get("days")),
                 "positive_days": maybe_int(consensus.get("positive_days")),
                 "negative_days": maybe_int(consensus.get("negative_days")),
@@ -191,7 +236,15 @@ def strategy_lab_rows_to_registry(
                 "recommended_next_step": str(row.get("recommended_next_step") or ""),
                 "required_features": str(row.get("required_features") or ""),
                 "validation_state": "consensus_backed" if consensus else "strategy_lab_only",
-                "evidence_json": json_text({"overall": overall, "consensus": consensus, "optimizer": optimizer}),
+                "evidence_json": json_text(
+                    {
+                        "overall": overall,
+                        "consensus": consensus,
+                        "optimizer": optimizer,
+                        "all_sample": all_sample,
+                        "latest_day": latest_day,
+                    }
+                ),
                 "execution_params_json": json_text(
                     {
                         "scenario_anchor": anchor,
@@ -470,9 +523,13 @@ def build_registry_rows(
     third_pass_selection_rows: list[dict],
     portfolio_summary_rows: list[dict],
     portfolio_sensitivity_rows: list[dict],
+    policy_latest_day_rows: list[dict],
+    policy_all_sample_rows: list[dict],
 ) -> list[dict]:
     research_dir = project_root / "reports" / "autonomy" / "research" / trade_date
     rows: list[dict] = []
+    latest_day_by_scenario = rows_by_scenario(policy_latest_day_rows)
+    all_sample_by_scenario = rows_by_scenario(policy_all_sample_rows)
     if strategy_lab_rows:
         rows.extend(
             strategy_lab_rows_to_registry(
@@ -481,6 +538,8 @@ def build_registry_rows(
                 strategy_lab_rows=strategy_lab_rows,
                 manifest_payload=manifest_payload,
                 source_artifact=research_dir / "strategy_lab_candidates.csv",
+                latest_day_by_scenario=latest_day_by_scenario,
+                all_sample_by_scenario=all_sample_by_scenario,
             )
         )
     if screener_rows:
@@ -660,6 +719,8 @@ def build_and_persist_research_strategy_registry(
     third_pass_selection_rows = safe_read_rows(project_root / "reports" / "third_pass_feature_selection_log.csv")
     portfolio_summary_rows = safe_read_rows(project_root / "results" / "portfolio_strategy_summary.csv")
     portfolio_sensitivity_rows = safe_read_rows(project_root / "results" / "portfolio_strategy_sensitivity.csv")
+    policy_latest_day_rows = safe_read_rows(research_dir / "policy_sweep_latest_day.csv")
+    policy_all_sample_rows = safe_read_rows(research_dir / "policy_sweep_all_sample.csv")
     rows = build_registry_rows(
         project_root=project_root,
         trade_date=trade_date,
@@ -670,6 +731,8 @@ def build_and_persist_research_strategy_registry(
         third_pass_selection_rows=third_pass_selection_rows,
         portfolio_summary_rows=portfolio_summary_rows,
         portfolio_sensitivity_rows=portfolio_sensitivity_rows,
+        policy_latest_day_rows=policy_latest_day_rows,
+        policy_all_sample_rows=policy_all_sample_rows,
     )
     summary = summarize_registry(rows, trade_date)
     directories = [research_dir, latest_dir, canonical_dir]

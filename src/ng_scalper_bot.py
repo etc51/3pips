@@ -77,14 +77,14 @@ def round_to_step(value: float, step: float) -> float:
     return round(round(value / step) * step, 10)
 
 
-def find_tbank_token() -> str:
+def find_tbank_token(*, env_names: list[str] | tuple[str, ...] | None = None, allow_desktop_tokens: bool = True) -> str:
     candidates: list[tuple[str, str]] = []
-    for name in ["TBANK_TOKEN_READONLY", "TBANK_TOKEN", "TINKOFF_TOKEN"]:
+    for name in env_names or ["TBANK_TOKEN_READONLY", "TBANK_TOKEN", "TINKOFF_TOKEN"]:
         value = os.environ.get(name)
         if value:
             candidates.append((f"env:{name}", value.strip()))
     desktop = Path.home() / "Desktop"
-    if desktop.exists():
+    if allow_desktop_tokens and desktop.exists():
         for path in sorted(desktop.glob("*.txt")):
             try:
                 text = path.read_text(encoding="utf-8", errors="ignore")
@@ -112,6 +112,10 @@ def find_tbank_token() -> str:
         except Exception as exc:  # noqa: BLE001
             last_error = f"{source}:{type(exc).__name__}"
     raise RuntimeError(f"No working T-Bank token found ({last_error})")
+
+
+def find_paper_tbank_token() -> str:
+    return find_tbank_token(env_names=["TBANK_TOKEN_READONLY"], allow_desktop_tokens=False)
 
 
 def iss_table(payload: dict, name: str) -> list[dict]:
@@ -462,7 +466,7 @@ def run_tbank_stream(args: argparse.Namespace) -> None:
     patch_protobuf_for_tinkoff_stream()
     from t_tech.invest import Client
 
-    token = find_tbank_token()
+    token = find_paper_tbank_token()
     spec, moex_price = fetch_market(args.secid)
     args.min_step = spec.min_step
     side_fee = commission_side_rub(spec, args.qty, args.commission_rate, args.commission_side_rub)

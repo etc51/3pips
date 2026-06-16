@@ -16,7 +16,7 @@ from pandas.errors import ParserError
 import statsmodels.api as sm
 
 from leadlag_ng_moex import MONTH_CODES, REPORTS, ROOT, ensure_dirs, secid_for_month
-from ng_scalper_bot import find_tbank_token, quotation_to_float, require_paper_only, tbank_find_future
+from ng_scalper_bot import find_paper_tbank_token, quotation_to_float, require_paper_only, tbank_find_future
 
 
 SNAPSHOTS_PATH = REPORTS / "live_orderbook_snapshots.csv"
@@ -219,7 +219,7 @@ def tbank_orderbook_snapshot(secid: str) -> dict:
         from t_tech.invest import Client
 
         if TBANK_TOKEN_CACHE is None:
-            TBANK_TOKEN_CACHE = find_tbank_token()
+            TBANK_TOKEN_CACHE = find_paper_tbank_token()
         with Client(TBANK_TOKEN_CACHE) as client:
             info = TBANK_INSTRUMENT_CACHE.get(secid)
             if info is None:
@@ -399,7 +399,7 @@ def latest_tbank_10m_candles(secid: str, lookback_hours: int = 8) -> pd.DataFram
     from t_tech.invest import CandleInterval, Client
 
     if TBANK_TOKEN_CACHE is None:
-        TBANK_TOKEN_CACHE = find_tbank_token()
+        TBANK_TOKEN_CACHE = find_paper_tbank_token()
     to = datetime.now(timezone.utc)
     from_ = to - pd.Timedelta(hours=lookback_hours)
     with Client(TBANK_TOKEN_CACHE) as client:
@@ -1130,7 +1130,7 @@ def stream_monitor_loop(cfg: Config) -> int:
     from t_tech.invest import Client
 
     if TBANK_TOKEN_CACHE is None:
-        token = find_tbank_token()
+        token = find_paper_tbank_token()
     else:
         token = TBANK_TOKEN_CACHE
     target_contract, plus1_contract, selection_method = resolve_contracts(cfg)

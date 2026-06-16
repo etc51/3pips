@@ -20,7 +20,7 @@ from ng_scalper_bot import (
     Position,
     append_trade,
     commission_side_rub,
-    find_tbank_token,
+    find_paper_tbank_token,
     is_stop_hit,
     now_str,
     open_position,
@@ -2745,7 +2745,7 @@ def main() -> None:
         max_total_margin_pct=float(args.max_total_margin_pct),
         max_position_margin_pct=float(args.max_position_margin_pct),
     )
-    token = find_tbank_token()
+    token = find_paper_tbank_token()
     states: list[State] = []
     specs: list[Spec] = []
     with Client(token) as client:

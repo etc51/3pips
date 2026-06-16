@@ -59,6 +59,12 @@ class PaperCandidateShortlistTest(unittest.TestCase):
                         "latest_day_delta_rub": 3191.01,
                         "median_daily_net_rub": 7059.02,
                         "worst_day_rub": 3982.97,
+                        "sample_trades": 33,
+                        "sample_win_rate_pct": 81.82,
+                        "sample_expectancy_rub": 427.82,
+                        "sample_profit_factor": 2.7757,
+                        "latest_day_expectancy_rub": 165.96,
+                        "latest_day_profit_factor": 1.6629,
                         "required_features": "trade csv",
                         "recommended_use": "candidate_runtime_tune",
                         "execution_params_json": "{}",
@@ -95,6 +101,8 @@ class PaperCandidateShortlistTest(unittest.TestCase):
             self.assertEqual(rows[0]["candidate_label"], "strict primary baseline")
             self.assertEqual(rows[0]["runtime_ready"], "True")
             self.assertEqual(rows[0]["shortlist_status"], "ready_now")
+            self.assertEqual(rows[0]["sample_expectancy_rub"], 427.82)
+            self.assertEqual(rows[0]["sample_profit_factor"], 2.7757)
             self.assertEqual(rows[1]["runtime_ready"], "False")
             self.assertEqual(rows[1]["shortlist_status"], "review_only")
             self.assertEqual(rows[1]["blocking_reason"], "candidate_runtime_needs_manual_release")
@@ -209,3 +217,36 @@ class PaperCandidateShortlistTest(unittest.TestCase):
             self.assertEqual(rows[0]["shortlist_status"], "waiting_contract_selection")
             self.assertEqual(rows[0]["blocking_reason"], "stale_contract_selection")
             self.assertEqual(rows[0]["selection_fresh"], "False")
+
+    def test_compute_stability_score_rewards_expectancy_and_profit_factor(self) -> None:
+        base = {
+            "beat_base_pct": 100.0,
+            "stability_days": 2,
+            "positive_days": 2,
+            "delta_total_rub": 4072.82,
+            "median_daily_net_rub": 7059.02,
+            "latest_day_delta_rub": 3191.01,
+            "worst_day_rub": 3982.97,
+            "autopromote_ready": "True",
+            "status": "paper_candidate",
+            "paper_route": "paper_autopolicy",
+            "priority": 98,
+        }
+        weak = dict(
+            base,
+            sample_trades=6,
+            sample_expectancy_rub=-25.0,
+            sample_profit_factor=0.85,
+            latest_day_expectancy_rub=-10.0,
+            latest_day_profit_factor=0.9,
+        )
+        strong = dict(
+            base,
+            sample_trades=33,
+            sample_expectancy_rub=427.82,
+            sample_profit_factor=2.7757,
+            latest_day_expectancy_rub=165.96,
+            latest_day_profit_factor=1.6629,
+        )
+
+        self.assertGreater(pcs.compute_stability_score(strong), pcs.compute_stability_score(weak))

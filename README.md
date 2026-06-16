@@ -198,4 +198,4 @@ MOEX ISS является основным источником для NG/NR, т
 
 EIA `api.eia.gov` требует API key для storage, поэтому проект использует открытые файлы Weekly Natural Gas Storage Report (`ir.eia.gov/ngs/ngshistory.xls` и fallback `wngsr.csv`).
 
-T-Банк токен не сохраняется в проект. Скрипт умеет найти первый рабочий токен в переменных окружения `TBANK_TOKEN_READONLY`, `TINKOFF_TOKEN` или в `.txt` файлах на Desktop и записывает только статус проверки.
+T-Банк токен не сохраняется в проект. Paper-runtime принимает только явно заданный `TBANK_TOKEN_READONLY` и не читает Desktop fallback; исследовательские утилиты по-прежнему могут искать рабочий токен в env/Desktop и записывают только статус проверки.

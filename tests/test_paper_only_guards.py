@@ -54,3 +54,53 @@ def test_multi_futures_accepts_paper_only_flag():
 def test_leadlag_accepts_paper_only_flag():
     cfg = leadlag.parse_args(["--paper-only"])
     assert cfg.paper_only is True
+
+
+def test_find_paper_tbank_token_ignores_generic_env_and_desktop_sources(monkeypatch, tmp_path):
+    attempts: list[str] = []
+
+    class DummyUsers:
+        def get_accounts(self):
+            return []
+
+    class DummyClient:
+        def __init__(self, token: str):
+            self.token = token
+            self.users = DummyUsers()
+
+        def __enter__(self):
+            attempts.append(self.token)
+            if self.token != "readonly-token":
+                raise RuntimeError("unexpected_token")
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    fake_invest = types.ModuleType("t_tech.invest")
+    fake_invest.Client = DummyClient
+    fake_root = types.ModuleType("t_tech")
+    fake_root.invest = fake_invest
+    monkeypatch.setitem(sys.modules, "t_tech", fake_root)
+    monkeypatch.setitem(sys.modules, "t_tech.invest", fake_invest)
+    monkeypatch.setenv("TBANK_TOKEN_READONLY", "readonly-token")
+    monkeypatch.setenv("TBANK_TOKEN", "generic-token")
+    monkeypatch.setenv("TINKOFF_TOKEN", "legacy-token")
+    desktop = tmp_path / "Desktop"
+    desktop.mkdir()
+    (desktop / "token.txt").write_text("t.desktop-token-12345678901234567890", encoding="utf-8")
+    monkeypatch.setattr(ngsb.Path, "home", lambda: tmp_path)
+
+    token = ngsb.find_paper_tbank_token()
+
+    assert token == "readonly-token"
+    assert attempts == ["readonly-token"]
+
+
+def test_paper_launchers_still_pass_explicit_paper_only_flag():
+    for path in [
+        ROOT / "scripts" / "ubuntu_paper_supervisor.py",
+        ROOT / "scripts" / "run_v7_paper_contours_20260525.ps1",
+        ROOT / "scripts" / "watch_v7_paper_contours_20260525.ps1",
+    ]:
+        assert "--paper-only" in path.read_text(encoding="utf-8")

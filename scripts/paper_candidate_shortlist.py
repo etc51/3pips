@@ -33,6 +33,12 @@ SHORTLIST_FIELDS = [
     "delta_total_rub",
     "latest_day_delta_rub",
     "worst_day_rub",
+    "sample_trades",
+    "sample_win_rate_pct",
+    "sample_expectancy_rub",
+    "sample_profit_factor",
+    "latest_day_expectancy_rub",
+    "latest_day_profit_factor",
     "selection_run_date",
     "selection_age_days",
     "selection_fresh",
@@ -123,6 +129,11 @@ def compute_stability_score(row: dict) -> float:
     test_profit_factor = safe_float(row.get("test_profit_factor"))
     worst_day_rub = safe_float(row.get("worst_day_rub"))
     test_max_drawdown = safe_float(row.get("test_max_drawdown"))
+    sample_trades = max(safe_int(row.get("sample_trades")), 0)
+    sample_expectancy_rub = safe_float(row.get("sample_expectancy_rub"))
+    sample_profit_factor = safe_float(row.get("sample_profit_factor"))
+    latest_day_expectancy_rub = safe_float(row.get("latest_day_expectancy_rub"))
+    latest_day_profit_factor = safe_float(row.get("latest_day_profit_factor"))
     priority = max(safe_int(row.get("priority")), 0)
 
     score = 0.0
@@ -133,6 +144,11 @@ def compute_stability_score(row: dict) -> float:
     score += 10.0 * clamp(median_daily_net_rub / 3000.0, -1.0, 1.0)
     score += 10.0 * clamp(latest_day_delta_rub / 3000.0, -1.0, 1.0)
     score += 10.0 * clamp(test_profit_factor / 2.0, 0.0, 1.0)
+    score += 4.0 * clamp(sample_trades / 30.0, 0.0, 1.0)
+    score += 8.0 * clamp(sample_expectancy_rub / 400.0, -1.0, 1.0)
+    score += 6.0 * clamp((sample_profit_factor - 1.0) / 1.5, -1.0, 1.0)
+    score += 3.0 * clamp(latest_day_expectancy_rub / 250.0, -1.0, 1.0)
+    score += 2.0 * clamp(latest_day_profit_factor - 1.0, -1.0, 1.0)
     score -= 15.0 * clamp(max(0.0, -worst_day_rub) / 3000.0, 0.0, 1.0)
     score -= 10.0 * clamp(abs(min(test_max_drawdown, 0.0)) / 0.15, 0.0, 1.0)
     score += 5.0 if normalize_bool(row.get("autopromote_ready")) else 0.0
@@ -241,6 +257,12 @@ def registry_rows_to_shortlist(rows: list[dict], trade_date: str, contract_selec
                 "delta_total_rub": maybe_float(row.get("delta_total_rub")),
                 "latest_day_delta_rub": maybe_float(row.get("latest_day_delta_rub")),
                 "worst_day_rub": maybe_float(row.get("worst_day_rub")),
+                "sample_trades": maybe_int(row.get("sample_trades")),
+                "sample_win_rate_pct": maybe_float(row.get("sample_win_rate_pct")),
+                "sample_expectancy_rub": maybe_float(row.get("sample_expectancy_rub")),
+                "sample_profit_factor": maybe_float(row.get("sample_profit_factor")),
+                "latest_day_expectancy_rub": maybe_float(row.get("latest_day_expectancy_rub")),
+                "latest_day_profit_factor": maybe_float(row.get("latest_day_profit_factor")),
                 "selection_run_date": row_contract_ctx["selection_run_date"],
                 "selection_age_days": row_contract_ctx["selection_age_days"],
                 "selection_fresh": row_contract_ctx["selection_fresh"],
@@ -339,6 +361,8 @@ def render_shortlist_markdown(rows: list[dict], summary: dict) -> str:
                     "shortlist_status",
                     "blocking_reason",
                     "stability_score",
+                    "sample_expectancy_rub",
+                    "sample_profit_factor",
                     "target_contract",
                     "plus1_contract",
                 ],
