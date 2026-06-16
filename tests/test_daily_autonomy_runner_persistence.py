@@ -316,12 +316,16 @@ class DailyAutonomyRunnerPersistenceTest(unittest.TestCase):
             latest_status_path = latest_root / "latest_nightly_cycle_status.json"
             latest_manifest_path = latest_root / "latest_daily_manifest.json"
             latest_email_status_path = latest_root / "latest_email_status.json"
+            latest_registry_path = latest_root / "research_strategy_registry.csv"
+            latest_registry_summary_path = latest_root / "research_strategy_registry_summary.json"
 
             self.assertTrue(analysis_status_path.exists(), analysis_status_path)
             self.assertTrue(bundle_status_path.exists(), bundle_status_path)
             self.assertTrue(latest_status_path.exists(), latest_status_path)
             self.assertTrue(latest_manifest_path.exists(), latest_manifest_path)
             self.assertTrue(latest_email_status_path.exists(), latest_email_status_path)
+            self.assertTrue(latest_registry_path.exists(), latest_registry_path)
+            self.assertTrue(latest_registry_summary_path.exists(), latest_registry_summary_path)
             self.assertTrue(state_path.exists(), state_path)
 
             analysis_status = json.loads(analysis_status_path.read_text(encoding="utf-8"))
@@ -329,6 +333,7 @@ class DailyAutonomyRunnerPersistenceTest(unittest.TestCase):
             latest_status = json.loads(latest_status_path.read_text(encoding="utf-8"))
             latest_manifest = json.loads(latest_manifest_path.read_text(encoding="utf-8"))
             latest_email_status = json.loads(latest_email_status_path.read_text(encoding="utf-8"))
+            latest_registry_summary = json.loads(latest_registry_summary_path.read_text(encoding="utf-8"))
             state_payload = json.loads(state_path.read_text(encoding="utf-8"))
 
             self.assertEqual(analysis_status, bundle_status)
@@ -350,6 +355,9 @@ class DailyAutonomyRunnerPersistenceTest(unittest.TestCase):
             self.assertEqual(state_payload["last_email_status"], "sent")
             self.assertEqual(state_payload["archive"], latest_status["stages"]["summary"]["archive_path"])
             self.assertEqual(latest_manifest["archive"], latest_status["stages"]["summary"]["archive_path"])
+            self.assertIn("research_strategy_registry", latest_manifest)
+            self.assertIn("research_strategy_registry_top", latest_manifest)
+            self.assertEqual(latest_registry_summary["trade_date"], trade_date)
 
 
 if __name__ == "__main__":

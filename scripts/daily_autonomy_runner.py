@@ -60,6 +60,7 @@ from daily_autonomy_outputs import (  # noqa: E402
     write_analysis_outputs,
     write_research_outputs,
 )
+from research_strategy_registry import build_and_persist_research_strategy_registry  # noqa: E402
 
 
 PREMIUM_FUTURES_RATE = 0.00025
@@ -4090,6 +4091,17 @@ def main() -> int:
             manifest_payload["entry_shadow_top"] = strategy_review.get("top_models")[:10]
     manifest_payload["candidate_gate"] = candidate_gate.get("summary") if isinstance(candidate_gate.get("summary"), dict) else {}
     manifest_payload["promoted_runtime"] = summarize_promoted_runtime_policy_state(promoted_runtime_state)
+    registry_rows, registry_summary = build_and_persist_research_strategy_registry(
+        project_root=project_root,
+        trade_date=trade_date,
+        manifest_payload=manifest_payload,
+        strategy_lab_rows=strategy_lab,
+        research_dir=research_dir,
+        latest_dir=manifest_root,
+        bundle_dir=bundle_dir,
+    )
+    manifest_payload["research_strategy_registry"] = registry_summary
+    manifest_payload["research_strategy_registry_top"] = registry_rows[:10]
     write_json(bundle_dir / "manifest.json", manifest_payload)
 
     nightly_cycle_status = build_nightly_cycle_status(
