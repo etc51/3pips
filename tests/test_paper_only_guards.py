@@ -126,4 +126,5 @@ def test_supervisor_bot_args_force_paper_only_for_every_portfolio(tmp_path):
         argv = supervisor.bot_args(name, secids[:1] or ["TEST"])
         assert argv[0] == "src/multi_futures_paper.py"
         assert "--paper-only" in argv
+        assert "--entry-shadow-log" in argv
         assert not any(str(part).lower().startswith("--live") for part in argv)

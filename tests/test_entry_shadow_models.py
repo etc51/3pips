@@ -261,6 +261,60 @@ class EntryShadowModelsTest(unittest.TestCase):
             self.assertIn("shadow_only::candle_like_stop_fill", path.read_text(encoding="utf-8"))
 
     @patch("multi_futures_paper.clock_seconds_now", return_value=10 * 3600 + 30 * 60)
+    def test_actual_close_writes_entry_shadow_rows(self, _mock_clock: object) -> None:
+        state = self.make_state()
+        sizing = mfp.SizingDecision(
+            qty=1,
+            margin_qty=1,
+            risk_qty=1,
+            gross_stop_per_contract_rub=20.0,
+            round_turn_fee_per_contract_rub=0.4,
+            full_stop_per_contract_rub=20.4,
+            full_stop_rub=20.4,
+            reason="test",
+        )
+        decisions = mfp.evaluate_entry_shadow_models(
+            state=state,
+            portfolio_group="classic_core",
+            direction="long",
+            entry_price=110.0,
+            qty=1,
+            sizing=sizing,
+            aggressive=False,
+        )
+        state.position = mfp.open_position("long", 110.0, 1, state.profile.stop_ticks, state.profile.trail_ticks, state.spec)
+        portfolio = mfp.Portfolio(initial_capital=200_000.0, max_total_margin_pct=0.8, max_position_margin_pct=0.2)
+        state.entry_shadow_decisions = decisions
+
+        with tempfile.TemporaryDirectory() as tmp:
+            args = SimpleNamespace(
+                log=str(Path(tmp) / "classic_core_multi_futures_paper_trades.csv"),
+                shadow_log=str(Path(tmp) / "classic_core_shadow_exit_models.csv"),
+                entry_shadow_log=str(Path(tmp) / "classic_core_entry_shadow_models.csv"),
+                open_positions_log=str(Path(tmp) / "classic_core_paper_open_positions.json"),
+                stop_limit_emergency_ticks=2.0,
+                actual_exit_model="candle_like",
+                expiry_force_close_days=3.0,
+            )
+            mfp.process_open_state_exit(
+                state,
+                args,
+                portfolio,
+                [state],
+                candle_closed=True,
+                actual_trigger_override=107.9,
+                actual_trigger_source_override="closed_1m_candle",
+            )
+
+            path = Path(tmp) / "classic_core_entry_shadow_models.csv"
+            self.assertTrue(path.exists())
+            rows = path.read_text(encoding="utf-8").strip().splitlines()
+            self.assertGreater(len(rows), 1)
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("actual_candle_like_stop_fill", text)
+            self.assertEqual(state.entry_shadow_decisions, [])
+
+    @patch("multi_futures_paper.clock_seconds_now", return_value=10 * 3600 + 30 * 60)
     def test_open_position_shadow_state_round_trips_through_restore(self, _mock_clock: object) -> None:
         state = self.make_state()
         sizing = mfp.SizingDecision(

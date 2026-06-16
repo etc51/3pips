@@ -197,6 +197,7 @@ function New-BotArgs {
         "--instrument-specs-log", "reports\paper_runs\v7_live_20260525\${Name}_instrument_specs.csv",
         "--startup-status-log", "reports\paper_runs\v7_live_20260525\${Name}_startup_status.csv",
         "--shadow-log", "reports\paper_runs\v7_live_20260525\${Name}_shadow_exit_models.csv",
+        "--entry-shadow-log", "reports\paper_runs\v7_live_20260525\${Name}_entry_shadow_models.csv",
         "--health-log", "reports\paper_runs\v7_live_20260525\${Name}_health.json"
     )
     if ($Name -eq "neo") {

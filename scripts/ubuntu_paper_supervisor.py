@@ -201,6 +201,7 @@ class Supervisor:
             "--instrument-specs-log", f"reports/paper_runs/{RUN_NAME}/{name}_instrument_specs.csv",
             "--startup-status-log", f"reports/paper_runs/{RUN_NAME}/{name}_startup_status.csv",
             "--shadow-log", f"reports/paper_runs/{RUN_NAME}/{name}_shadow_exit_models.csv",
+            "--entry-shadow-log", f"reports/paper_runs/{RUN_NAME}/{name}_entry_shadow_models.csv",
             "--health-log", f"reports/paper_runs/{RUN_NAME}/{name}_health.json",
             "--auto-policy-path", "reports/autonomy/latest/latest_auto_policy.json",
             "--auto-policy-reload-sec", "30",
