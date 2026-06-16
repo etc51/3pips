@@ -238,3 +238,45 @@ class ResearchStrategyTargetsTest(unittest.TestCase):
             self.assertEqual(rows[0]["target_kind"], "manual_runtime_release")
             self.assertEqual(rows[0]["launch_ready"], "False")
             self.assertEqual(rows[0]["blocking_reason"], "candidate_runtime_needs_manual_release")
+
+    def test_build_targets_keeps_paper_autopolicy_blocked_when_shortlist_quality_gate_fails(self) -> None:
+        trade_date = "2026-06-16"
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp) / "project"
+            latest_dir = project_root / "reports" / "autonomy" / "latest"
+            write_csv(
+                latest_dir / "paper_candidate_shortlist.csv",
+                [
+                    {
+                        "trade_date": trade_date,
+                        "shortlist_rank": 2,
+                        "registry_id": "strategy_lab:strict_with_bad_aggressive",
+                        "candidate_label": "strict baseline + selective aggressive slices",
+                        "paper_route": "paper_autopolicy",
+                        "registry_status": "paper_candidate",
+                        "validation_state": "consensus_backed",
+                        "runtime_ready": "False",
+                        "shortlist_status": "review_only",
+                        "blocking_reason": "non_positive_sample_expectancy",
+                        "stability_score": 51.382,
+                        "autopromote_ready": "True",
+                        "priority": 94,
+                        "registry_rank": 2,
+                        "scenario_anchor": "blackout_1200_1559",
+                        "execution_params_json": "{\"safe_mode\":\"paper_autopolicy\"}",
+                        "evidence_json": "{}",
+                    }
+                ],
+            )
+
+            rows, summary = rst.build_and_persist_research_strategy_targets(
+                project_root=project_root,
+                trade_date=trade_date,
+                latest_dir=latest_dir,
+            )
+
+            self.assertEqual(summary["launch_ready"], 0)
+            self.assertEqual(summary["blocked"], 1)
+            self.assertEqual(rows[0]["target_kind"], "policy_overlay")
+            self.assertEqual(rows[0]["launch_ready"], "False")
+            self.assertEqual(rows[0]["blocking_reason"], "non_positive_sample_expectancy")

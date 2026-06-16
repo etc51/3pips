@@ -58,6 +58,8 @@ SHORTLIST_FIELDS = [
 OPERATIONAL_ROUTES = {"paper_autopolicy", "leadlag_orderbook_monitor", "candidate_runtime"}
 RUNTIME_READY_STATUSES = {"paper_candidate"}
 SELECTION_FRESH_MAX_AGE_DAYS = 3
+AUTOPOLICY_MIN_SAMPLE_TRADES = 10
+AUTOPOLICY_MIN_SAMPLE_PROFIT_FACTOR = 1.0
 
 
 def clamp(value: float, low: float, high: float) -> float:
@@ -178,15 +180,33 @@ def build_contract_selection_context(selection: dict, trade_date: str) -> dict:
     }
 
 
+def paper_autopolicy_quality_gate_reason(row: dict) -> str:
+    sample_trades = maybe_int(row.get("sample_trades"))
+    sample_expectancy_rub = maybe_float(row.get("sample_expectancy_rub"))
+    sample_profit_factor = maybe_float(row.get("sample_profit_factor"))
+    if sample_trades is None or sample_expectancy_rub is None or sample_profit_factor is None:
+        return "missing_sample_quality_metrics"
+    if sample_trades < AUTOPOLICY_MIN_SAMPLE_TRADES:
+        return "insufficient_sample_trades"
+    if sample_expectancy_rub <= 0:
+        return "non_positive_sample_expectancy"
+    if sample_profit_factor < AUTOPOLICY_MIN_SAMPLE_PROFIT_FACTOR:
+        return "sample_profit_factor_below_1"
+    return ""
+
+
 def shortlist_decision(row: dict, contract_ctx: dict) -> tuple[bool, str, str]:
     route = str(row.get("paper_route") or "")
     status = str(row.get("status") or "")
     validation_state = str(row.get("validation_state") or "")
 
     if route == "paper_autopolicy":
-        if status in RUNTIME_READY_STATUSES:
-            return True, "ready_now", ""
-        return False, "review_only", "status_not_paper_candidate"
+        if status not in RUNTIME_READY_STATUSES:
+            return False, "review_only", "status_not_paper_candidate"
+        quality_gate_reason = paper_autopolicy_quality_gate_reason(row)
+        if quality_gate_reason:
+            return False, "review_only", quality_gate_reason
+        return True, "ready_now", ""
 
     if route == "leadlag_orderbook_monitor":
         if status not in RUNTIME_READY_STATUSES:

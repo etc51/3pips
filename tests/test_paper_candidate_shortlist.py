@@ -218,6 +218,58 @@ class PaperCandidateShortlistTest(unittest.TestCase):
             self.assertEqual(rows[0]["blocking_reason"], "stale_contract_selection")
             self.assertEqual(rows[0]["selection_fresh"], "False")
 
+    def test_build_shortlist_blocks_paper_autopolicy_when_sample_quality_is_negative(self) -> None:
+        trade_date = "2026-06-16"
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp) / "project"
+            latest_dir = project_root / "reports" / "autonomy" / "latest"
+            write_csv(
+                project_root / "data" / "processed" / "research_strategy_registry.csv",
+                [
+                    {
+                        "registry_id": "strategy_lab:strict_with_bad_aggressive",
+                        "as_of_date": trade_date,
+                        "status": "paper_candidate",
+                        "paper_route": "paper_autopolicy",
+                        "candidate_label": "strict baseline + selective aggressive slices",
+                        "validation_state": "consensus_backed",
+                        "autopromote_ready": "True",
+                        "priority": 94,
+                        "rank": 2,
+                        "scenario_anchor": "blackout_1200_1559",
+                        "beat_base_pct": 100.0,
+                        "stability_days": 2,
+                        "positive_days": 2,
+                        "delta_total_rub": 4072.82,
+                        "latest_day_delta_rub": 3191.01,
+                        "median_daily_net_rub": 7059.02,
+                        "worst_day_rub": 3982.97,
+                        "sample_trades": 24,
+                        "sample_win_rate_pct": 41.67,
+                        "sample_expectancy_rub": -77.11,
+                        "sample_profit_factor": 0.3953,
+                        "latest_day_expectancy_rub": -59.02,
+                        "latest_day_profit_factor": 0.4823,
+                        "required_features": "trade csv",
+                        "recommended_use": "candidate_runtime_tune",
+                        "execution_params_json": "{}",
+                        "evidence_json": "{}",
+                    }
+                ],
+            )
+
+            rows, summary = pcs.build_and_persist_paper_candidate_shortlist(
+                project_root=project_root,
+                trade_date=trade_date,
+                latest_dir=latest_dir,
+            )
+
+            self.assertEqual(summary["rows"], 1)
+            self.assertEqual(summary["runtime_ready"], 0)
+            self.assertEqual(rows[0]["runtime_ready"], "False")
+            self.assertEqual(rows[0]["shortlist_status"], "review_only")
+            self.assertEqual(rows[0]["blocking_reason"], "non_positive_sample_expectancy")
+
     def test_compute_stability_score_rewards_expectancy_and_profit_factor(self) -> None:
         base = {
             "beat_base_pct": 100.0,
