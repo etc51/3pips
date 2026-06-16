@@ -199,27 +199,6 @@ def main() -> int:
         "run_name": args.run_name,
     }
 
-    registry_rows, registry_summary = build_and_persist_research_strategy_registry(
-        project_root=project_root,
-        trade_date=trade_date,
-        manifest_payload=manifest_payload,
-        strategy_lab_rows=strategy_lab,
-        research_dir=research_dir,
-        latest_dir=manifest_root,
-    )
-    manifest_payload["research_strategy_registry"] = registry_summary
-    manifest_payload["research_strategy_registry_top"] = registry_rows[:10]
-
-    shortlist_rows, shortlist_summary = build_and_persist_paper_candidate_shortlist(
-        project_root=project_root,
-        trade_date=trade_date,
-        registry_rows=registry_rows,
-        research_dir=research_dir,
-        latest_dir=manifest_root,
-    )
-    manifest_payload["paper_candidate_shortlist"] = shortlist_summary
-    manifest_payload["paper_candidate_shortlist_top"] = shortlist_rows[:10]
-
     intervention_rows, intervention_summary = build_and_persist_research_intervention_proposals(
         project_root=project_root,
         trade_date=trade_date,
@@ -260,6 +239,27 @@ def main() -> int:
     )
     manifest_payload["entry_shadow_collection"] = entry_shadow_collection_summary
     manifest_payload["entry_shadow_collection_top"] = entry_shadow_collection_rows[:10]
+
+    registry_rows, registry_summary = build_and_persist_research_strategy_registry(
+        project_root=project_root,
+        trade_date=trade_date,
+        manifest_payload=manifest_payload,
+        strategy_lab_rows=strategy_lab,
+        research_dir=research_dir,
+        latest_dir=manifest_root,
+    )
+    manifest_payload["research_strategy_registry"] = registry_summary
+    manifest_payload["research_strategy_registry_top"] = registry_rows[:10]
+
+    shortlist_rows, shortlist_summary = build_and_persist_paper_candidate_shortlist(
+        project_root=project_root,
+        trade_date=trade_date,
+        registry_rows=registry_rows,
+        research_dir=research_dir,
+        latest_dir=manifest_root,
+    )
+    manifest_payload["paper_candidate_shortlist"] = shortlist_summary
+    manifest_payload["paper_candidate_shortlist_top"] = shortlist_rows[:10]
 
     target_rows, target_summary = build_and_persist_research_strategy_targets(
         project_root=project_root,

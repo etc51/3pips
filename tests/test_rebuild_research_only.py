@@ -144,6 +144,100 @@ class RebuildResearchOnlyTest(unittest.TestCase):
             self.assertEqual(entry_shadow_collection_summary["trade_date"], "2026-06-15")
             self.assertIn("status", entry_shadow_collection_summary)
 
+    def test_registry_build_sees_microstructure_summaries_before_shortlist_flow(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp) / "project"
+            run_dir = project_root / "reports" / "paper_runs" / "v7_live_20260525"
+            latest_dir = project_root / "reports" / "autonomy" / "latest"
+            run_dir.mkdir(parents=True, exist_ok=True)
+            latest_dir.mkdir(parents=True, exist_ok=True)
+
+            write_csv(
+                run_dir / "classic_core_multi_futures_paper_trades.csv",
+                [
+                    {"closed_at": "2026-06-15 10:30:00", "contour": "strict", "secid": "GLZ6", "qty": 1, "net_rub": 250.0},
+                ],
+            )
+            write_csv(
+                project_root / "reports" / "futures_scalp_profiles_v7_paper_20260525.csv",
+                [
+                    {"ticker": "GLZ6", "v7_family": "GL"},
+                ],
+            )
+            (latest_dir / "latest_auto_policy.json").write_text(
+                json.dumps({"active": {}, "summary": {"active_rule_count": 0}}, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            (latest_dir / "latest_daily_manifest.json").write_text(
+                json.dumps({"candidate_gate": {"pending_count": 0}, "nightly_cycle_status": {"status": "ok"}}, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+            seen: dict[str, object] = {}
+            fake_gate_summary = {
+                "trade_date": "2026-06-15",
+                "rows": 12,
+                "backtest_candidates": 2,
+                "monitor_only": 1,
+                "collection_status": "proxy_backtest_candidate_ready",
+            }
+            fake_counter_summary = {
+                "trade_date": "2026-06-15",
+                "rows": 0,
+                "unique_entries": 0,
+                "candidate_count": 0,
+                "monitor_only": 0,
+                "collection_status": "awaiting_entry_shadow_rows",
+            }
+
+            def fake_registry(**kwargs):
+                manifest_payload = kwargs["manifest_payload"]
+                seen["gate"] = manifest_payload.get("microstructure_gate_research")
+                seen["counter"] = manifest_payload.get("microstructure_counterfactual")
+                return [], {
+                    "trade_date": "2026-06-15",
+                    "generated_at": "now",
+                    "rows": 0,
+                    "paper_candidates": 0,
+                    "validated": 0,
+                    "research_only": 0,
+                    "autopromote_ready": 0,
+                    "by_source": {},
+                    "by_status": {},
+                    "by_paper_route": {},
+                }
+
+            argv = [
+                "rebuild_research_only.py",
+                "--project-root",
+                str(project_root),
+                "--trade-date",
+                "latest",
+            ]
+
+            with patch.object(rro, "build_and_persist_microstructure_gate_research", return_value=([], fake_gate_summary)), patch.object(
+                rro, "build_and_persist_microstructure_counterfactual", return_value=([], fake_counter_summary)
+            ), patch.object(
+                rro.dar,
+                "build_and_persist_entry_shadow_collection",
+                return_value=([], {"trade_date": "2026-06-15", "status": "awaiting_first_close"}),
+            ), patch.object(
+                rro, "build_and_persist_research_strategy_registry", side_effect=fake_registry
+            ), patch.object(
+                rro,
+                "build_and_persist_paper_candidate_shortlist",
+                return_value=([], {"trade_date": "2026-06-15", "rows": 0, "runtime_ready": 0, "review_only": 0, "by_state": {}}),
+            ), patch.object(
+                rro,
+                "build_and_persist_research_strategy_targets",
+                return_value=([], {"trade_date": "2026-06-15", "rows": 0, "launch_ready": 0, "research_only": 0, "by_decision": {}}),
+            ), patch.object(sys, "argv", argv):
+                rc = rro.main()
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(seen["gate"], fake_gate_summary)
+            self.assertEqual(seen["counter"], fake_counter_summary)
+
 
 if __name__ == "__main__":
     unittest.main()
