@@ -97,6 +97,13 @@ def json_text(payload: object) -> str:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
 
+def safe_read_rows(path: Path) -> list[dict]:
+    try:
+        return read_csv_rows(path)
+    except Exception:
+        return []
+
+
 def infer_strategy_lab_route(action_type: str, safe_mode: str) -> str:
     if safe_mode == "paper_autopolicy" or action_type == "runtime_policy":
         return "paper_autopolicy"
@@ -642,12 +649,17 @@ def build_and_persist_research_strategy_registry(
     latest_dir = latest_dir or project_root / "reports" / "autonomy" / "latest"
     canonical_dir = project_root / "data" / "processed"
     source_manifest = load_optional_manifest(project_root, trade_date, manifest_payload)
-    strategy_lab_rows = list(strategy_lab_rows) if strategy_lab_rows is not None else read_csv_rows(research_dir / "strategy_lab_candidates.csv")
-    screener_rows = read_csv_rows(project_root / "results" / "screener_latest.csv")
-    third_pass_summary_rows = read_csv_rows(project_root / "reports" / "third_pass_strategy_summary.csv")
-    third_pass_selection_rows = read_csv_rows(project_root / "reports" / "third_pass_feature_selection_log.csv")
-    portfolio_summary_rows = read_csv_rows(project_root / "results" / "portfolio_strategy_summary.csv")
-    portfolio_sensitivity_rows = read_csv_rows(project_root / "results" / "portfolio_strategy_sensitivity.csv")
+    if strategy_lab_rows is not None:
+        strategy_lab_rows = list(strategy_lab_rows)
+    else:
+        strategy_lab_rows = safe_read_rows(research_dir / "strategy_lab_candidates.csv")
+        if not strategy_lab_rows:
+            strategy_lab_rows = [dict(row) for row in (source_manifest.get("strategy_lab_top") or []) if isinstance(row, dict)]
+    screener_rows = safe_read_rows(project_root / "results" / "screener_latest.csv")
+    third_pass_summary_rows = safe_read_rows(project_root / "reports" / "third_pass_strategy_summary.csv")
+    third_pass_selection_rows = safe_read_rows(project_root / "reports" / "third_pass_feature_selection_log.csv")
+    portfolio_summary_rows = safe_read_rows(project_root / "results" / "portfolio_strategy_summary.csv")
+    portfolio_sensitivity_rows = safe_read_rows(project_root / "results" / "portfolio_strategy_sensitivity.csv")
     rows = build_registry_rows(
         project_root=project_root,
         trade_date=trade_date,

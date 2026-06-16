@@ -253,3 +253,42 @@ class ResearchStrategyRegistryTest(unittest.TestCase):
             portfolio_row = next(row for row in rows if row["registry_source"] == "portfolio_strategy_summary")
             self.assertEqual(portfolio_row["validation_state"], "portfolio_oos_pass")
             self.assertTrue((project_root / "data" / "processed" / "research_strategy_registry.csv").exists())
+
+    def test_build_and_persist_falls_back_to_manifest_strategy_lab_top_when_csv_unavailable(self) -> None:
+        trade_date = "2026-06-16"
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp) / "project"
+            research_dir = project_root / "reports" / "autonomy" / "research" / trade_date
+            latest_dir = project_root / "reports" / "autonomy" / "latest"
+            manifest_payload = {
+                "trade_date": trade_date,
+                "strategy_lab_top": [
+                    {
+                        "hypothesis_id": "runtime_strict_primary",
+                        "priority": 98,
+                        "category": "runtime_policy",
+                        "candidate": "strict primary baseline",
+                        "scope": "all classic futures",
+                        "action_type": "runtime_policy",
+                        "safe_mode": "paper_autopolicy",
+                        "autopromote_ready": True,
+                        "evidence": "delta_total=4072.82",
+                        "recommended_next_step": "keep strict baseline",
+                        "required_features": "trade csv",
+                        "scenario_anchor": "contour_only_strict",
+                        "rank": 1,
+                    }
+                ],
+            }
+
+            rows, summary = rsr.build_and_persist_research_strategy_registry(
+                project_root=project_root,
+                trade_date=trade_date,
+                manifest_payload=manifest_payload,
+                research_dir=research_dir,
+                latest_dir=latest_dir,
+            )
+
+            self.assertEqual(summary["rows"], 1)
+            self.assertEqual(rows[0]["registry_source"], "strategy_lab_candidates")
+            self.assertEqual(rows[0]["candidate_label"], "strict primary baseline")
