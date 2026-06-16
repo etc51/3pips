@@ -164,6 +164,7 @@ def check_latest_autonomy_outputs(project_root: Path, latest_trade_date_value: s
         "latest_auto_policy.json",
         "latest_nightly_cycle_status.json",
         "latest_manifest.json",
+        "entry_shadow_collection_summary.json",
         "research_strategy_registry_summary.json",
         "paper_candidate_shortlist_summary.json",
         "research_strategy_targets_summary.json",
@@ -219,6 +220,7 @@ def check_latest_autonomy_outputs(project_root: Path, latest_trade_date_value: s
         for key in [
             "nightly_cycle_status",
             "archive",
+            "entry_shadow_collection",
             "research_strategy_registry",
             "paper_candidate_shortlist",
             "research_strategy_targets",

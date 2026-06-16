@@ -251,6 +251,15 @@ def main() -> int:
     )
     manifest_payload["microstructure_counterfactual"] = micro_counter_summary
     manifest_payload["microstructure_counterfactual_top"] = micro_counter_rows[:10]
+    entry_shadow_collection_rows, entry_shadow_collection_summary = dar.build_and_persist_entry_shadow_collection(
+        project_root=project_root,
+        trade_date=trade_date,
+        run_dir=run_dir,
+        research_dir=research_dir,
+        latest_dir=manifest_root,
+    )
+    manifest_payload["entry_shadow_collection"] = entry_shadow_collection_summary
+    manifest_payload["entry_shadow_collection_top"] = entry_shadow_collection_rows[:10]
 
     target_rows, target_summary = build_and_persist_research_strategy_targets(
         project_root=project_root,

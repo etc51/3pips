@@ -34,10 +34,12 @@ class ServerWatchdogStabilityTest(unittest.TestCase):
                     "trade_date": "2026-06-15",
                     "nightly_cycle_status": {"status": "ok"},
                     "archive": "reports/autonomy/archives/3pips_daily_2026-06-15.zip",
+                    "entry_shadow_collection": {"status": "shadow_only_history"},
                     "research_strategy_registry": {"top": 1},
                     "paper_candidate_shortlist": {"top": 1},
                     "research_strategy_targets": {"top": 1},
                 },
+                "entry_shadow_collection_summary.json": {"trade_date": "2026-06-15", "status": "shadow_only_history"},
                 "research_strategy_registry_summary.json": {"rows": 3},
                 "paper_candidate_shortlist_summary.json": {"rows": 2},
                 "research_strategy_targets_summary.json": {"rows": 1},
@@ -82,10 +84,12 @@ class ServerWatchdogStabilityTest(unittest.TestCase):
         self.assertIn("nightly_archive_not_ready", issues)
         self.assertIn("latest_manifest_trade_date_mismatch[2026-06-14!=2026-06-15]", issues)
         self.assertIn("latest_manifest_missing_key[archive]", issues)
+        self.assertIn("latest_manifest_missing_key[entry_shadow_collection]", issues)
         self.assertIn("latest_manifest_missing_key[research_strategy_registry]", issues)
         self.assertIn("latest_manifest_missing_key[paper_candidate_shortlist]", issues)
         self.assertIn("latest_manifest_missing_key[research_strategy_targets]", issues)
         self.assertIn("latest_manifest_nightly_status_not_ok[degraded]", issues)
+        self.assertIn("missing_latest_artifact[entry_shadow_collection_summary.json]", issues)
         self.assertIn("missing_latest_artifact[research_strategy_registry_summary.json]", issues)
         self.assertIn("missing_latest_artifact[paper_candidate_shortlist_summary.json]", issues)
         self.assertIn("missing_latest_artifact[research_strategy_targets_summary.json]", issues)

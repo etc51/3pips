@@ -257,6 +257,203 @@ def load_entry_shadow_rows(run_dir: Path) -> list[dict]:
     return rows
 
 
+def runtime_group_from_stem(name: str) -> str:
+    for suffix in [
+        "_entry_shadow_models",
+        "_shadow_exit_models",
+        "_gpt_shadow_trades",
+        "_paper_open_positions",
+        "_health",
+        "_startup_status",
+    ]:
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return name
+
+
+def closed_row_stats(path: Path, trade_date: str) -> dict[str, object]:
+    rows_all = 0
+    rows_day = 0
+    last_closed_at = ""
+    last_closed_dt = None
+    for row in read_csv_rows(path):
+        closed_at = str(row.get("closed_at") or "").strip()
+        closed_dt = parse_dt(closed_at)
+        if closed_dt is None:
+            continue
+        rows_all += 1
+        if closed_dt.date().isoformat() == trade_date:
+            rows_day += 1
+        if last_closed_dt is None or closed_dt > last_closed_dt:
+            last_closed_dt = closed_dt
+            last_closed_at = closed_at
+    return {
+        "rows_all": rows_all,
+        "rows_day": rows_day,
+        "last_closed_at": last_closed_at,
+    }
+
+
+def build_entry_shadow_collection(run_dir: Path, trade_date: str) -> tuple[list[dict], dict]:
+    groups: set[str] = set()
+    for pattern in [
+        "*_entry_shadow_models.csv",
+        "*_shadow_exit_models.csv",
+        "*_paper_open_positions.json",
+        "*_health.json",
+        "*_startup_status.csv",
+    ]:
+        for path in run_dir.glob(pattern):
+            groups.add(runtime_group_from_stem(path.stem))
+
+    rows: list[dict] = []
+    summary_status_counts: dict[str, int] = defaultdict(int)
+    missing_entry_files: list[str] = []
+    shadow_only_contours: list[str] = []
+    entry_rows_all_total = 0
+    entry_rows_day_total = 0
+    shadow_rows_all_total = 0
+    shadow_rows_day_total = 0
+    last_entry_closed_at = ""
+    last_entry_closed_dt = None
+    last_shadow_closed_at = ""
+    last_shadow_closed_dt = None
+
+    for group in sorted(groups):
+        entry_path = run_dir / f"{group}_entry_shadow_models.csv"
+        shadow_path = run_dir / f"{group}_shadow_exit_models.csv"
+        entry_stats = closed_row_stats(entry_path, trade_date) if entry_path.exists() else {"rows_all": 0, "rows_day": 0, "last_closed_at": ""}
+        shadow_stats = closed_row_stats(shadow_path, trade_date) if shadow_path.exists() else {"rows_all": 0, "rows_day": 0, "last_closed_at": ""}
+        entry_rows_all = safe_int(entry_stats.get("rows_all"))
+        entry_rows_day = safe_int(entry_stats.get("rows_day"))
+        shadow_rows_all = safe_int(shadow_stats.get("rows_all"))
+        shadow_rows_day = safe_int(shadow_stats.get("rows_day"))
+        entry_last = str(entry_stats.get("last_closed_at") or "")
+        shadow_last = str(shadow_stats.get("last_closed_at") or "")
+        entry_last_dt = parse_dt(entry_last)
+        shadow_last_dt = parse_dt(shadow_last)
+
+        if entry_rows_all > 0:
+            status = "collecting"
+            note = "Closed entry-shadow rows are available."
+        elif shadow_rows_all > 0:
+            status = "shadow_only_history"
+            note = "Shadow exit history exists, but no closed entry-shadow rows are available yet."
+        elif entry_path.exists():
+            status = "awaiting_first_rows"
+            note = "Entry-shadow file exists, but no closed rows are available yet."
+        else:
+            status = "awaiting_first_close"
+            note = "No shadow close history for this contour yet."
+
+        row = {
+            "portfolio_group": group.upper(),
+            "entry_file_exists": entry_path.exists(),
+            "entry_rows_all": entry_rows_all,
+            "entry_rows_day": entry_rows_day,
+            "last_entry_closed_at": entry_last,
+            "shadow_file_exists": shadow_path.exists(),
+            "shadow_rows_all": shadow_rows_all,
+            "shadow_rows_day": shadow_rows_day,
+            "last_shadow_closed_at": shadow_last,
+            "status": status,
+            "note": note,
+        }
+        rows.append(row)
+        summary_status_counts[status] += 1
+        if not entry_path.exists():
+            missing_entry_files.append(str(row["portfolio_group"]))
+        if status == "shadow_only_history":
+            shadow_only_contours.append(str(row["portfolio_group"]))
+        entry_rows_all_total += entry_rows_all
+        entry_rows_day_total += entry_rows_day
+        shadow_rows_all_total += shadow_rows_all
+        shadow_rows_day_total += shadow_rows_day
+        if entry_last_dt is not None and (last_entry_closed_dt is None or entry_last_dt > last_entry_closed_dt):
+            last_entry_closed_dt = entry_last_dt
+            last_entry_closed_at = entry_last
+        if shadow_last_dt is not None and (last_shadow_closed_dt is None or shadow_last_dt > last_shadow_closed_dt):
+            last_shadow_closed_dt = shadow_last_dt
+            last_shadow_closed_at = shadow_last
+
+    if entry_rows_all_total > 0:
+        overall_status = "collecting"
+    elif shadow_rows_all_total > 0:
+        overall_status = "shadow_only_history"
+    elif any(bool(row.get("entry_file_exists")) for row in rows):
+        overall_status = "awaiting_first_rows"
+    else:
+        overall_status = "awaiting_first_close"
+
+    summary = {
+        "trade_date": trade_date,
+        "generated_at": now_str(),
+        "status": overall_status,
+        "contours": len(rows),
+        "contours_with_entry_files": sum(1 for row in rows if bool(row.get("entry_file_exists"))),
+        "contours_with_entry_rows": sum(1 for row in rows if safe_int(row.get("entry_rows_all")) > 0),
+        "entry_rows_all": entry_rows_all_total,
+        "entry_rows_day": entry_rows_day_total,
+        "shadow_rows_all": shadow_rows_all_total,
+        "shadow_rows_day": shadow_rows_day_total,
+        "last_entry_closed_at": last_entry_closed_at,
+        "last_shadow_closed_at": last_shadow_closed_at,
+        "missing_entry_files": missing_entry_files,
+        "shadow_only_contours": shadow_only_contours,
+        "by_status": dict(summary_status_counts),
+    }
+    return rows, summary
+
+
+def render_entry_shadow_collection_markdown(rows: list[dict], summary: dict) -> str:
+    lines = [
+        "# Entry Shadow Collection",
+        "",
+        f"- trade_date: {summary.get('trade_date') or '-'}",
+        f"- status: {summary.get('status') or '-'}",
+        f"- entry_rows_day: {safe_int(summary.get('entry_rows_day'))}",
+        f"- entry_rows_all: {safe_int(summary.get('entry_rows_all'))}",
+        f"- shadow_rows_day: {safe_int(summary.get('shadow_rows_day'))}",
+        f"- shadow_rows_all: {safe_int(summary.get('shadow_rows_all'))}",
+        f"- last_entry_closed_at: {summary.get('last_entry_closed_at') or '-'}",
+        f"- last_shadow_closed_at: {summary.get('last_shadow_closed_at') or '-'}",
+        f"- missing_entry_files: {', '.join(summary.get('missing_entry_files') or []) or 'none'}",
+        f"- shadow_only_contours: {', '.join(summary.get('shadow_only_contours') or []) or 'none'}",
+        "",
+        "| Contour | Status | Entry Rows (Day/All) | Shadow Rows (Day/All) | Last Entry Close | Last Shadow Close |",
+        "| --- | --- | ---: | ---: | --- | --- |",
+    ]
+    for row in rows:
+        lines.append(
+            "| "
+            + f"{row.get('portfolio_group') or '-'} | {row.get('status') or '-'} | "
+            + f"{safe_int(row.get('entry_rows_day'))}/{safe_int(row.get('entry_rows_all'))} | "
+            + f"{safe_int(row.get('shadow_rows_day'))}/{safe_int(row.get('shadow_rows_all'))} | "
+            + f"{row.get('last_entry_closed_at') or '-'} | {row.get('last_shadow_closed_at') or '-'} |"
+        )
+    lines.append("")
+    return "\n".join(lines)
+
+
+def build_and_persist_entry_shadow_collection(
+    *,
+    project_root: Path,
+    trade_date: str,
+    run_dir: Path,
+    research_dir: Path,
+    latest_dir: Path,
+    bundle_dir: Path | None = None,
+) -> tuple[list[dict], dict]:
+    rows, summary = build_entry_shadow_collection(run_dir, trade_date)
+    for directory in [research_dir, latest_dir, bundle_dir]:
+        if directory is None:
+            continue
+        write_csv_rows(directory / "entry_shadow_collection.csv", rows)
+        write_json(directory / "entry_shadow_collection_summary.json", summary)
+        write_text(directory / "entry_shadow_collection.md", render_entry_shadow_collection_markdown(rows, summary))
+    return rows, summary
+
+
 def load_strategy_review_candidate_history(research_root: Path) -> list[dict]:
     rows: list[dict] = []
     for path in sorted(research_root.glob("*/strategy_review_candidates.csv")):
@@ -2951,6 +3148,7 @@ def build_strategy_review(
     del strategy_lab, research_day, research_all, research_consensus, auto_policy, restriction_rows, runtime_trade_model
     all_rows = load_entry_shadow_rows(run_dir)
     day_rows = filter_trade_date(all_rows, trade_date)
+    _, entry_shadow_collection = build_entry_shadow_collection(run_dir, trade_date)
     summary_path = research_dir / "strategy_review_summary.md"
     candidates_path = research_dir / "strategy_review_candidates.csv"
     project_root = research_dir.parents[3]
@@ -2985,6 +3183,10 @@ def build_strategy_review(
                     "- entry_shadow_rows_day: 0",
                     "- entry_shadow_rows_all: 0",
                     "- candidate_count: 0",
+                    f"- entry_shadow_collection_status: {entry_shadow_collection.get('status') or '-'}",
+                    f"- entry_shadow_shadow_rows_all: {safe_int(entry_shadow_collection.get('shadow_rows_all'))}",
+                    f"- entry_shadow_missing_files: {', '.join(entry_shadow_collection.get('missing_entry_files') or []) or 'none'}",
+                    f"- last_shadow_closed_at: {entry_shadow_collection.get('last_shadow_closed_at') or '-'}",
                     "",
                     "No closed entry shadow rows yet. Runtime first needs to write `*_entry_shadow_models.csv`.",
                     "",
@@ -4150,6 +4352,16 @@ def main() -> int:
     )
     manifest_payload["microstructure_counterfactual"] = micro_counter_summary
     manifest_payload["microstructure_counterfactual_top"] = micro_counter_rows[:10]
+    entry_shadow_collection_rows, entry_shadow_collection_summary = build_and_persist_entry_shadow_collection(
+        project_root=project_root,
+        trade_date=trade_date,
+        run_dir=run_dir,
+        research_dir=research_dir,
+        latest_dir=manifest_root,
+        bundle_dir=bundle_dir,
+    )
+    manifest_payload["entry_shadow_collection"] = entry_shadow_collection_summary
+    manifest_payload["entry_shadow_collection_top"] = entry_shadow_collection_rows[:10]
     manifest_payload["candidate_gate"] = candidate_gate.get("summary") if isinstance(candidate_gate.get("summary"), dict) else {}
     manifest_payload["promoted_runtime"] = summarize_promoted_runtime_policy_state(promoted_runtime_state)
     registry_rows, registry_summary = build_and_persist_research_strategy_registry(

@@ -79,6 +79,45 @@ class DailyAutonomyStrategyReviewTest(unittest.TestCase):
             self.assertEqual(candidates[0]["contour"], "STRICT")
             self.assertEqual(candidates[0]["recommended_action"], "research_then_runtime")
 
+    def test_build_strategy_review_reports_shadow_only_collection_when_no_entry_rows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp) / "project"
+            run_dir = project_root / "reports" / "paper_runs" / "v7_live_20260525"
+            research_dir = project_root / "reports" / "autonomy" / "research" / "2026-06-16"
+            run_dir.mkdir(parents=True)
+            research_dir.mkdir(parents=True)
+
+            shadow_exit_path = run_dir / "classic_core_shadow_exit_models.csv"
+            shadow_exit_path.write_text(
+                "\n".join(
+                    [
+                        "closed_at,position_kind,model,net_rub",
+                        "2026-06-15 18:43:00,actual,candle_like,120.0",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            review = dar.build_strategy_review(
+                trade_date="2026-06-16",
+                research_dir=research_dir,
+                run_dir=run_dir,
+                strategy_lab=[],
+                research_day=[],
+                research_all=[],
+                research_consensus=[],
+                auto_policy={},
+                restriction_rows=[],
+                runtime_trade_model={},
+            )
+
+            self.assertTrue(review["generated"])
+            self.assertEqual(review["candidate_count"], 0)
+            summary_text = (research_dir / "strategy_review_summary.md").read_text(encoding="utf-8")
+            self.assertIn("entry_shadow_collection_status: shadow_only_history", summary_text)
+            self.assertIn("entry_shadow_missing_files: CLASSIC_CORE", summary_text)
+            self.assertIn("last_shadow_closed_at: 2026-06-15 18:43:00", summary_text)
+
 
 if __name__ == "__main__":
     unittest.main()

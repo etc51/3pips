@@ -90,6 +90,7 @@ class RebuildResearchOnlyTest(unittest.TestCase):
             self.assertEqual(rebuilt_manifest["research_rebuild"]["mode"], "research_only")
             self.assertEqual(rebuilt_manifest["trade_date"], "2026-06-15")
             self.assertIn("research_intervention_proposals", rebuilt_manifest)
+            self.assertIn("entry_shadow_collection", rebuilt_manifest)
             self.assertEqual(rebuilt_manifest_alias, rebuilt_manifest)
 
             research_dir = project_root / "reports" / "autonomy" / "research" / "2026-06-15"
@@ -103,6 +104,8 @@ class RebuildResearchOnlyTest(unittest.TestCase):
             self.assertTrue((latest_dir / "microstructure_gate_research_summary.json").exists())
             self.assertTrue((latest_dir / "microstructure_counterfactual.csv").exists())
             self.assertTrue((latest_dir / "microstructure_counterfactual_summary.json").exists())
+            self.assertTrue((latest_dir / "entry_shadow_collection.csv").exists())
+            self.assertTrue((latest_dir / "entry_shadow_collection_summary.json").exists())
 
             with (research_dir / "policy_sweep_latest_day.csv").open("r", encoding="utf-8-sig", newline="") as handle:
                 rows = list(csv.DictReader(handle))
@@ -123,6 +126,9 @@ class RebuildResearchOnlyTest(unittest.TestCase):
             self.assertEqual(micro_gate_summary["evaluation_state"], "review_event_proxy")
             micro_counter_summary = json.loads((latest_dir / "microstructure_counterfactual_summary.json").read_text(encoding="utf-8"))
             self.assertEqual(micro_counter_summary["evaluation_state"], "trade_level_counterfactual")
+            entry_shadow_collection_summary = json.loads((latest_dir / "entry_shadow_collection_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(entry_shadow_collection_summary["trade_date"], "2026-06-15")
+            self.assertIn("status", entry_shadow_collection_summary)
 
 
 if __name__ == "__main__":
