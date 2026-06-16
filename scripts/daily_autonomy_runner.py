@@ -61,6 +61,7 @@ from daily_autonomy_outputs import (  # noqa: E402
     write_research_outputs,
 )
 from paper_candidate_shortlist import build_and_persist_paper_candidate_shortlist  # noqa: E402
+from research_microstructure_counterfactual import build_and_persist_microstructure_counterfactual  # noqa: E402
 from research_intervention_proposals import build_and_persist_research_intervention_proposals  # noqa: E402
 from research_microstructure_gate import build_and_persist_microstructure_gate_research  # noqa: E402
 from research_strategy_targets import build_and_persist_research_strategy_targets  # noqa: E402
@@ -4075,6 +4076,7 @@ def main() -> int:
 
     runtime_dir = project_root / "reports" / "runtime"
     shadow_rows = filter_trade_date(load_shadow_trades(run_dir), trade_date)
+    all_entry_shadow_rows = load_entry_shadow_rows(run_dir)
     copy_bundle_outputs(
         bundle_dir,
         day_rows=day_rows,
@@ -4138,6 +4140,16 @@ def main() -> int:
     )
     manifest_payload["microstructure_gate_research"] = micro_gate_summary
     manifest_payload["microstructure_gate_research_top"] = micro_gate_rows[:10]
+    micro_counter_rows, micro_counter_summary = build_and_persist_microstructure_counterfactual(
+        project_root=project_root,
+        trade_date=trade_date,
+        all_entry_shadow_rows=all_entry_shadow_rows,
+        research_dir=research_dir,
+        latest_dir=manifest_root,
+        bundle_dir=bundle_dir,
+    )
+    manifest_payload["microstructure_counterfactual"] = micro_counter_summary
+    manifest_payload["microstructure_counterfactual_top"] = micro_counter_rows[:10]
     manifest_payload["candidate_gate"] = candidate_gate.get("summary") if isinstance(candidate_gate.get("summary"), dict) else {}
     manifest_payload["promoted_runtime"] = summarize_promoted_runtime_policy_state(promoted_runtime_state)
     registry_rows, registry_summary = build_and_persist_research_strategy_registry(

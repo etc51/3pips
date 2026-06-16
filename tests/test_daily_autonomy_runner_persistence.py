@@ -326,6 +326,8 @@ class DailyAutonomyRunnerPersistenceTest(unittest.TestCase):
             latest_interventions_summary_path = latest_root / "research_intervention_proposals_summary.json"
             latest_micro_gate_path = latest_root / "microstructure_gate_research.csv"
             latest_micro_gate_summary_path = latest_root / "microstructure_gate_research_summary.json"
+            latest_micro_counter_path = latest_root / "microstructure_counterfactual.csv"
+            latest_micro_counter_summary_path = latest_root / "microstructure_counterfactual_summary.json"
 
             self.assertTrue(analysis_status_path.exists(), analysis_status_path)
             self.assertTrue(bundle_status_path.exists(), bundle_status_path)
@@ -342,6 +344,8 @@ class DailyAutonomyRunnerPersistenceTest(unittest.TestCase):
             self.assertTrue(latest_interventions_summary_path.exists(), latest_interventions_summary_path)
             self.assertTrue(latest_micro_gate_path.exists(), latest_micro_gate_path)
             self.assertTrue(latest_micro_gate_summary_path.exists(), latest_micro_gate_summary_path)
+            self.assertTrue(latest_micro_counter_path.exists(), latest_micro_counter_path)
+            self.assertTrue(latest_micro_counter_summary_path.exists(), latest_micro_counter_summary_path)
             self.assertTrue(state_path.exists(), state_path)
 
             analysis_status = json.loads(analysis_status_path.read_text(encoding="utf-8"))
@@ -354,6 +358,7 @@ class DailyAutonomyRunnerPersistenceTest(unittest.TestCase):
             latest_targets_summary = json.loads(latest_targets_summary_path.read_text(encoding="utf-8"))
             latest_interventions_summary = json.loads(latest_interventions_summary_path.read_text(encoding="utf-8"))
             latest_micro_gate_summary = json.loads(latest_micro_gate_summary_path.read_text(encoding="utf-8"))
+            latest_micro_counter_summary = json.loads(latest_micro_counter_summary_path.read_text(encoding="utf-8"))
             state_payload = json.loads(state_path.read_text(encoding="utf-8"))
 
             self.assertEqual(analysis_status, bundle_status)
@@ -389,6 +394,8 @@ class DailyAutonomyRunnerPersistenceTest(unittest.TestCase):
             self.assertIn("research_intervention_proposals_top", latest_manifest)
             self.assertIn("microstructure_gate_research", latest_manifest)
             self.assertIn("microstructure_gate_research_top", latest_manifest)
+            self.assertIn("microstructure_counterfactual", latest_manifest)
+            self.assertIn("microstructure_counterfactual_top", latest_manifest)
             self.assertEqual(latest_registry_summary["trade_date"], trade_date)
             self.assertEqual(latest_shortlist_summary["trade_date"], trade_date)
             self.assertEqual(latest_targets_summary["trade_date"], trade_date)
@@ -399,6 +406,8 @@ class DailyAutonomyRunnerPersistenceTest(unittest.TestCase):
             self.assertIn("filtered_low_evidence_rows", latest_interventions_summary)
             self.assertEqual(latest_micro_gate_summary["trade_date"], trade_date)
             self.assertEqual(latest_micro_gate_summary["evaluation_state"], "review_event_proxy")
+            self.assertEqual(latest_micro_counter_summary["trade_date"], trade_date)
+            self.assertEqual(latest_micro_counter_summary["evaluation_state"], "trade_level_counterfactual")
 
 
 if __name__ == "__main__":

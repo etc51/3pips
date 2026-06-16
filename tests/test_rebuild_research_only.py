@@ -101,6 +101,8 @@ class RebuildResearchOnlyTest(unittest.TestCase):
             self.assertTrue((latest_dir / "research_intervention_proposals_summary.json").exists())
             self.assertTrue((latest_dir / "microstructure_gate_research.csv").exists())
             self.assertTrue((latest_dir / "microstructure_gate_research_summary.json").exists())
+            self.assertTrue((latest_dir / "microstructure_counterfactual.csv").exists())
+            self.assertTrue((latest_dir / "microstructure_counterfactual_summary.json").exists())
 
             with (research_dir / "policy_sweep_latest_day.csv").open("r", encoding="utf-8-sig", newline="") as handle:
                 rows = list(csv.DictReader(handle))
@@ -119,6 +121,8 @@ class RebuildResearchOnlyTest(unittest.TestCase):
             self.assertIn("filtered_low_evidence_rows", intervention_summary)
             micro_gate_summary = json.loads((latest_dir / "microstructure_gate_research_summary.json").read_text(encoding="utf-8"))
             self.assertEqual(micro_gate_summary["evaluation_state"], "review_event_proxy")
+            micro_counter_summary = json.loads((latest_dir / "microstructure_counterfactual_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(micro_counter_summary["evaluation_state"], "trade_level_counterfactual")
 
 
 if __name__ == "__main__":

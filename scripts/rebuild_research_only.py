@@ -13,6 +13,7 @@ import daily_autonomy_runner as dar  # noqa: E402
 from autonomy_common import ensure_dir, now_str, write_json, write_text  # noqa: E402
 from daily_autonomy_outputs import write_research_outputs  # noqa: E402
 from paper_candidate_shortlist import build_and_persist_paper_candidate_shortlist  # noqa: E402
+from research_microstructure_counterfactual import build_and_persist_microstructure_counterfactual  # noqa: E402
 from research_intervention_proposals import build_and_persist_research_intervention_proposals  # noqa: E402
 from research_microstructure_gate import build_and_persist_microstructure_gate_research  # noqa: E402
 from research_strategy_registry import build_and_persist_research_strategy_registry  # noqa: E402
@@ -68,6 +69,7 @@ def main() -> int:
     day_rows = dar.filter_trade_date(all_rows, trade_date)
     profiles = dar.load_profiles(profiles_path)
     all_wide_spread_rows = dar.load_wide_spread_reviews(run_dir)
+    all_entry_shadow_rows = dar.load_entry_shadow_rows(run_dir)
 
     dar.annotate_trade_rows(all_rows, profiles)
     dar.annotate_trade_rows(day_rows, profiles)
@@ -240,6 +242,15 @@ def main() -> int:
     )
     manifest_payload["microstructure_gate_research"] = micro_gate_summary
     manifest_payload["microstructure_gate_research_top"] = micro_gate_rows[:10]
+    micro_counter_rows, micro_counter_summary = build_and_persist_microstructure_counterfactual(
+        project_root=project_root,
+        trade_date=trade_date,
+        all_entry_shadow_rows=all_entry_shadow_rows,
+        research_dir=research_dir,
+        latest_dir=manifest_root,
+    )
+    manifest_payload["microstructure_counterfactual"] = micro_counter_summary
+    manifest_payload["microstructure_counterfactual_top"] = micro_counter_rows[:10]
 
     target_rows, target_summary = build_and_persist_research_strategy_targets(
         project_root=project_root,
