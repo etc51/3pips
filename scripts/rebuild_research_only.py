@@ -14,6 +14,7 @@ from autonomy_common import ensure_dir, now_str, write_json, write_text  # noqa:
 from daily_autonomy_outputs import write_research_outputs  # noqa: E402
 from paper_candidate_shortlist import build_and_persist_paper_candidate_shortlist  # noqa: E402
 from research_intervention_proposals import build_and_persist_research_intervention_proposals  # noqa: E402
+from research_microstructure_gate import build_and_persist_microstructure_gate_research  # noqa: E402
 from research_strategy_registry import build_and_persist_research_strategy_registry  # noqa: E402
 from research_strategy_targets import build_and_persist_research_strategy_targets  # noqa: E402
 
@@ -229,6 +230,16 @@ def main() -> int:
     )
     manifest_payload["research_intervention_proposals"] = intervention_summary
     manifest_payload["research_intervention_proposals_top"] = intervention_rows[:10]
+    micro_gate_rows, micro_gate_summary = build_and_persist_microstructure_gate_research(
+        project_root=project_root,
+        trade_date=trade_date,
+        all_wide_spread_rows=all_wide_spread_rows,
+        all_trade_rows=all_rows,
+        research_dir=research_dir,
+        latest_dir=manifest_root,
+    )
+    manifest_payload["microstructure_gate_research"] = micro_gate_summary
+    manifest_payload["microstructure_gate_research_top"] = micro_gate_rows[:10]
 
     target_rows, target_summary = build_and_persist_research_strategy_targets(
         project_root=project_root,

@@ -62,6 +62,7 @@ from daily_autonomy_outputs import (  # noqa: E402
 )
 from paper_candidate_shortlist import build_and_persist_paper_candidate_shortlist  # noqa: E402
 from research_intervention_proposals import build_and_persist_research_intervention_proposals  # noqa: E402
+from research_microstructure_gate import build_and_persist_microstructure_gate_research  # noqa: E402
 from research_strategy_targets import build_and_persist_research_strategy_targets  # noqa: E402
 from research_strategy_registry import build_and_persist_research_strategy_registry  # noqa: E402
 
@@ -4126,6 +4127,17 @@ def main() -> int:
     )
     manifest_payload["research_intervention_proposals"] = intervention_summary
     manifest_payload["research_intervention_proposals_top"] = intervention_rows[:10]
+    micro_gate_rows, micro_gate_summary = build_and_persist_microstructure_gate_research(
+        project_root=project_root,
+        trade_date=trade_date,
+        all_wide_spread_rows=all_wide_spread_rows,
+        all_trade_rows=all_rows,
+        research_dir=research_dir,
+        latest_dir=manifest_root,
+        bundle_dir=bundle_dir,
+    )
+    manifest_payload["microstructure_gate_research"] = micro_gate_summary
+    manifest_payload["microstructure_gate_research_top"] = micro_gate_rows[:10]
     manifest_payload["candidate_gate"] = candidate_gate.get("summary") if isinstance(candidate_gate.get("summary"), dict) else {}
     manifest_payload["promoted_runtime"] = summarize_promoted_runtime_policy_state(promoted_runtime_state)
     registry_rows, registry_summary = build_and_persist_research_strategy_registry(

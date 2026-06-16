@@ -99,6 +99,8 @@ class RebuildResearchOnlyTest(unittest.TestCase):
             self.assertTrue((latest_dir / "research_strategy_targets.csv").exists())
             self.assertTrue((latest_dir / "research_intervention_proposals.csv").exists())
             self.assertTrue((latest_dir / "research_intervention_proposals_summary.json").exists())
+            self.assertTrue((latest_dir / "microstructure_gate_research.csv").exists())
+            self.assertTrue((latest_dir / "microstructure_gate_research_summary.json").exists())
 
             with (research_dir / "policy_sweep_latest_day.csv").open("r", encoding="utf-8-sig", newline="") as handle:
                 rows = list(csv.DictReader(handle))
@@ -115,6 +117,8 @@ class RebuildResearchOnlyTest(unittest.TestCase):
             self.assertEqual(intervention_summary["live_mode_allowed"], 0)
             self.assertIn("evidence_backed_rows", intervention_summary)
             self.assertIn("filtered_low_evidence_rows", intervention_summary)
+            micro_gate_summary = json.loads((latest_dir / "microstructure_gate_research_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(micro_gate_summary["evaluation_state"], "review_event_proxy")
 
 
 if __name__ == "__main__":
