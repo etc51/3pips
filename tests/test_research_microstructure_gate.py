@@ -124,6 +124,30 @@ class ResearchMicrostructureGateTest(unittest.TestCase):
             summary_payload = json.loads((latest_dir / "microstructure_gate_research_summary.json").read_text(encoding="utf-8"))
             self.assertEqual(summary_payload["top_candidate_group"], "TAIL_RESEARCH/AGGRESSIVE::MM")
             self.assertEqual(summary_payload["top_candidate_threshold"], 0.75)
+            self.assertEqual(summary_payload["top_candidate_status"], "backtest_candidate")
+
+    def test_summary_prefers_actionable_all_sample_candidate_over_latest_day_monitor_row(self) -> None:
+        rows = [
+            {
+                "sample": "latest_day",
+                "group": "TAIL_RESEARCH/AGGRESSIVE::BM",
+                "threshold_ratio": 0.5,
+                "candidate_status": "monitor_only",
+                "experiment_score": 98.0,
+            },
+            {
+                "sample": "all_sample",
+                "group": "TAIL_RESEARCH/AGGRESSIVE::MM",
+                "threshold_ratio": 0.75,
+                "candidate_status": "backtest_candidate",
+                "experiment_score": 88.0,
+            },
+        ]
+        summary = rmg.summarize_research(rows, "2026-06-15")
+        self.assertEqual(summary["top_candidate_group"], "TAIL_RESEARCH/AGGRESSIVE::MM")
+        self.assertEqual(summary["top_candidate_threshold"], 0.75)
+        self.assertEqual(summary["top_candidate_sample"], "all_sample")
+        self.assertEqual(summary["top_candidate_status"], "backtest_candidate")
 
 
 if __name__ == "__main__":

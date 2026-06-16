@@ -274,6 +274,32 @@ def build_microstructure_gate_research(
     return rows
 
 
+def top_candidate_row(rows: list[dict]) -> dict:
+    if not rows:
+        return {}
+    status_order = {
+        "backtest_candidate": 0,
+        "monitor_only": 1,
+        "insufficient_signal": 2,
+        "insufficient_sample": 3,
+    }
+    sample_order = {
+        "all_sample": 0,
+        "latest_day": 1,
+    }
+    ranked = sorted(
+        rows,
+        key=lambda row: (
+            status_order.get(str(row.get("candidate_status") or ""), 99),
+            -safe_float(row.get("experiment_score")),
+            sample_order.get(str(row.get("sample") or ""), 99),
+            safe_float(row.get("threshold_ratio")),
+            str(row.get("group") or ""),
+        ),
+    )
+    return ranked[0]
+
+
 def summarize_research(rows: list[dict], trade_date: str) -> dict:
     by_sample: dict[str, int] = {}
     by_status: dict[str, int] = {}
@@ -282,7 +308,7 @@ def summarize_research(rows: list[dict], trade_date: str) -> dict:
         status = str(row.get("candidate_status") or "unknown")
         by_sample[sample] = by_sample.get(sample, 0) + 1
         by_status[status] = by_status.get(status, 0) + 1
-    top = rows[0] if rows else {}
+    top = top_candidate_row(rows)
     return {
         "trade_date": trade_date,
         "generated_at": now_str(),
@@ -295,6 +321,7 @@ def summarize_research(rows: list[dict], trade_date: str) -> dict:
         "top_candidate_group": str(top.get("group") or ""),
         "top_candidate_threshold": maybe_float(top.get("threshold_ratio")),
         "top_candidate_sample": str(top.get("sample") or ""),
+        "top_candidate_status": str(top.get("candidate_status") or ""),
         "by_sample": by_sample,
         "by_status": by_status,
     }
@@ -314,6 +341,8 @@ def render_markdown(rows: list[dict], summary: dict) -> str:
             f"- evaluation_state: {summary['evaluation_state']}",
             f"- top_candidate_group: {summary['top_candidate_group']}",
             f"- top_candidate_threshold: {summary['top_candidate_threshold']}",
+            f"- top_candidate_sample: {summary['top_candidate_sample']}",
+            f"- top_candidate_status: {summary['top_candidate_status']}",
             "",
             markdown_table(
                 rows,
