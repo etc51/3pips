@@ -38,6 +38,8 @@ class DailyAutonomyCycleStatusTest(unittest.TestCase):
                 intervention_proposals={
                     "generated": True,
                     "rows": 2,
+                    "evidence_backed_rows": 1,
+                    "top_candidate": "tail-risk normalized exits",
                     "summary_path": r"reports\autonomy\research\2026-06-15\research_intervention_proposals.md",
                     "artifacts": [
                         r"reports\autonomy\research\2026-06-15\research_intervention_proposals.md",
@@ -83,6 +85,8 @@ class DailyAutonomyCycleStatusTest(unittest.TestCase):
         self.assertEqual(stages["intervention_proposals"]["status"], "ok")
         self.assertTrue(stages["intervention_proposals"]["generated"])
         self.assertEqual(stages["intervention_proposals"]["rows"], 2)
+        self.assertEqual(stages["intervention_proposals"]["evidence_backed_rows"], 1)
+        self.assertEqual(stages["intervention_proposals"]["top_candidate"], "tail-risk normalized exits")
         self.assertEqual(
             stages["intervention_proposals"]["summary_path"],
             r"reports\autonomy\research\2026-06-15\research_intervention_proposals.md",

@@ -113,6 +113,8 @@ class RebuildResearchOnlyTest(unittest.TestCase):
             intervention_summary = json.loads((latest_dir / "research_intervention_proposals_summary.json").read_text(encoding="utf-8"))
             self.assertEqual(intervention_summary["runtime_mutation_allowed"], 0)
             self.assertEqual(intervention_summary["live_mode_allowed"], 0)
+            self.assertIn("evidence_backed_rows", intervention_summary)
+            self.assertIn("filtered_low_evidence_rows", intervention_summary)
 
 
 if __name__ == "__main__":

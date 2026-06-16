@@ -1560,6 +1560,8 @@ def build_nightly_cycle_status(
                 "status": "ok" if proposals_generated else "not_generated",
                 "generated": proposals_generated,
                 "rows": safe_int(proposals.get("rows")),
+                "evidence_backed_rows": safe_int(proposals.get("evidence_backed_rows")),
+                "top_candidate": str(proposals.get("top_candidate") or ""),
                 "summary_path": str(proposals.get("summary_path") or ""),
                 "artifacts": list(proposals.get("artifacts") or []),
             },

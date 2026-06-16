@@ -40,6 +40,7 @@ PROPOSAL_FIELDS = [
     "live_mode_allowed",
     "trigger_metric",
     "trigger_value",
+    "scope_net_rub",
     "expected_benefit",
     "risk_focus",
     "latest_day_expectancy_rub",
@@ -54,6 +55,8 @@ PROPOSAL_FIELDS = [
     "portfolio_group",
     "contour",
     "model",
+    "evidence_score",
+    "actionability_tier",
     "required_features",
     "recommended_next_step",
     "evidence",
@@ -87,7 +90,7 @@ def markdown_table(rows: list[dict], columns: list[str], limit: int = 20) -> str
 
 
 def parse_named_number(text: object, name: str) -> float | None:
-    match = re.search(rf"{re.escape(name)}=(-?\d+(?:\.\d+)?)", str(text or ""))
+    match = re.search(rf"(?<![A-Za-z0-9_]){re.escape(name)}=(-?\d+(?:\.\d+)?)", str(text or ""))
     if not match:
         return None
     try:
@@ -102,6 +105,10 @@ def parse_ratio(text: object) -> float | None:
     if avg_loss is None or avg_win in (None, 0):
         return None
     return round(abs(avg_loss) / abs(avg_win), 6)
+
+
+def parse_scope_net_rub(text: object) -> float | None:
+    return parse_named_number(text, "net")
 
 
 def strategy_lab_context(
@@ -135,6 +142,7 @@ def strategy_lab_family(row: dict) -> tuple[str, str, str, str]:
 
 def strategy_lab_trigger_value(row: dict, intervention_family: str, all_sample: dict, sample_payout: dict) -> float | str:
     evidence = str(row.get("evidence") or "")
+    scope_net_rub = parse_scope_net_rub(evidence)
     if intervention_family == "session_window":
         late_net = parse_named_number(evidence, "late_net")
         return late_net if late_net is not None else ""
@@ -156,7 +164,7 @@ def strategy_lab_trigger_value(row: dict, intervention_family: str, all_sample: 
                 return ""
         return ""
     if intervention_family == "new_alpha_probe":
-        return maybe_float(all_sample.get("net_rub"))
+        return scope_net_rub if scope_net_rub is not None else maybe_float(all_sample.get("net_rub"))
     if intervention_family == "microstructure_entry_gate":
         ratio = parse_named_number(evidence, "median_ratio")
         return ratio if ratio is not None else ""
@@ -262,6 +270,8 @@ def strategy_lab_rows_to_proposals(
         intervention_family, trigger_metric, risk_focus, target_stage = strategy_lab_family(row)
         if not intervention_family:
             continue
+        evidence_text = str(row.get("evidence") or "")
+        scope_net_rub = parse_scope_net_rub(evidence_text)
         latest_day, all_sample, latest_day_payout, sample_payout = strategy_lab_context(
             row,
             latest_day_by_scenario,
@@ -296,6 +306,7 @@ def strategy_lab_rows_to_proposals(
                 "live_mode_allowed": False,
                 "trigger_metric": trigger_metric,
                 "trigger_value": strategy_lab_trigger_value(row, intervention_family, all_sample, sample_payout),
+                "scope_net_rub": scope_net_rub,
                 "expected_benefit": strategy_lab_expected_benefit(
                     intervention_family,
                     row,
@@ -317,9 +328,11 @@ def strategy_lab_rows_to_proposals(
                 "portfolio_group": "",
                 "contour": "",
                 "model": "",
+                "evidence_score": 0,
+                "actionability_tier": "",
                 "required_features": str(row.get("required_features") or ""),
                 "recommended_next_step": str(row.get("recommended_next_step") or ""),
-                "evidence": str(row.get("evidence") or ""),
+                "evidence": evidence_text,
                 "instructions_json": json_text(strategy_lab_instruction_payload(intervention_family, row)),
                 "evidence_json": json_text(evidence_payload),
             }
@@ -376,6 +389,7 @@ def strategy_review_rows_to_proposals(*, trade_date: str, strategy_review: dict)
                 "live_mode_allowed": False,
                 "trigger_metric": "delta_vs_base_rub",
                 "trigger_value": delta_vs_base_rub,
+                "scope_net_rub": None,
                 "expected_benefit": (
                     f"Skip {skipped_losses or 0} losses against {skipped_wins or 0} skipped winners "
                     f"while improving expectancy by {delta_vs_base_rub} RUB vs base."
@@ -393,6 +407,8 @@ def strategy_review_rows_to_proposals(*, trade_date: str, strategy_review: dict)
                 "portfolio_group": str(row.get("portfolio_group") or ""),
                 "contour": str(row.get("contour") or ""),
                 "model": str(row.get("model") or ""),
+                "evidence_score": 0,
+                "actionability_tier": "",
                 "required_features": "entry shadow rows, base-vs-model comparison, follow-up day history",
                 "recommended_next_step": "Keep this as a proposal-only entry gate until a human explicitly approves any runtime candidate release.",
                 "evidence": str(row.get("note") or ""),
@@ -403,31 +419,89 @@ def strategy_review_rows_to_proposals(*, trade_date: str, strategy_review: dict)
     return rows
 
 
-def normalize_proposal_rows(rows: list[dict]) -> list[dict]:
-    rows.sort(
+def proposal_evidence_score(row: dict) -> int:
+    score = 0
+    if maybe_float(row.get("trigger_value")) is not None:
+        score += 3
+    if maybe_float(row.get("delta_vs_base_rub")) is not None:
+        score += 3
+    if maybe_float(row.get("sample_expectancy_rub")) is not None:
+        score += 2
+    if maybe_float(row.get("sample_top3_loss_rub")) is not None:
+        score += 2
+    if maybe_float(row.get("latest_day_top3_loss_rub")) is not None:
+        score += 1
+    if maybe_float(row.get("sample_avg_win_rub")) is not None and maybe_float(row.get("sample_avg_loss_rub")) is not None:
+        score += 1
+    if maybe_float(row.get("scope_net_rub")) is not None:
+        score += 1
+    if (maybe_int(row.get("skipped_losses")) or 0) > (maybe_int(row.get("skipped_wins")) or 0):
+        score += 1
+    return score
+
+
+def proposal_actionability_tier(row: dict, evidence_score: int) -> str:
+    if str(row.get("source_type") or "") == "strategy_review":
+        return "runtime_candidate_review"
+    intervention_family = str(row.get("intervention_family") or "")
+    if intervention_family == "new_alpha_probe":
+        return "exploratory"
+    if evidence_score >= 6:
+        return "backtest_ready"
+    if evidence_score >= 3:
+        return "research_plan_ready"
+    return "needs_more_evidence"
+
+
+def normalize_proposal_rows(rows: list[dict]) -> tuple[list[dict], int]:
+    tier_order = {
+        "runtime_candidate_review": 0,
+        "backtest_ready": 1,
+        "research_plan_ready": 2,
+        "exploratory": 3,
+        "needs_more_evidence": 4,
+    }
+    filtered_low_evidence_rows = 0
+    ranked_rows: list[dict] = []
+    for row in rows:
+        scored = dict(row)
+        evidence_score = proposal_evidence_score(scored)
+        if str(scored.get("source_type") or "") == "strategy_lab" and evidence_score < 3:
+            filtered_low_evidence_rows += 1
+            continue
+        scored["evidence_score"] = evidence_score
+        scored["actionability_tier"] = proposal_actionability_tier(scored, evidence_score)
+        ranked_rows.append(scored)
+    ranked_rows.sort(
         key=lambda row: (
+            tier_order.get(str(row.get("actionability_tier") or ""), 99),
+            -(maybe_int(row.get("evidence_score")) or 0),
             -(maybe_int(row.get("priority")) or 0),
             0 if str(row.get("source_type") or "") == "strategy_review" else 1,
             -(maybe_float(row.get("delta_vs_base_rub")) or 0.0),
+            maybe_float(row.get("scope_net_rub")) if maybe_float(row.get("scope_net_rub")) is not None else 0.0,
             str(row.get("candidate_label") or ""),
         )
     )
-    for index, row in enumerate(rows, start=1):
+    for index, row in enumerate(ranked_rows, start=1):
         row["proposal_rank"] = index
         row["requires_explicit_user_approval"] = bool_text(normalize_bool(row.get("requires_explicit_user_approval")))
         row["runtime_mutation_allowed"] = bool_text(normalize_bool(row.get("runtime_mutation_allowed")))
         row["live_mode_allowed"] = bool_text(normalize_bool(row.get("live_mode_allowed")))
-    return rows
+    return ranked_rows, filtered_low_evidence_rows
 
 
-def summarize_proposals(rows: list[dict], trade_date: str, project_root: Path, research_dir: Path) -> dict:
+def summarize_proposals(rows: list[dict], trade_date: str, project_root: Path, research_dir: Path, filtered_low_evidence_rows: int) -> dict:
     by_family: dict[str, int] = {}
     by_source_type: dict[str, int] = {}
+    by_actionability_tier: dict[str, int] = {}
     for row in rows:
         family = str(row.get("intervention_family") or "unknown")
         source_type = str(row.get("source_type") or "unknown")
+        actionability_tier = str(row.get("actionability_tier") or "unknown")
         by_family[family] = by_family.get(family, 0) + 1
         by_source_type[source_type] = by_source_type.get(source_type, 0) + 1
+        by_actionability_tier[actionability_tier] = by_actionability_tier.get(actionability_tier, 0) + 1
     summary_path = research_dir / "research_intervention_proposals.md"
     artifacts = [
         relpath_text(project_root, summary_path),
@@ -444,8 +518,12 @@ def summarize_proposals(rows: list[dict], trade_date: str, project_root: Path, r
         "explicit_user_approval_required": sum(1 for row in rows if normalize_bool(row.get("requires_explicit_user_approval"))),
         "runtime_mutation_allowed": sum(1 for row in rows if normalize_bool(row.get("runtime_mutation_allowed"))),
         "live_mode_allowed": sum(1 for row in rows if normalize_bool(row.get("live_mode_allowed"))),
+        "evidence_backed_rows": sum(1 for row in rows if (maybe_int(row.get("evidence_score")) or 0) >= 5),
+        "filtered_low_evidence_rows": filtered_low_evidence_rows,
+        "top_candidate": str(rows[0].get("candidate_label") or "") if rows else "",
         "by_intervention_family": by_family,
         "by_source_type": by_source_type,
+        "by_actionability_tier": by_actionability_tier,
         "summary_path": artifacts[0],
         "artifacts": artifacts,
     }
@@ -463,12 +541,17 @@ def render_proposals_markdown(rows: list[dict], summary: dict) -> str:
             f"- explicit_user_approval_required: {summary['explicit_user_approval_required']}",
             f"- runtime_mutation_allowed: {summary['runtime_mutation_allowed']}",
             f"- live_mode_allowed: {summary['live_mode_allowed']}",
+            f"- evidence_backed_rows: {summary['evidence_backed_rows']}",
+            f"- filtered_low_evidence_rows: {summary['filtered_low_evidence_rows']}",
+            f"- top_candidate: {summary['top_candidate']}",
             "",
             markdown_table(
                 rows,
                 [
                     "proposal_rank",
                     "candidate_label",
+                    "actionability_tier",
+                    "evidence_score",
                     "intervention_family",
                     "source_type",
                     "target_stage",
@@ -515,8 +598,8 @@ def build_and_persist_research_intervention_proposals(
         research_all_rows=research_all_rows,
     )
     rows.extend(strategy_review_rows_to_proposals(trade_date=trade_date, strategy_review=strategy_review))
-    rows = normalize_proposal_rows(rows)
-    summary = summarize_proposals(rows, trade_date, project_root, research_dir)
+    rows, filtered_low_evidence_rows = normalize_proposal_rows(rows)
+    summary = summarize_proposals(rows, trade_date, project_root, research_dir, filtered_low_evidence_rows)
     directories = [research_dir, latest_dir]
     if bundle_dir is not None:
         directories.append(bundle_dir)

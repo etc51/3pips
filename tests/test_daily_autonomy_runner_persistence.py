@@ -361,6 +361,8 @@ class DailyAutonomyRunnerPersistenceTest(unittest.TestCase):
             self.assertEqual(latest_status["stages"]["strategy_review"]["artifacts"], [strategy_review_summary, strategy_review_candidates])
             self.assertEqual(latest_status["stages"]["intervention_proposals"]["status"], "ok")
             self.assertTrue(latest_status["stages"]["intervention_proposals"]["generated"])
+            self.assertGreaterEqual(latest_status["stages"]["intervention_proposals"]["evidence_backed_rows"], 0)
+            self.assertIsInstance(latest_status["stages"]["intervention_proposals"]["top_candidate"], str)
             self.assertTrue(latest_status["stages"]["summary"]["archive_ready"])
             self.assertEqual(latest_status["stages"]["email"]["status"], "sent")
             self.assertTrue(latest_status["stages"]["email"]["sent"])
@@ -386,6 +388,8 @@ class DailyAutonomyRunnerPersistenceTest(unittest.TestCase):
             self.assertEqual(latest_interventions_summary["trade_date"], trade_date)
             self.assertEqual(latest_interventions_summary["runtime_mutation_allowed"], 0)
             self.assertEqual(latest_interventions_summary["live_mode_allowed"], 0)
+            self.assertIn("evidence_backed_rows", latest_interventions_summary)
+            self.assertIn("filtered_low_evidence_rows", latest_interventions_summary)
 
 
 if __name__ == "__main__":
