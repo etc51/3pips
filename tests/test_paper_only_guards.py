@@ -128,3 +128,30 @@ def test_supervisor_bot_args_force_paper_only_for_every_portfolio(tmp_path):
         assert "--paper-only" in argv
         assert "--entry-shadow-log" in argv
         assert not any(str(part).lower().startswith("--live") for part in argv)
+
+
+def test_paper_runtime_paths_do_not_reference_live_order_apis():
+    forbidden_tokens = [
+        "client.orders",
+        "client.stop_orders",
+        "post_order(",
+        "post_stop_order(",
+        "cancel_order(",
+        "replace_order(",
+    ]
+    guarded_paths = [
+        ROOT / "src" / "ng_scalper_bot.py",
+        ROOT / "src" / "multi_futures_paper.py",
+        ROOT / "src" / "leadlag_ng_paper_orderbook_monitor.py",
+        ROOT / "src" / "reconcile_paper_positions.py",
+        ROOT / "scripts" / "ubuntu_paper_supervisor.py",
+        ROOT / "scripts" / "run_v7_paper_contours_20260525.ps1",
+        ROOT / "scripts" / "watch_v7_paper_contours_20260525.ps1",
+        ROOT / "scripts" / "run_ng_paper_once_20260524.ps1",
+        ROOT / "scripts" / "run_scalp_paper_once_20260524.ps1",
+    ]
+
+    for path in guarded_paths:
+        text = path.read_text(encoding="utf-8")
+        for token in forbidden_tokens:
+            assert token not in text, f"{path} unexpectedly references live order API token: {token}"
