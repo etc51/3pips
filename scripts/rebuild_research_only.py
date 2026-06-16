@@ -292,10 +292,16 @@ def main() -> int:
                 f"- entry_shadow_candidate_count: {dar.safe_int(strategy_review.get('candidate_count'))}",
                 f"- entry_shadow_missing_files: {', '.join(strategy_review.get('missing_entry_files') or []) or 'none'}",
                 f"- microstructure_gate_status: {str(micro_gate_summary.get('collection_status') or 'not_generated')}",
+                f"- microstructure_gate_source_rows_day: {dar.safe_int(micro_gate_summary.get('source_review_rows_day'))}",
+                f"- microstructure_gate_source_rows_all: {dar.safe_int(micro_gate_summary.get('source_review_rows_all'))}",
                 f"- microstructure_gate_backtest_candidates: {dar.safe_int(micro_gate_summary.get('backtest_candidates'))}",
+                f"- microstructure_gate_next_action: {str(micro_gate_summary.get('next_action') or '-')}",
                 f"- microstructure_counterfactual_status: {str(micro_counter_summary.get('collection_status') or 'not_generated')}",
+                f"- microstructure_counterfactual_source_rows_day: {dar.safe_int(micro_counter_summary.get('source_entry_shadow_rows_day'))}",
+                f"- microstructure_counterfactual_source_rows_all: {dar.safe_int(micro_counter_summary.get('source_entry_shadow_rows_all'))}",
                 f"- microstructure_counterfactual_unique_entries: {dar.safe_int(micro_counter_summary.get('unique_entries'))}",
                 f"- microstructure_counterfactual_candidates: {dar.safe_int(micro_counter_summary.get('candidate_count'))}",
+                f"- microstructure_counterfactual_next_action: {str(micro_counter_summary.get('next_action') or '-')}",
             ]
         )
         + "\n",

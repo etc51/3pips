@@ -305,7 +305,28 @@ def collection_status(*, unique_entries: int, candidate_count: int, monitor_only
     return "counterfactual_exploratory"
 
 
-def summarize_research(rows: list[dict], trade_date: str, unique_entries: int) -> dict:
+def next_action(summary: dict) -> str:
+    status = str(summary.get("collection_status") or "")
+    group = str(summary.get("top_candidate_group") or "")
+    threshold = summary.get("top_candidate_threshold")
+    if status == "awaiting_entry_shadow_rows":
+        return "Collect first entry-shadow rows before promoting trade-level microstructure decisions."
+    if status == "counterfactual_candidate_ready":
+        return f"Review trade-level counterfactual candidate for {group or '-'} at spread_to_stop_ratio > {threshold}."
+    if status == "counterfactual_monitor_only":
+        return f"Collect more entry-shadow sample for {group or '-'} before promotion."
+    return "Entry-shadow sample exists, but no actionable trade-level microstructure candidate yet."
+
+
+def summarize_research(
+    rows: list[dict],
+    trade_date: str,
+    unique_entries: int,
+    *,
+    unique_entries_day: int,
+    source_entry_shadow_rows_day: int,
+    source_entry_shadow_rows_all: int,
+) -> dict:
     by_sample: dict[str, int] = {}
     by_status: dict[str, int] = {}
     for row in rows:
@@ -316,11 +337,14 @@ def summarize_research(rows: list[dict], trade_date: str, unique_entries: int) -
     top = top_candidate_row(rows)
     candidate_rows = sum(1 for row in rows if str(row.get("candidate_status") or "") == "candidate")
     monitor_rows = sum(1 for row in rows if str(row.get("candidate_status") or "") == "monitor_only")
-    return {
+    summary = {
         "trade_date": trade_date,
         "generated_at": now_str(),
         "rows": len(rows),
         "unique_entries": unique_entries,
+        "unique_entries_day": unique_entries_day,
+        "source_entry_shadow_rows_day": source_entry_shadow_rows_day,
+        "source_entry_shadow_rows_all": source_entry_shadow_rows_all,
         "latest_day_rows": sum(1 for row in rows if str(row.get("sample") or "") == "latest_day"),
         "all_sample_rows": sum(1 for row in rows if str(row.get("sample") or "") == "all_sample"),
         "candidate_count": candidate_rows,
@@ -338,6 +362,8 @@ def summarize_research(rows: list[dict], trade_date: str, unique_entries: int) -
         "by_sample": by_sample,
         "by_status": by_status,
     }
+    summary["next_action"] = next_action(summary)
+    return summary
 
 
 def markdown_table(rows: list[dict], columns: list[str], limit: int = 20) -> str:
@@ -360,11 +386,15 @@ def render_markdown(rows: list[dict], summary: dict) -> str:
             "",
             f"- trade_date: {summary['trade_date']}",
             f"- unique_entries: {summary['unique_entries']}",
+            f"- unique_entries_day: {summary['unique_entries_day']}",
+            f"- source_entry_shadow_rows_day: {summary['source_entry_shadow_rows_day']}",
+            f"- source_entry_shadow_rows_all: {summary['source_entry_shadow_rows_all']}",
             f"- rows: {summary['rows']}",
             f"- candidate_count: {summary['candidate_count']}",
             f"- monitor_only: {summary['monitor_only']}",
             f"- evaluation_state: {summary['evaluation_state']}",
             f"- collection_status: {summary['collection_status']}",
+            f"- next_action: {summary['next_action']}",
             f"- top_candidate_group: {summary['top_candidate_group']}",
             f"- top_candidate_threshold: {summary['top_candidate_threshold']}",
             f"- top_candidate_sample: {summary['top_candidate_sample']}",
@@ -416,7 +446,14 @@ def build_and_persist_microstructure_counterfactual(
         latest_day_rows=latest_day_entries,
         all_sample_rows=all_entries,
     )
-    summary = summarize_research(rows, trade_date, len(all_entries))
+    summary = summarize_research(
+        rows,
+        trade_date,
+        len(all_entries),
+        unique_entries_day=len(latest_day_entries),
+        source_entry_shadow_rows_day=len(filter_trade_date(all_entry_shadow_rows, trade_date)),
+        source_entry_shadow_rows_all=len(all_entry_shadow_rows),
+    )
     directories = [research_dir, latest_dir]
     if bundle_dir is not None:
         directories.append(bundle_dir)

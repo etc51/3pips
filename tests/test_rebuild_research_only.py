@@ -102,7 +102,11 @@ class RebuildResearchOnlyTest(unittest.TestCase):
             self.assertEqual(rebuilt_manifest["microstructure_gate_research"]["collection_status"], "awaiting_review_rows")
             self.assertEqual(rebuilt_manifest["microstructure_counterfactual"]["collection_status"], "awaiting_entry_shadow_rows")
             self.assertIn("- microstructure_gate_status: awaiting_review_rows", rebuild_summary)
+            self.assertIn("- microstructure_gate_source_rows_day: 0", rebuild_summary)
+            self.assertIn("- microstructure_gate_next_action: Collect wide-spread review snapshots before evaluating proxy microstructure gates.", rebuild_summary)
             self.assertIn("- microstructure_counterfactual_status: awaiting_entry_shadow_rows", rebuild_summary)
+            self.assertIn("- microstructure_counterfactual_source_rows_all: 0", rebuild_summary)
+            self.assertIn("- microstructure_counterfactual_next_action: Collect first entry-shadow rows before promoting trade-level microstructure decisions.", rebuild_summary)
             self.assertEqual(rebuilt_manifest_alias, rebuilt_manifest)
 
             research_dir = project_root / "reports" / "autonomy" / "research" / "2026-06-15"
@@ -137,9 +141,11 @@ class RebuildResearchOnlyTest(unittest.TestCase):
             micro_gate_summary = json.loads((latest_dir / "microstructure_gate_research_summary.json").read_text(encoding="utf-8"))
             self.assertEqual(micro_gate_summary["evaluation_state"], "review_event_proxy")
             self.assertEqual(micro_gate_summary["collection_status"], "awaiting_review_rows")
+            self.assertEqual(micro_gate_summary["source_review_rows_day"], 0)
             micro_counter_summary = json.loads((latest_dir / "microstructure_counterfactual_summary.json").read_text(encoding="utf-8"))
             self.assertEqual(micro_counter_summary["evaluation_state"], "trade_level_counterfactual")
             self.assertEqual(micro_counter_summary["collection_status"], "awaiting_entry_shadow_rows")
+            self.assertEqual(micro_counter_summary["source_entry_shadow_rows_all"], 0)
             entry_shadow_collection_summary = json.loads((latest_dir / "entry_shadow_collection_summary.json").read_text(encoding="utf-8"))
             self.assertEqual(entry_shadow_collection_summary["trade_date"], "2026-06-15")
             self.assertIn("status", entry_shadow_collection_summary)

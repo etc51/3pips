@@ -310,7 +310,22 @@ def collection_status(*, rows_count: int, backtest_candidates: int, monitor_only
     return "proxy_exploratory"
 
 
-def summarize_research(rows: list[dict], trade_date: str) -> dict:
+def next_action(summary: dict) -> str:
+    status = str(summary.get("collection_status") or "")
+    group = str(summary.get("top_candidate_group") or "")
+    threshold = summary.get("top_candidate_threshold")
+    if status == "awaiting_review_rows":
+        return "Collect wide-spread review snapshots before evaluating proxy microstructure gates."
+    if status == "proxy_backtest_candidate_ready":
+        return (
+            f"Backtest proxy microstructure gate for {group or '-'} at spread_to_stop_ratio > {threshold}."
+        )
+    if status == "proxy_monitor_only":
+        return f"Collect more review-event sample for {group or '-'} before promoting proxy gates."
+    return "No actionable proxy microstructure gate candidate yet."
+
+
+def summarize_research(rows: list[dict], trade_date: str, source_review_rows_day: int, source_review_rows_all: int) -> dict:
     by_sample: dict[str, int] = {}
     by_status: dict[str, int] = {}
     for row in rows:
@@ -321,10 +336,12 @@ def summarize_research(rows: list[dict], trade_date: str) -> dict:
     top = top_candidate_row(rows)
     backtest_candidates = sum(1 for row in rows if str(row.get("candidate_status") or "") == "backtest_candidate")
     monitor_rows = sum(1 for row in rows if str(row.get("candidate_status") or "") == "monitor_only")
-    return {
+    summary = {
         "trade_date": trade_date,
         "generated_at": now_str(),
         "rows": len(rows),
+        "source_review_rows_day": source_review_rows_day,
+        "source_review_rows_all": source_review_rows_all,
         "latest_day_rows": sum(1 for row in rows if str(row.get("sample") or "") == "latest_day"),
         "all_sample_rows": sum(1 for row in rows if str(row.get("sample") or "") == "all_sample"),
         "backtest_candidates": backtest_candidates,
@@ -342,6 +359,8 @@ def summarize_research(rows: list[dict], trade_date: str) -> dict:
         "by_sample": by_sample,
         "by_status": by_status,
     }
+    summary["next_action"] = next_action(summary)
+    return summary
 
 
 def render_markdown(rows: list[dict], summary: dict) -> str:
@@ -351,12 +370,15 @@ def render_markdown(rows: list[dict], summary: dict) -> str:
             "",
             f"- trade_date: {summary['trade_date']}",
             f"- rows: {summary['rows']}",
+            f"- source_review_rows_day: {summary['source_review_rows_day']}",
+            f"- source_review_rows_all: {summary['source_review_rows_all']}",
             f"- latest_day_rows: {summary['latest_day_rows']}",
             f"- all_sample_rows: {summary['all_sample_rows']}",
             f"- backtest_candidates: {summary['backtest_candidates']}",
             f"- monitor_only: {summary['monitor_only']}",
             f"- evaluation_state: {summary['evaluation_state']}",
             f"- collection_status: {summary['collection_status']}",
+            f"- next_action: {summary['next_action']}",
             f"- top_candidate_group: {summary['top_candidate_group']}",
             f"- top_candidate_threshold: {summary['top_candidate_threshold']}",
             f"- top_candidate_sample: {summary['top_candidate_sample']}",
@@ -417,7 +439,12 @@ def build_and_persist_microstructure_gate_research(
         latest_day_trade_metrics_by_group=latest_day_trade_metrics_by_group,
         all_sample_trade_metrics_by_group=all_sample_trade_metrics_by_group,
     )
-    summary = summarize_research(rows, trade_date)
+    summary = summarize_research(
+        rows,
+        trade_date,
+        source_review_rows_day=len(latest_day_rows),
+        source_review_rows_all=len(all_wide_spread_rows),
+    )
     directories = [research_dir, latest_dir]
     if bundle_dir is not None:
         directories.append(bundle_dir)

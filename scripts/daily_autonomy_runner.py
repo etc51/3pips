@@ -1782,12 +1782,15 @@ def build_nightly_cycle_status(
                 "status": "ok" if micro_gate_generated else "not_generated",
                 "generated": micro_gate_generated,
                 "rows": safe_int(micro_gate.get("rows")),
+                "source_review_rows_day": safe_int(micro_gate.get("source_review_rows_day")),
+                "source_review_rows_all": safe_int(micro_gate.get("source_review_rows_all")),
                 "latest_day_rows": safe_int(micro_gate.get("latest_day_rows")),
                 "all_sample_rows": safe_int(micro_gate.get("all_sample_rows")),
                 "backtest_candidates": safe_int(micro_gate.get("backtest_candidates")),
                 "monitor_only": safe_int(micro_gate.get("monitor_only")),
                 "collection_status": str(micro_gate.get("collection_status") or ("ok" if micro_gate_generated else "not_generated")),
                 "evaluation_state": str(micro_gate.get("evaluation_state") or ""),
+                "next_action": str(micro_gate.get("next_action") or ""),
                 "top_candidate_group": str(micro_gate.get("top_candidate_group") or ""),
                 "top_candidate_status": str(micro_gate.get("top_candidate_status") or ""),
             },
@@ -1795,11 +1798,15 @@ def build_nightly_cycle_status(
                 "status": "ok" if micro_counter_generated else "not_generated",
                 "generated": micro_counter_generated,
                 "rows": safe_int(micro_counter.get("rows")),
+                "source_entry_shadow_rows_day": safe_int(micro_counter.get("source_entry_shadow_rows_day")),
+                "source_entry_shadow_rows_all": safe_int(micro_counter.get("source_entry_shadow_rows_all")),
+                "unique_entries_day": safe_int(micro_counter.get("unique_entries_day")),
                 "unique_entries": safe_int(micro_counter.get("unique_entries")),
                 "candidate_count": safe_int(micro_counter.get("candidate_count")),
                 "monitor_only": safe_int(micro_counter.get("monitor_only")),
                 "collection_status": str(micro_counter.get("collection_status") or ("ok" if micro_counter_generated else "not_generated")),
                 "evaluation_state": str(micro_counter.get("evaluation_state") or ""),
+                "next_action": str(micro_counter.get("next_action") or ""),
                 "top_candidate_group": str(micro_counter.get("top_candidate_group") or ""),
                 "top_candidate_status": str(micro_counter.get("top_candidate_status") or ""),
             },
@@ -1831,6 +1838,13 @@ def build_nightly_cycle_status(
 
 def metrics_map(rows: list[dict], key_fn) -> dict[str, dict]:
     return {str(row.get("group") or ""): row for row in grouped_metrics(rows, key_fn)}
+
+
+def preferred_microstructure_next_action(micro_gate_summary: dict, micro_counter_summary: dict) -> str:
+    counter_status = str(micro_counter_summary.get("collection_status") or "")
+    if counter_status and counter_status != "awaiting_entry_shadow_rows":
+        return str(micro_counter_summary.get("next_action") or "")
+    return str(micro_gate_summary.get("next_action") or micro_counter_summary.get("next_action") or "")
 
 
 def build_microstructure_summary(rows: list[dict], trade_metrics_by_group: dict[str, dict] | None = None) -> list[dict]:
@@ -4031,6 +4045,8 @@ def build_summary_markdown(
     best_research_consensus: list[dict],
     strategy_lab: list[dict],
     strategy_review: dict,
+    microstructure_gate_research: dict,
+    microstructure_counterfactual: dict,
     runtime_trade_model: dict,
 ) -> str:
     fee_model = runtime_trade_model.get("fee_model") if isinstance(runtime_trade_model.get("fee_model"), dict) else dict(DEFAULT_FEE_MODEL)
@@ -4061,6 +4077,13 @@ def build_summary_markdown(
         f"- entry_shadow_shadow_rows_all: {safe_int(strategy_review.get('shadow_rows_all'))}",
         f"- entry_shadow_candidate_count: {safe_int(strategy_review.get('candidate_count'))}",
         f"- entry_shadow_missing_files: {', '.join(strategy_review.get('missing_entry_files') or []) or 'none'}",
+        f"- microstructure_gate_status: {str(microstructure_gate_research.get('collection_status') or 'not_generated')}",
+        f"- microstructure_gate_source_rows_day: {safe_int(microstructure_gate_research.get('source_review_rows_day'))}",
+        f"- microstructure_gate_source_rows_all: {safe_int(microstructure_gate_research.get('source_review_rows_all'))}",
+        f"- microstructure_counterfactual_status: {str(microstructure_counterfactual.get('collection_status') or 'not_generated')}",
+        f"- microstructure_counterfactual_source_rows_day: {safe_int(microstructure_counterfactual.get('source_entry_shadow_rows_day'))}",
+        f"- microstructure_counterfactual_source_rows_all: {safe_int(microstructure_counterfactual.get('source_entry_shadow_rows_all'))}",
+        f"- microstructure_next_action: {preferred_microstructure_next_action(microstructure_gate_research, microstructure_counterfactual) or '-'}",
         "",
     ]
     entry_shadow_note = str(strategy_review.get("collection_note") or "")
@@ -4268,6 +4291,24 @@ def main() -> int:
         auto_policy=auto_policy,
     )
     restriction_rows = build_restriction_rows(auto_policy)
+    all_entry_shadow_rows = load_entry_shadow_rows(run_dir)
+    micro_gate_rows, micro_gate_summary = build_and_persist_microstructure_gate_research(
+        project_root=project_root,
+        trade_date=trade_date,
+        all_wide_spread_rows=all_wide_spread_rows,
+        all_trade_rows=all_rows,
+        research_dir=research_dir,
+        latest_dir=manifest_root,
+        bundle_dir=bundle_dir,
+    )
+    micro_counter_rows, micro_counter_summary = build_and_persist_microstructure_counterfactual(
+        project_root=project_root,
+        trade_date=trade_date,
+        all_entry_shadow_rows=all_entry_shadow_rows,
+        research_dir=research_dir,
+        latest_dir=manifest_root,
+        bundle_dir=bundle_dir,
+    )
 
     summary_md = build_summary_markdown(
         trade_date,
@@ -4294,6 +4335,8 @@ def main() -> int:
         scenario_consensus,
         strategy_lab,
         strategy_review,
+        micro_gate_summary,
+        micro_counter_summary,
         runtime_trade_model,
     )
     best_consensus_scenario = pick_best_consensus_scenario(scenario_consensus)
@@ -4345,7 +4388,6 @@ def main() -> int:
 
     runtime_dir = project_root / "reports" / "runtime"
     shadow_rows = filter_trade_date(load_shadow_trades(run_dir), trade_date)
-    all_entry_shadow_rows = load_entry_shadow_rows(run_dir)
     copy_bundle_outputs(
         bundle_dir,
         day_rows=day_rows,
@@ -4398,25 +4440,8 @@ def main() -> int:
     )
     manifest_payload["research_intervention_proposals"] = intervention_summary
     manifest_payload["research_intervention_proposals_top"] = intervention_rows[:10]
-    micro_gate_rows, micro_gate_summary = build_and_persist_microstructure_gate_research(
-        project_root=project_root,
-        trade_date=trade_date,
-        all_wide_spread_rows=all_wide_spread_rows,
-        all_trade_rows=all_rows,
-        research_dir=research_dir,
-        latest_dir=manifest_root,
-        bundle_dir=bundle_dir,
-    )
     manifest_payload["microstructure_gate_research"] = micro_gate_summary
     manifest_payload["microstructure_gate_research_top"] = micro_gate_rows[:10]
-    micro_counter_rows, micro_counter_summary = build_and_persist_microstructure_counterfactual(
-        project_root=project_root,
-        trade_date=trade_date,
-        all_entry_shadow_rows=all_entry_shadow_rows,
-        research_dir=research_dir,
-        latest_dir=manifest_root,
-        bundle_dir=bundle_dir,
-    )
     manifest_payload["microstructure_counterfactual"] = micro_counter_summary
     manifest_payload["microstructure_counterfactual_top"] = micro_counter_rows[:10]
     entry_shadow_collection_rows, entry_shadow_collection_summary = build_and_persist_entry_shadow_collection(

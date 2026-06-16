@@ -111,6 +111,9 @@ class ResearchMicrostructureGateTest(unittest.TestCase):
             self.assertGreater(summary["backtest_candidates"], 0)
             self.assertEqual(summary["evaluation_state"], "review_event_proxy")
             self.assertEqual(summary["collection_status"], "proxy_backtest_candidate_ready")
+            self.assertEqual(summary["source_review_rows_day"], len(wide_rows))
+            self.assertEqual(summary["source_review_rows_all"], len(wide_rows))
+            self.assertIn("Backtest proxy microstructure gate", summary["next_action"])
             self.assertTrue((research_dir / "microstructure_gate_research.csv").exists())
             self.assertTrue((latest_dir / "microstructure_gate_research_summary.json").exists())
 
@@ -133,6 +136,8 @@ class ResearchMicrostructureGateTest(unittest.TestCase):
             self.assertEqual(summary_payload["top_candidate_threshold"], 0.75)
             self.assertEqual(summary_payload["top_candidate_status"], "backtest_candidate")
             self.assertEqual(summary_payload["collection_status"], "proxy_backtest_candidate_ready")
+            self.assertEqual(summary_payload["source_review_rows_day"], len(wide_rows))
+            self.assertIn("Backtest proxy microstructure gate", summary_payload["next_action"])
 
     def test_summary_prefers_actionable_all_sample_candidate_over_latest_day_monitor_row(self) -> None:
         rows = [
@@ -151,7 +156,7 @@ class ResearchMicrostructureGateTest(unittest.TestCase):
                 "experiment_score": 88.0,
             },
         ]
-        summary = rmg.summarize_research(rows, "2026-06-15")
+        summary = rmg.summarize_research(rows, "2026-06-15", source_review_rows_day=1, source_review_rows_all=2)
         self.assertEqual(summary["top_candidate_group"], "TAIL_RESEARCH/AGGRESSIVE::MM")
         self.assertEqual(summary["top_candidate_threshold"], 0.75)
         self.assertEqual(summary["top_candidate_sample"], "all_sample")

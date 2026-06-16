@@ -54,22 +54,29 @@ class DailyAutonomyCycleStatusTest(unittest.TestCase):
                 },
                 microstructure_gate_research={
                     "rows": 12,
+                    "source_review_rows_day": 240,
+                    "source_review_rows_all": 480,
                     "latest_day_rows": 6,
                     "all_sample_rows": 6,
                     "backtest_candidates": 2,
                     "monitor_only": 3,
                     "collection_status": "proxy_backtest_candidate_ready",
                     "evaluation_state": "review_event_proxy",
+                    "next_action": "Backtest proxy microstructure gate for TAIL_RESEARCH/AGGRESSIVE::MM at spread_to_stop_ratio > 0.75.",
                     "top_candidate_group": "TAIL_RESEARCH/AGGRESSIVE::MM",
                     "top_candidate_status": "backtest_candidate",
                 },
                 microstructure_counterfactual={
                     "rows": 0,
+                    "source_entry_shadow_rows_day": 0,
+                    "source_entry_shadow_rows_all": 0,
+                    "unique_entries_day": 0,
                     "unique_entries": 0,
                     "candidate_count": 0,
                     "monitor_only": 0,
                     "collection_status": "awaiting_entry_shadow_rows",
                     "evaluation_state": "trade_level_counterfactual",
+                    "next_action": "Collect first entry-shadow rows before promoting trade-level microstructure decisions.",
                     "top_candidate_group": "",
                     "top_candidate_status": "",
                 },
@@ -129,13 +136,20 @@ class DailyAutonomyCycleStatusTest(unittest.TestCase):
         self.assertEqual(stages["microstructure_gate_research"]["status"], "ok")
         self.assertTrue(stages["microstructure_gate_research"]["generated"])
         self.assertEqual(stages["microstructure_gate_research"]["collection_status"], "proxy_backtest_candidate_ready")
+        self.assertEqual(stages["microstructure_gate_research"]["source_review_rows_day"], 240)
+        self.assertEqual(stages["microstructure_gate_research"]["source_review_rows_all"], 480)
         self.assertEqual(stages["microstructure_gate_research"]["backtest_candidates"], 2)
+        self.assertIn("Backtest proxy microstructure gate", stages["microstructure_gate_research"]["next_action"])
         self.assertEqual(stages["microstructure_gate_research"]["top_candidate_status"], "backtest_candidate")
         self.assertEqual(stages["microstructure_counterfactual"]["status"], "ok")
         self.assertTrue(stages["microstructure_counterfactual"]["generated"])
         self.assertEqual(stages["microstructure_counterfactual"]["collection_status"], "awaiting_entry_shadow_rows")
+        self.assertEqual(stages["microstructure_counterfactual"]["source_entry_shadow_rows_day"], 0)
+        self.assertEqual(stages["microstructure_counterfactual"]["source_entry_shadow_rows_all"], 0)
+        self.assertEqual(stages["microstructure_counterfactual"]["unique_entries_day"], 0)
         self.assertEqual(stages["microstructure_counterfactual"]["unique_entries"], 0)
         self.assertEqual(stages["microstructure_counterfactual"]["candidate_count"], 0)
+        self.assertIn("Collect first entry-shadow rows", stages["microstructure_counterfactual"]["next_action"])
         self.assertFalse(stages["summary"]["archive_ready"])
         self.assertEqual(stages["summary"]["archive_path"], "")
         self.assertEqual(stages["email"]["status"], "disabled_missing_smtp")
