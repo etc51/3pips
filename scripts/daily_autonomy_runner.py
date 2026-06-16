@@ -61,6 +61,7 @@ from daily_autonomy_outputs import (  # noqa: E402
     write_research_outputs,
 )
 from paper_candidate_shortlist import build_and_persist_paper_candidate_shortlist  # noqa: E402
+from research_intervention_proposals import build_and_persist_research_intervention_proposals  # noqa: E402
 from research_strategy_targets import build_and_persist_research_strategy_targets  # noqa: E402
 from research_strategy_registry import build_and_persist_research_strategy_registry  # noqa: E402
 
@@ -1510,6 +1511,7 @@ def build_nightly_cycle_status(
     email_to: str,
     candidate_gate: dict | None = None,
     strategy_review: dict | None = None,
+    intervention_proposals: dict | None = None,
 ) -> dict:
     active = auto_policy.get("active") if isinstance(auto_policy.get("active"), dict) else {}
     email_settings = smtp_settings(default_recipient=email_to)
@@ -1520,6 +1522,8 @@ def build_nightly_cycle_status(
     )
     review = strategy_review if isinstance(strategy_review, dict) else {}
     review_generated = bool(review.get("generated"))
+    proposals = intervention_proposals if isinstance(intervention_proposals, dict) else {}
+    proposals_generated = bool(proposals.get("generated"))
     return {
         "trade_date": trade_date,
         "generated_at": now_str(),
@@ -1551,6 +1555,13 @@ def build_nightly_cycle_status(
                 "generated": review_generated,
                 "summary_path": str(review.get("summary_path") or ""),
                 "artifacts": list(review.get("artifacts") or []),
+            },
+            "intervention_proposals": {
+                "status": "ok" if proposals_generated else "not_generated",
+                "generated": proposals_generated,
+                "rows": safe_int(proposals.get("rows")),
+                "summary_path": str(proposals.get("summary_path") or ""),
+                "artifacts": list(proposals.get("artifacts") or []),
             },
             "restrictions": {
                 "status": "ok",
@@ -4100,6 +4111,19 @@ def main() -> int:
         manifest_payload["strategy_review"] = strategy_review
         if isinstance(strategy_review.get("top_models"), list):
             manifest_payload["entry_shadow_top"] = strategy_review.get("top_models")[:10]
+    intervention_rows, intervention_summary = build_and_persist_research_intervention_proposals(
+        project_root=project_root,
+        trade_date=trade_date,
+        strategy_lab_rows=strategy_lab,
+        strategy_review=strategy_review,
+        research_day_rows=research_day,
+        research_all_rows=research_all,
+        research_dir=research_dir,
+        latest_dir=manifest_root,
+        bundle_dir=bundle_dir,
+    )
+    manifest_payload["research_intervention_proposals"] = intervention_summary
+    manifest_payload["research_intervention_proposals_top"] = intervention_rows[:10]
     manifest_payload["candidate_gate"] = candidate_gate.get("summary") if isinstance(candidate_gate.get("summary"), dict) else {}
     manifest_payload["promoted_runtime"] = summarize_promoted_runtime_policy_state(promoted_runtime_state)
     registry_rows, registry_summary = build_and_persist_research_strategy_registry(
@@ -4148,6 +4172,7 @@ def main() -> int:
         email_to=args.email_to,
         candidate_gate=candidate_gate,
         strategy_review=strategy_review,
+        intervention_proposals=intervention_summary,
     )
     persist_nightly_cycle_status(
         nightly_cycle_status,

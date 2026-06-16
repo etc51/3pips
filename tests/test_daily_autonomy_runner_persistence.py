@@ -322,6 +322,8 @@ class DailyAutonomyRunnerPersistenceTest(unittest.TestCase):
             latest_shortlist_summary_path = latest_root / "paper_candidate_shortlist_summary.json"
             latest_targets_path = latest_root / "research_strategy_targets.csv"
             latest_targets_summary_path = latest_root / "research_strategy_targets_summary.json"
+            latest_interventions_path = latest_root / "research_intervention_proposals.csv"
+            latest_interventions_summary_path = latest_root / "research_intervention_proposals_summary.json"
 
             self.assertTrue(analysis_status_path.exists(), analysis_status_path)
             self.assertTrue(bundle_status_path.exists(), bundle_status_path)
@@ -334,6 +336,8 @@ class DailyAutonomyRunnerPersistenceTest(unittest.TestCase):
             self.assertTrue(latest_shortlist_summary_path.exists(), latest_shortlist_summary_path)
             self.assertTrue(latest_targets_path.exists(), latest_targets_path)
             self.assertTrue(latest_targets_summary_path.exists(), latest_targets_summary_path)
+            self.assertTrue(latest_interventions_path.exists(), latest_interventions_path)
+            self.assertTrue(latest_interventions_summary_path.exists(), latest_interventions_summary_path)
             self.assertTrue(state_path.exists(), state_path)
 
             analysis_status = json.loads(analysis_status_path.read_text(encoding="utf-8"))
@@ -344,6 +348,7 @@ class DailyAutonomyRunnerPersistenceTest(unittest.TestCase):
             latest_registry_summary = json.loads(latest_registry_summary_path.read_text(encoding="utf-8"))
             latest_shortlist_summary = json.loads(latest_shortlist_summary_path.read_text(encoding="utf-8"))
             latest_targets_summary = json.loads(latest_targets_summary_path.read_text(encoding="utf-8"))
+            latest_interventions_summary = json.loads(latest_interventions_summary_path.read_text(encoding="utf-8"))
             state_payload = json.loads(state_path.read_text(encoding="utf-8"))
 
             self.assertEqual(analysis_status, bundle_status)
@@ -354,6 +359,8 @@ class DailyAutonomyRunnerPersistenceTest(unittest.TestCase):
             self.assertTrue(latest_status["stages"]["strategy_review"]["generated"])
             self.assertEqual(latest_status["stages"]["strategy_review"]["summary_path"], strategy_review_summary)
             self.assertEqual(latest_status["stages"]["strategy_review"]["artifacts"], [strategy_review_summary, strategy_review_candidates])
+            self.assertEqual(latest_status["stages"]["intervention_proposals"]["status"], "ok")
+            self.assertTrue(latest_status["stages"]["intervention_proposals"]["generated"])
             self.assertTrue(latest_status["stages"]["summary"]["archive_ready"])
             self.assertEqual(latest_status["stages"]["email"]["status"], "sent")
             self.assertTrue(latest_status["stages"]["email"]["sent"])
@@ -371,9 +378,14 @@ class DailyAutonomyRunnerPersistenceTest(unittest.TestCase):
             self.assertIn("paper_candidate_shortlist_top", latest_manifest)
             self.assertIn("research_strategy_targets", latest_manifest)
             self.assertIn("research_strategy_targets_top", latest_manifest)
+            self.assertIn("research_intervention_proposals", latest_manifest)
+            self.assertIn("research_intervention_proposals_top", latest_manifest)
             self.assertEqual(latest_registry_summary["trade_date"], trade_date)
             self.assertEqual(latest_shortlist_summary["trade_date"], trade_date)
             self.assertEqual(latest_targets_summary["trade_date"], trade_date)
+            self.assertEqual(latest_interventions_summary["trade_date"], trade_date)
+            self.assertEqual(latest_interventions_summary["runtime_mutation_allowed"], 0)
+            self.assertEqual(latest_interventions_summary["live_mode_allowed"], 0)
 
 
 if __name__ == "__main__":

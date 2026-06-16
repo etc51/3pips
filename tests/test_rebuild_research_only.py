@@ -85,15 +85,20 @@ class RebuildResearchOnlyTest(unittest.TestCase):
                 latest_auto_policy,
             )
             rebuilt_manifest = json.loads((latest_dir / "latest_daily_manifest.json").read_text(encoding="utf-8"))
+            rebuilt_manifest_alias = json.loads((latest_dir / "latest_manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(rebuilt_manifest["candidate_gate"], latest_manifest["candidate_gate"])
             self.assertEqual(rebuilt_manifest["research_rebuild"]["mode"], "research_only")
             self.assertEqual(rebuilt_manifest["trade_date"], "2026-06-15")
+            self.assertIn("research_intervention_proposals", rebuilt_manifest)
+            self.assertEqual(rebuilt_manifest_alias, rebuilt_manifest)
 
             research_dir = project_root / "reports" / "autonomy" / "research" / "2026-06-15"
             self.assertTrue((research_dir / "policy_sweep_latest_day.csv").exists())
             self.assertTrue((latest_dir / "research_strategy_registry.csv").exists())
             self.assertTrue((latest_dir / "paper_candidate_shortlist.csv").exists())
             self.assertTrue((latest_dir / "research_strategy_targets.csv").exists())
+            self.assertTrue((latest_dir / "research_intervention_proposals.csv").exists())
+            self.assertTrue((latest_dir / "research_intervention_proposals_summary.json").exists())
 
             with (research_dir / "policy_sweep_latest_day.csv").open("r", encoding="utf-8-sig", newline="") as handle:
                 rows = list(csv.DictReader(handle))
@@ -104,6 +109,10 @@ class RebuildResearchOnlyTest(unittest.TestCase):
             with (latest_dir / "research_strategy_registry.csv").open("r", encoding="utf-8-sig", newline="") as handle:
                 registry_rows = list(csv.DictReader(handle))
             self.assertIn("sample_avg_win_rub", registry_rows[0])
+
+            intervention_summary = json.loads((latest_dir / "research_intervention_proposals_summary.json").read_text(encoding="utf-8"))
+            self.assertEqual(intervention_summary["runtime_mutation_allowed"], 0)
+            self.assertEqual(intervention_summary["live_mode_allowed"], 0)
 
 
 if __name__ == "__main__":

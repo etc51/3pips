@@ -13,6 +13,7 @@ import daily_autonomy_runner as dar  # noqa: E402
 from autonomy_common import ensure_dir, now_str, write_json, write_text  # noqa: E402
 from daily_autonomy_outputs import write_research_outputs  # noqa: E402
 from paper_candidate_shortlist import build_and_persist_paper_candidate_shortlist  # noqa: E402
+from research_intervention_proposals import build_and_persist_research_intervention_proposals  # noqa: E402
 from research_strategy_registry import build_and_persist_research_strategy_registry  # noqa: E402
 from research_strategy_targets import build_and_persist_research_strategy_targets  # noqa: E402
 
@@ -44,6 +45,7 @@ def main() -> int:
     research_root = autonomy_root / "research"
     manifest_root = autonomy_root / "latest"
     latest_manifest_path = manifest_root / "latest_daily_manifest.json"
+    latest_manifest_alias_path = manifest_root / "latest_manifest.json"
     latest_auto_policy_path = manifest_root / "latest_auto_policy.json"
 
     ensure_dir(analysis_root)
@@ -145,6 +147,18 @@ def main() -> int:
         strategy_lab=strategy_lab,
         markdown_top=dar.markdown_top,
     )
+    strategy_review = dar.build_strategy_review(
+        trade_date=trade_date,
+        research_dir=research_dir,
+        run_dir=run_dir,
+        strategy_lab=strategy_lab,
+        research_day=research_day,
+        research_all=research_all,
+        research_consensus=scenario_consensus,
+        auto_policy=current_auto_policy,
+        restriction_rows=[],
+        runtime_trade_model=runtime_trade_model,
+    )
 
     best_consensus_scenario = dar.pick_best_consensus_scenario(scenario_consensus)
     manifest_payload = dar.build_manifest_payload(
@@ -171,6 +185,10 @@ def main() -> int:
         roll_watch=roll_watch,
         auto_policy=current_auto_policy,
     )
+    if strategy_review:
+        manifest_payload["strategy_review"] = strategy_review
+        if isinstance(strategy_review.get("top_models"), list):
+            manifest_payload["entry_shadow_top"] = strategy_review.get("top_models")[:10]
     manifest_payload["research_rebuild"] = {
         "trade_date": trade_date,
         "generated_at": now_str(),
@@ -199,6 +217,19 @@ def main() -> int:
     manifest_payload["paper_candidate_shortlist"] = shortlist_summary
     manifest_payload["paper_candidate_shortlist_top"] = shortlist_rows[:10]
 
+    intervention_rows, intervention_summary = build_and_persist_research_intervention_proposals(
+        project_root=project_root,
+        trade_date=trade_date,
+        strategy_lab_rows=strategy_lab,
+        strategy_review=strategy_review,
+        research_day_rows=research_day,
+        research_all_rows=research_all,
+        research_dir=research_dir,
+        latest_dir=manifest_root,
+    )
+    manifest_payload["research_intervention_proposals"] = intervention_summary
+    manifest_payload["research_intervention_proposals_top"] = intervention_rows[:10]
+
     target_rows, target_summary = build_and_persist_research_strategy_targets(
         project_root=project_root,
         trade_date=trade_date,
@@ -212,6 +243,7 @@ def main() -> int:
     existing_manifest = dar.load_json(latest_manifest_path)
     latest_manifest = merge_latest_manifest(existing_manifest, manifest_payload)
     write_json(latest_manifest_path, latest_manifest)
+    write_json(latest_manifest_alias_path, latest_manifest)
     write_text(
         manifest_root / "latest_research_rebuild.md",
         "\n".join(

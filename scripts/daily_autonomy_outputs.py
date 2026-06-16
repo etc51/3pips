@@ -205,6 +205,9 @@ def copy_bundle_outputs(
     for path in [
         research_dir / "strategy_review_summary.md",
         research_dir / "strategy_review_candidates.csv",
+        research_dir / "research_intervention_proposals.md",
+        research_dir / "research_intervention_proposals.csv",
+        research_dir / "research_intervention_proposals_summary.json",
         analysis_dir / "day_history.csv",
         analysis_dir / "by_portfolio.csv",
         analysis_dir / "microstructure_summary.csv",

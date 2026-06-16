@@ -35,6 +35,15 @@ class DailyAutonomyCycleStatusTest(unittest.TestCase):
                         r"reports\autonomy\research\2026-06-15\strategy_review_candidates.csv",
                     ],
                 },
+                intervention_proposals={
+                    "generated": True,
+                    "rows": 2,
+                    "summary_path": r"reports\autonomy\research\2026-06-15\research_intervention_proposals.md",
+                    "artifacts": [
+                        r"reports\autonomy\research\2026-06-15\research_intervention_proposals.md",
+                        r"reports\autonomy\research\2026-06-15\research_intervention_proposals.csv",
+                    ],
+                },
                 restriction_rows=[{"restriction_type": "entry_no_new_after"}],
                 auto_policy={"active": {"entry_no_new_after": "17:45"}},
                 email_to="etc00051@yandex.ru",
@@ -49,6 +58,7 @@ class DailyAutonomyCycleStatusTest(unittest.TestCase):
                 "optimizer",
                 "strategy_lab",
                 "strategy_review",
+                "intervention_proposals",
                 "restrictions",
                 "candidate_gate",
                 "summary",
@@ -69,6 +79,13 @@ class DailyAutonomyCycleStatusTest(unittest.TestCase):
                 r"reports\autonomy\research\2026-06-15\strategy_review_summary.md",
                 r"reports\autonomy\research\2026-06-15\strategy_review_candidates.csv",
             ],
+        )
+        self.assertEqual(stages["intervention_proposals"]["status"], "ok")
+        self.assertTrue(stages["intervention_proposals"]["generated"])
+        self.assertEqual(stages["intervention_proposals"]["rows"], 2)
+        self.assertEqual(
+            stages["intervention_proposals"]["summary_path"],
+            r"reports\autonomy\research\2026-06-15\research_intervention_proposals.md",
         )
         self.assertFalse(stages["summary"]["archive_ready"])
         self.assertEqual(stages["summary"]["archive_path"], "")
