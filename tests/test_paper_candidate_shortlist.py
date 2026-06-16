@@ -62,8 +62,14 @@ class PaperCandidateShortlistTest(unittest.TestCase):
                         "sample_trades": 33,
                         "sample_win_rate_pct": 81.82,
                         "sample_expectancy_rub": 427.82,
+                        "sample_avg_win_rub": 980.74,
+                        "sample_avg_loss_rub": -2787.31,
+                        "sample_top3_loss_rub": 8361.93,
                         "sample_profit_factor": 2.7757,
                         "latest_day_expectancy_rub": 165.96,
+                        "latest_day_avg_win_rub": 812.25,
+                        "latest_day_avg_loss_rub": -1104.18,
+                        "latest_day_top3_loss_rub": 2208.36,
                         "latest_day_profit_factor": 1.6629,
                         "required_features": "trade csv",
                         "recommended_use": "candidate_runtime_tune",
@@ -103,6 +109,7 @@ class PaperCandidateShortlistTest(unittest.TestCase):
             self.assertEqual(rows[0]["shortlist_status"], "ready_now")
             self.assertEqual(rows[0]["sample_expectancy_rub"], 427.82)
             self.assertEqual(rows[0]["sample_profit_factor"], 2.7757)
+            self.assertEqual(rows[0]["sample_top3_loss_rub"], 8361.93)
             self.assertEqual(rows[1]["runtime_ready"], "False")
             self.assertEqual(rows[1]["shortlist_status"], "review_only")
             self.assertEqual(rows[1]["blocking_reason"], "candidate_runtime_needs_manual_release")
@@ -247,8 +254,14 @@ class PaperCandidateShortlistTest(unittest.TestCase):
                         "sample_trades": 24,
                         "sample_win_rate_pct": 41.67,
                         "sample_expectancy_rub": -77.11,
+                        "sample_avg_win_rub": 121.03,
+                        "sample_avg_loss_rub": -216.58,
+                        "sample_top3_loss_rub": 1406.72,
                         "sample_profit_factor": 0.3953,
                         "latest_day_expectancy_rub": -59.02,
+                        "latest_day_avg_win_rub": 98.4,
+                        "latest_day_avg_loss_rub": -188.56,
+                        "latest_day_top3_loss_rub": 565.68,
                         "latest_day_profit_factor": 0.4823,
                         "required_features": "trade csv",
                         "recommended_use": "candidate_runtime_tune",
@@ -288,17 +301,54 @@ class PaperCandidateShortlistTest(unittest.TestCase):
             base,
             sample_trades=6,
             sample_expectancy_rub=-25.0,
+            sample_avg_win_rub=150.0,
+            sample_avg_loss_rub=-210.0,
+            sample_top3_loss_rub=950.0,
             sample_profit_factor=0.85,
             latest_day_expectancy_rub=-10.0,
+            latest_day_avg_loss_rub=-190.0,
+            latest_day_top3_loss_rub=620.0,
             latest_day_profit_factor=0.9,
         )
         strong = dict(
             base,
             sample_trades=33,
             sample_expectancy_rub=427.82,
+            sample_avg_win_rub=980.74,
+            sample_avg_loss_rub=-2787.31,
+            sample_top3_loss_rub=8361.93,
             sample_profit_factor=2.7757,
             latest_day_expectancy_rub=165.96,
+            latest_day_avg_loss_rub=-1104.18,
+            latest_day_top3_loss_rub=2208.36,
             latest_day_profit_factor=1.6629,
         )
 
         self.assertGreater(pcs.compute_stability_score(strong), pcs.compute_stability_score(weak))
+
+    def test_compute_stability_score_penalizes_tail_heavy_candidates(self) -> None:
+        base = {
+            "beat_base_pct": 55.0,
+            "stability_days": 2,
+            "positive_days": 1,
+            "delta_total_rub": 900.0,
+            "median_daily_net_rub": 650.0,
+            "latest_day_delta_rub": 420.0,
+            "worst_day_rub": -850.0,
+            "autopromote_ready": "True",
+            "status": "paper_candidate",
+            "paper_route": "paper_autopolicy",
+            "priority": 70,
+            "sample_trades": 24,
+            "sample_expectancy_rub": 120.0,
+            "sample_avg_win_rub": 420.0,
+            "sample_avg_loss_rub": -280.0,
+            "sample_profit_factor": 1.35,
+            "latest_day_expectancy_rub": 90.0,
+            "latest_day_avg_loss_rub": -260.0,
+            "latest_day_profit_factor": 1.2,
+        }
+        balanced = dict(base, sample_top3_loss_rub=840.0, latest_day_top3_loss_rub=780.0)
+        tail_heavy = dict(base, sample_top3_loss_rub=2100.0, latest_day_top3_loss_rub=1560.0)
+
+        self.assertGreater(pcs.compute_stability_score(balanced), pcs.compute_stability_score(tail_heavy))

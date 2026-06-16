@@ -291,6 +291,9 @@ class ResearchStrategyRegistryTest(unittest.TestCase):
                         "win_rate_pct": 83.33,
                         "net_rub": 3876.48,
                         "expectancy_rub": 161.52,
+                        "avg_win_rub": 245.61,
+                        "avg_loss_rub": -259.93,
+                        "top3_loss_rub": 713.25,
                         "profit_factor": 1.9597,
                     }
                 ],
@@ -306,6 +309,9 @@ class ResearchStrategyRegistryTest(unittest.TestCase):
                         "win_rate_pct": 90.0,
                         "net_rub": 4989.81,
                         "expectancy_rub": 249.49,
+                        "avg_win_rub": 301.17,
+                        "avg_loss_rub": -216.59,
+                        "top3_loss_rub": 433.18,
                         "profit_factor": 3.7361,
                     }
                 ],
@@ -326,9 +332,15 @@ class ResearchStrategyRegistryTest(unittest.TestCase):
             self.assertEqual(rows[0]["sample_win_rate_pct"], 83.33)
             self.assertEqual(rows[0]["sample_net_rub"], 3876.48)
             self.assertEqual(rows[0]["sample_expectancy_rub"], 161.52)
+            self.assertEqual(rows[0]["sample_avg_win_rub"], 245.61)
+            self.assertEqual(rows[0]["sample_avg_loss_rub"], -259.93)
+            self.assertEqual(rows[0]["sample_top3_loss_rub"], 713.25)
             self.assertEqual(rows[0]["sample_profit_factor"], 1.9597)
             self.assertEqual(rows[0]["latest_day_trades"], 20)
             self.assertEqual(rows[0]["latest_day_expectancy_rub"], 249.49)
+            self.assertEqual(rows[0]["latest_day_avg_win_rub"], 301.17)
+            self.assertEqual(rows[0]["latest_day_avg_loss_rub"], -216.59)
+            self.assertEqual(rows[0]["latest_day_top3_loss_rub"], 433.18)
             self.assertEqual(rows[0]["latest_day_profit_factor"], 3.7361)
 
     def test_build_and_persist_falls_back_to_manifest_strategy_lab_top_when_csv_unavailable(self) -> None:

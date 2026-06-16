@@ -106,9 +106,19 @@ def write_research_outputs(
     write_csv_rows(research_dir / "policy_sweep_consensus.csv", scenario_consensus)
     write_text(
         research_dir / "research_summary.md",
-        markdown_top("Research Top: Latest Day", research_day, ["scenario", "trades", "win_rate_pct", "net_rub", "expectancy_rub", "note"], limit=15)
+        markdown_top(
+            "Research Top: Latest Day",
+            research_day,
+            ["scenario", "trades", "expectancy_rub", "profit_factor", "avg_win_rub", "avg_loss_rub", "top3_loss_rub", "note"],
+            limit=15,
+        )
         + "\n"
-        + markdown_top("Research Top: All Sample", research_all, ["scenario", "trades", "win_rate_pct", "net_rub", "expectancy_rub", "note"], limit=15)
+        + markdown_top(
+            "Research Top: All Sample",
+            research_all,
+            ["scenario", "trades", "expectancy_rub", "profit_factor", "avg_win_rub", "avg_loss_rub", "top3_loss_rub", "note"],
+            limit=15,
+        )
         + "\n"
         + markdown_top("Research Top: Consensus", scenario_consensus, ["scenario", "days", "beat_base_days", "delta_total_rub", "median_daily_net_rub", "worst_day_rub", "note"], limit=15),
     )
@@ -118,7 +128,20 @@ def write_research_outputs(
         markdown_top(
             "Optimizer Candidates",
             optimizer_candidates,
-            ["source", "scenario", "candidate_type", "recommended_use", "net_rub", "expectancy_rub", "delta_total_rub", "beat_base_days", "note"],
+            [
+                "source",
+                "scenario",
+                "candidate_type",
+                "recommended_use",
+                "expectancy_rub",
+                "profit_factor",
+                "avg_win_rub",
+                "avg_loss_rub",
+                "top3_loss_rub",
+                "delta_total_rub",
+                "beat_base_days",
+                "note",
+            ],
             limit=20,
         ),
     )

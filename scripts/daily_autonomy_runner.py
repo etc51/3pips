@@ -430,8 +430,11 @@ def evaluate_scenario(
     adjusted_nets = [scenario_adjusted_net(row, cap_rub, profiles) for row in selected]
     wins = [value for value in adjusted_nets if value > 0]
     losses = [value for value in adjusted_nets if value < 0]
+    sorted_losses = sorted(losses)
     total = sum(adjusted_nets)
     count = len(selected)
+    gross_win = sum(wins)
+    gross_loss = abs(sum(sorted_losses))
     return {
         "scenario": name,
         "note": note,
@@ -441,7 +444,10 @@ def evaluate_scenario(
         "win_rate_pct": round((len(wins) / count * 100.0), 2) if count else 0.0,
         "net_rub": round(total, 2),
         "expectancy_rub": round(total / count, 2) if count else 0.0,
-        "profit_factor": round(sum(wins) / abs(sum(losses)), 4) if losses else None,
+        "avg_win_rub": round(gross_win / len(wins), 2) if wins else 0.0,
+        "avg_loss_rub": round(sum(sorted_losses) / len(sorted_losses), 2) if sorted_losses else 0.0,
+        "top3_loss_rub": round(abs(sum(sorted_losses[:3])), 2) if sorted_losses else 0.0,
+        "profit_factor": round(gross_win / gross_loss, 4) if gross_loss > 0 else None,
     }
 
 
@@ -1204,6 +1210,9 @@ def build_optimizer_candidates(
                 "win_rate_pct",
                 "net_rub",
                 "expectancy_rub",
+                "avg_win_rub",
+                "avg_loss_rub",
+                "top3_loss_rub",
                 "profit_factor",
                 "days",
                 "beat_base_days",

@@ -36,8 +36,14 @@ SHORTLIST_FIELDS = [
     "sample_trades",
     "sample_win_rate_pct",
     "sample_expectancy_rub",
+    "sample_avg_win_rub",
+    "sample_avg_loss_rub",
+    "sample_top3_loss_rub",
     "sample_profit_factor",
     "latest_day_expectancy_rub",
+    "latest_day_avg_win_rub",
+    "latest_day_avg_loss_rub",
+    "latest_day_top3_loss_rub",
     "latest_day_profit_factor",
     "selection_run_date",
     "selection_age_days",
@@ -133,8 +139,13 @@ def compute_stability_score(row: dict) -> float:
     test_max_drawdown = safe_float(row.get("test_max_drawdown"))
     sample_trades = max(safe_int(row.get("sample_trades")), 0)
     sample_expectancy_rub = safe_float(row.get("sample_expectancy_rub"))
+    sample_avg_win_rub = safe_float(row.get("sample_avg_win_rub"))
+    sample_avg_loss_rub = abs(safe_float(row.get("sample_avg_loss_rub")))
+    sample_top3_loss_rub = max(safe_float(row.get("sample_top3_loss_rub")), 0.0)
     sample_profit_factor = safe_float(row.get("sample_profit_factor"))
     latest_day_expectancy_rub = safe_float(row.get("latest_day_expectancy_rub"))
+    latest_day_avg_loss_rub = abs(safe_float(row.get("latest_day_avg_loss_rub")))
+    latest_day_top3_loss_rub = max(safe_float(row.get("latest_day_top3_loss_rub")), 0.0)
     latest_day_profit_factor = safe_float(row.get("latest_day_profit_factor"))
     priority = max(safe_int(row.get("priority")), 0)
 
@@ -151,6 +162,15 @@ def compute_stability_score(row: dict) -> float:
     score += 6.0 * clamp((sample_profit_factor - 1.0) / 1.5, -1.0, 1.0)
     score += 3.0 * clamp(latest_day_expectancy_rub / 250.0, -1.0, 1.0)
     score += 2.0 * clamp(latest_day_profit_factor - 1.0, -1.0, 1.0)
+    if sample_avg_win_rub > 0.0 and sample_avg_loss_rub > 0.0:
+        payout_ratio = sample_avg_win_rub / sample_avg_loss_rub
+        score += 4.0 * clamp((payout_ratio - 0.45) / 0.55, -1.0, 1.0)
+    if sample_top3_loss_rub > 0.0 and sample_avg_loss_rub > 0.0:
+        tail_ratio = sample_top3_loss_rub / max(sample_avg_loss_rub * 3.0, 1.0)
+        score -= 5.0 * clamp((tail_ratio - 1.0) / 1.5, 0.0, 1.0)
+    if latest_day_top3_loss_rub > 0.0 and latest_day_avg_loss_rub > 0.0:
+        latest_tail_ratio = latest_day_top3_loss_rub / max(latest_day_avg_loss_rub * 3.0, 1.0)
+        score -= 2.0 * clamp((latest_tail_ratio - 1.0) / 1.5, 0.0, 1.0)
     score -= 15.0 * clamp(max(0.0, -worst_day_rub) / 3000.0, 0.0, 1.0)
     score -= 10.0 * clamp(abs(min(test_max_drawdown, 0.0)) / 0.15, 0.0, 1.0)
     score += 5.0 if normalize_bool(row.get("autopromote_ready")) else 0.0
@@ -280,8 +300,14 @@ def registry_rows_to_shortlist(rows: list[dict], trade_date: str, contract_selec
                 "sample_trades": maybe_int(row.get("sample_trades")),
                 "sample_win_rate_pct": maybe_float(row.get("sample_win_rate_pct")),
                 "sample_expectancy_rub": maybe_float(row.get("sample_expectancy_rub")),
+                "sample_avg_win_rub": maybe_float(row.get("sample_avg_win_rub")),
+                "sample_avg_loss_rub": maybe_float(row.get("sample_avg_loss_rub")),
+                "sample_top3_loss_rub": maybe_float(row.get("sample_top3_loss_rub")),
                 "sample_profit_factor": maybe_float(row.get("sample_profit_factor")),
                 "latest_day_expectancy_rub": maybe_float(row.get("latest_day_expectancy_rub")),
+                "latest_day_avg_win_rub": maybe_float(row.get("latest_day_avg_win_rub")),
+                "latest_day_avg_loss_rub": maybe_float(row.get("latest_day_avg_loss_rub")),
+                "latest_day_top3_loss_rub": maybe_float(row.get("latest_day_top3_loss_rub")),
                 "latest_day_profit_factor": maybe_float(row.get("latest_day_profit_factor")),
                 "selection_run_date": row_contract_ctx["selection_run_date"],
                 "selection_age_days": row_contract_ctx["selection_age_days"],
@@ -383,6 +409,7 @@ def render_shortlist_markdown(rows: list[dict], summary: dict) -> str:
                     "stability_score",
                     "sample_expectancy_rub",
                     "sample_profit_factor",
+                    "sample_top3_loss_rub",
                     "target_contract",
                     "plus1_contract",
                 ],
