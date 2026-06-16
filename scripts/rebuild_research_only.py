@@ -291,6 +291,11 @@ def main() -> int:
                 f"- entry_shadow_shadow_rows_all: {dar.safe_int(strategy_review.get('shadow_rows_all'))}",
                 f"- entry_shadow_candidate_count: {dar.safe_int(strategy_review.get('candidate_count'))}",
                 f"- entry_shadow_missing_files: {', '.join(strategy_review.get('missing_entry_files') or []) or 'none'}",
+                f"- microstructure_gate_status: {str(micro_gate_summary.get('collection_status') or 'not_generated')}",
+                f"- microstructure_gate_backtest_candidates: {dar.safe_int(micro_gate_summary.get('backtest_candidates'))}",
+                f"- microstructure_counterfactual_status: {str(micro_counter_summary.get('collection_status') or 'not_generated')}",
+                f"- microstructure_counterfactual_unique_entries: {dar.safe_int(micro_counter_summary.get('unique_entries'))}",
+                f"- microstructure_counterfactual_candidates: {dar.safe_int(micro_counter_summary.get('candidate_count'))}",
             ]
         )
         + "\n",

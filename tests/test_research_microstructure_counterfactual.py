@@ -63,6 +63,7 @@ class ResearchMicrostructureCounterfactualTest(unittest.TestCase):
             self.assertTrue(counter_rows)
             self.assertEqual(summary["unique_entries"], 10)
             self.assertEqual(summary["evaluation_state"], "trade_level_counterfactual")
+            self.assertEqual(summary["collection_status"], "counterfactual_candidate_ready")
             self.assertEqual(summary["top_candidate_group"], "TAIL_RESEARCH/AGGRESSIVE::MM")
             self.assertEqual(summary["top_candidate_threshold"], 0.75)
             self.assertEqual(summary["top_candidate_sample"], "all_sample")
@@ -75,6 +76,7 @@ class ResearchMicrostructureCounterfactualTest(unittest.TestCase):
 
             latest_summary = json.loads((latest_dir / "microstructure_counterfactual_summary.json").read_text(encoding="utf-8"))
             self.assertEqual(latest_summary["top_candidate_status"], "candidate")
+            self.assertEqual(latest_summary["collection_status"], "counterfactual_candidate_ready")
             self.assertTrue((latest_dir / "microstructure_counterfactual.csv").exists())
             self.assertTrue((latest_dir / "microstructure_counterfactual.md").exists())
 

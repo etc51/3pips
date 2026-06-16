@@ -99,6 +99,10 @@ class RebuildResearchOnlyTest(unittest.TestCase):
             self.assertIn("- entry_shadow_collection_status: awaiting_first_close", rebuild_summary)
             self.assertIn("- entry_shadow_rows_all: 0", rebuild_summary)
             self.assertIn("- entry_shadow_missing_files: CLASSIC_CORE", rebuild_summary)
+            self.assertEqual(rebuilt_manifest["microstructure_gate_research"]["collection_status"], "awaiting_review_rows")
+            self.assertEqual(rebuilt_manifest["microstructure_counterfactual"]["collection_status"], "awaiting_entry_shadow_rows")
+            self.assertIn("- microstructure_gate_status: awaiting_review_rows", rebuild_summary)
+            self.assertIn("- microstructure_counterfactual_status: awaiting_entry_shadow_rows", rebuild_summary)
             self.assertEqual(rebuilt_manifest_alias, rebuilt_manifest)
 
             research_dir = project_root / "reports" / "autonomy" / "research" / "2026-06-15"
@@ -132,8 +136,10 @@ class RebuildResearchOnlyTest(unittest.TestCase):
             self.assertIn("filtered_low_evidence_rows", intervention_summary)
             micro_gate_summary = json.loads((latest_dir / "microstructure_gate_research_summary.json").read_text(encoding="utf-8"))
             self.assertEqual(micro_gate_summary["evaluation_state"], "review_event_proxy")
+            self.assertEqual(micro_gate_summary["collection_status"], "awaiting_review_rows")
             micro_counter_summary = json.loads((latest_dir / "microstructure_counterfactual_summary.json").read_text(encoding="utf-8"))
             self.assertEqual(micro_counter_summary["evaluation_state"], "trade_level_counterfactual")
+            self.assertEqual(micro_counter_summary["collection_status"], "awaiting_entry_shadow_rows")
             entry_shadow_collection_summary = json.loads((latest_dir / "entry_shadow_collection_summary.json").read_text(encoding="utf-8"))
             self.assertEqual(entry_shadow_collection_summary["trade_date"], "2026-06-15")
             self.assertIn("status", entry_shadow_collection_summary)

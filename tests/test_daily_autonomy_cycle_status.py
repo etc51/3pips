@@ -52,6 +52,27 @@ class DailyAutonomyCycleStatusTest(unittest.TestCase):
                         r"reports\autonomy\research\2026-06-15\research_intervention_proposals.csv",
                     ],
                 },
+                microstructure_gate_research={
+                    "rows": 12,
+                    "latest_day_rows": 6,
+                    "all_sample_rows": 6,
+                    "backtest_candidates": 2,
+                    "monitor_only": 3,
+                    "collection_status": "proxy_backtest_candidate_ready",
+                    "evaluation_state": "review_event_proxy",
+                    "top_candidate_group": "TAIL_RESEARCH/AGGRESSIVE::MM",
+                    "top_candidate_status": "backtest_candidate",
+                },
+                microstructure_counterfactual={
+                    "rows": 0,
+                    "unique_entries": 0,
+                    "candidate_count": 0,
+                    "monitor_only": 0,
+                    "collection_status": "awaiting_entry_shadow_rows",
+                    "evaluation_state": "trade_level_counterfactual",
+                    "top_candidate_group": "",
+                    "top_candidate_status": "",
+                },
                 restriction_rows=[{"restriction_type": "entry_no_new_after"}],
                 auto_policy={"active": {"entry_no_new_after": "17:45"}},
                 email_to="etc00051@yandex.ru",
@@ -67,6 +88,8 @@ class DailyAutonomyCycleStatusTest(unittest.TestCase):
                 "strategy_lab",
                 "strategy_review",
                 "intervention_proposals",
+                "microstructure_gate_research",
+                "microstructure_counterfactual",
                 "restrictions",
                 "candidate_gate",
                 "summary",
@@ -103,6 +126,16 @@ class DailyAutonomyCycleStatusTest(unittest.TestCase):
             stages["intervention_proposals"]["summary_path"],
             r"reports\autonomy\research\2026-06-15\research_intervention_proposals.md",
         )
+        self.assertEqual(stages["microstructure_gate_research"]["status"], "ok")
+        self.assertTrue(stages["microstructure_gate_research"]["generated"])
+        self.assertEqual(stages["microstructure_gate_research"]["collection_status"], "proxy_backtest_candidate_ready")
+        self.assertEqual(stages["microstructure_gate_research"]["backtest_candidates"], 2)
+        self.assertEqual(stages["microstructure_gate_research"]["top_candidate_status"], "backtest_candidate")
+        self.assertEqual(stages["microstructure_counterfactual"]["status"], "ok")
+        self.assertTrue(stages["microstructure_counterfactual"]["generated"])
+        self.assertEqual(stages["microstructure_counterfactual"]["collection_status"], "awaiting_entry_shadow_rows")
+        self.assertEqual(stages["microstructure_counterfactual"]["unique_entries"], 0)
+        self.assertEqual(stages["microstructure_counterfactual"]["candidate_count"], 0)
         self.assertFalse(stages["summary"]["archive_ready"])
         self.assertEqual(stages["summary"]["archive_path"], "")
         self.assertEqual(stages["email"]["status"], "disabled_missing_smtp")

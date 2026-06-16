@@ -1713,6 +1713,8 @@ def build_nightly_cycle_status(
     candidate_gate: dict | None = None,
     strategy_review: dict | None = None,
     intervention_proposals: dict | None = None,
+    microstructure_gate_research: dict | None = None,
+    microstructure_counterfactual: dict | None = None,
 ) -> dict:
     active = auto_policy.get("active") if isinstance(auto_policy.get("active"), dict) else {}
     email_settings = smtp_settings(default_recipient=email_to)
@@ -1725,6 +1727,10 @@ def build_nightly_cycle_status(
     review_generated = bool(review.get("generated"))
     proposals = intervention_proposals if isinstance(intervention_proposals, dict) else {}
     proposals_generated = bool(proposals.get("generated"))
+    micro_gate = microstructure_gate_research if isinstance(microstructure_gate_research, dict) else {}
+    micro_gate_generated = bool(micro_gate)
+    micro_counter = microstructure_counterfactual if isinstance(microstructure_counterfactual, dict) else {}
+    micro_counter_generated = bool(micro_counter)
     return {
         "trade_date": trade_date,
         "generated_at": now_str(),
@@ -1771,6 +1777,31 @@ def build_nightly_cycle_status(
                 "top_candidate": str(proposals.get("top_candidate") or ""),
                 "summary_path": str(proposals.get("summary_path") or ""),
                 "artifacts": list(proposals.get("artifacts") or []),
+            },
+            "microstructure_gate_research": {
+                "status": "ok" if micro_gate_generated else "not_generated",
+                "generated": micro_gate_generated,
+                "rows": safe_int(micro_gate.get("rows")),
+                "latest_day_rows": safe_int(micro_gate.get("latest_day_rows")),
+                "all_sample_rows": safe_int(micro_gate.get("all_sample_rows")),
+                "backtest_candidates": safe_int(micro_gate.get("backtest_candidates")),
+                "monitor_only": safe_int(micro_gate.get("monitor_only")),
+                "collection_status": str(micro_gate.get("collection_status") or ("ok" if micro_gate_generated else "not_generated")),
+                "evaluation_state": str(micro_gate.get("evaluation_state") or ""),
+                "top_candidate_group": str(micro_gate.get("top_candidate_group") or ""),
+                "top_candidate_status": str(micro_gate.get("top_candidate_status") or ""),
+            },
+            "microstructure_counterfactual": {
+                "status": "ok" if micro_counter_generated else "not_generated",
+                "generated": micro_counter_generated,
+                "rows": safe_int(micro_counter.get("rows")),
+                "unique_entries": safe_int(micro_counter.get("unique_entries")),
+                "candidate_count": safe_int(micro_counter.get("candidate_count")),
+                "monitor_only": safe_int(micro_counter.get("monitor_only")),
+                "collection_status": str(micro_counter.get("collection_status") or ("ok" if micro_counter_generated else "not_generated")),
+                "evaluation_state": str(micro_counter.get("evaluation_state") or ""),
+                "top_candidate_group": str(micro_counter.get("top_candidate_group") or ""),
+                "top_candidate_status": str(micro_counter.get("top_candidate_status") or ""),
             },
             "restrictions": {
                 "status": "ok",
@@ -4447,6 +4478,8 @@ def main() -> int:
         candidate_gate=candidate_gate,
         strategy_review=strategy_review,
         intervention_proposals=intervention_summary,
+        microstructure_gate_research=micro_gate_summary,
+        microstructure_counterfactual=micro_counter_summary,
     )
     persist_nightly_cycle_status(
         nightly_cycle_status,

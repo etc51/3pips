@@ -300,6 +300,16 @@ def top_candidate_row(rows: list[dict]) -> dict:
     return ranked[0]
 
 
+def collection_status(*, rows_count: int, backtest_candidates: int, monitor_only: int) -> str:
+    if rows_count <= 0:
+        return "awaiting_review_rows"
+    if backtest_candidates > 0:
+        return "proxy_backtest_candidate_ready"
+    if monitor_only > 0:
+        return "proxy_monitor_only"
+    return "proxy_exploratory"
+
+
 def summarize_research(rows: list[dict], trade_date: str) -> dict:
     by_sample: dict[str, int] = {}
     by_status: dict[str, int] = {}
@@ -309,15 +319,22 @@ def summarize_research(rows: list[dict], trade_date: str) -> dict:
         by_sample[sample] = by_sample.get(sample, 0) + 1
         by_status[status] = by_status.get(status, 0) + 1
     top = top_candidate_row(rows)
+    backtest_candidates = sum(1 for row in rows if str(row.get("candidate_status") or "") == "backtest_candidate")
+    monitor_rows = sum(1 for row in rows if str(row.get("candidate_status") or "") == "monitor_only")
     return {
         "trade_date": trade_date,
         "generated_at": now_str(),
         "rows": len(rows),
         "latest_day_rows": sum(1 for row in rows if str(row.get("sample") or "") == "latest_day"),
         "all_sample_rows": sum(1 for row in rows if str(row.get("sample") or "") == "all_sample"),
-        "backtest_candidates": sum(1 for row in rows if str(row.get("candidate_status") or "") == "backtest_candidate"),
-        "monitor_only": sum(1 for row in rows if str(row.get("candidate_status") or "") == "monitor_only"),
+        "backtest_candidates": backtest_candidates,
+        "monitor_only": monitor_rows,
         "evaluation_state": "review_event_proxy",
+        "collection_status": collection_status(
+            rows_count=len(rows),
+            backtest_candidates=backtest_candidates,
+            monitor_only=monitor_rows,
+        ),
         "top_candidate_group": str(top.get("group") or ""),
         "top_candidate_threshold": maybe_float(top.get("threshold_ratio")),
         "top_candidate_sample": str(top.get("sample") or ""),
@@ -339,6 +356,7 @@ def render_markdown(rows: list[dict], summary: dict) -> str:
             f"- backtest_candidates: {summary['backtest_candidates']}",
             f"- monitor_only: {summary['monitor_only']}",
             f"- evaluation_state: {summary['evaluation_state']}",
+            f"- collection_status: {summary['collection_status']}",
             f"- top_candidate_group: {summary['top_candidate_group']}",
             f"- top_candidate_threshold: {summary['top_candidate_threshold']}",
             f"- top_candidate_sample: {summary['top_candidate_sample']}",

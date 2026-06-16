@@ -110,6 +110,7 @@ class ResearchMicrostructureGateTest(unittest.TestCase):
             self.assertEqual(summary["trade_date"], trade_date)
             self.assertGreater(summary["backtest_candidates"], 0)
             self.assertEqual(summary["evaluation_state"], "review_event_proxy")
+            self.assertEqual(summary["collection_status"], "proxy_backtest_candidate_ready")
             self.assertTrue((research_dir / "microstructure_gate_research.csv").exists())
             self.assertTrue((latest_dir / "microstructure_gate_research_summary.json").exists())
 
@@ -131,6 +132,7 @@ class ResearchMicrostructureGateTest(unittest.TestCase):
             self.assertEqual(summary_payload["top_candidate_group"], "TAIL_RESEARCH/AGGRESSIVE::MM")
             self.assertEqual(summary_payload["top_candidate_threshold"], 0.75)
             self.assertEqual(summary_payload["top_candidate_status"], "backtest_candidate")
+            self.assertEqual(summary_payload["collection_status"], "proxy_backtest_candidate_ready")
 
     def test_summary_prefers_actionable_all_sample_candidate_over_latest_day_monitor_row(self) -> None:
         rows = [

@@ -254,6 +254,75 @@ class ResearchStrategyRegistryTest(unittest.TestCase):
             self.assertEqual(portfolio_row["validation_state"], "portfolio_oos_pass")
             self.assertTrue((project_root / "data" / "processed" / "research_strategy_registry.csv").exists())
 
+    def test_microstructure_strategy_lab_rows_use_microstructure_evidence_state(self) -> None:
+        trade_date = "2026-06-16"
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp) / "project"
+            research_dir = project_root / "reports" / "autonomy" / "research" / trade_date
+            latest_dir = project_root / "reports" / "autonomy" / "latest"
+            write_csv(
+                research_dir / "strategy_lab_candidates.csv",
+                [
+                    {
+                        "hypothesis_id": "microstructure_spread_adaptive_gate",
+                        "priority": 77,
+                        "category": "microstructure",
+                        "candidate": "spread adaptive gate",
+                        "scope": "TAIL_RESEARCH/AGGRESSIVE::MM",
+                        "action_type": "research_then_runtime",
+                        "safe_mode": "research_only",
+                        "autopromote_ready": False,
+                        "evidence": "proxy spread review",
+                        "recommended_next_step": "collect counterfactual sample",
+                        "required_features": "entry shadow rows",
+                        "scenario_anchor": "blackout_1200_1559",
+                        "rank": 1,
+                    }
+                ],
+            )
+            manifest_payload = {
+                "trade_date": trade_date,
+                "overall": {"trades": 37, "net_rub": 791.96},
+                "research_consensus_top": [
+                    {
+                        "scenario": "blackout_1200_1559",
+                        "days": 2,
+                        "positive_days": 2,
+                        "negative_days": 0,
+                        "beat_base_days": 1,
+                        "beat_base_pct": 50.0,
+                        "delta_total_rub": 4072.82,
+                    }
+                ],
+                "microstructure_gate_research": {
+                    "rows": 109,
+                    "backtest_candidates": 7,
+                    "monitor_only": 12,
+                    "collection_status": "proxy_backtest_candidate_ready",
+                },
+                "microstructure_counterfactual": {
+                    "rows": 0,
+                    "unique_entries": 0,
+                    "candidate_count": 0,
+                    "monitor_only": 0,
+                    "collection_status": "awaiting_entry_shadow_rows",
+                },
+            }
+
+            rows, summary = rsr.build_and_persist_research_strategy_registry(
+                project_root=project_root,
+                trade_date=trade_date,
+                manifest_payload=manifest_payload,
+                research_dir=research_dir,
+                latest_dir=latest_dir,
+            )
+
+            self.assertEqual(summary["rows"], 1)
+            self.assertEqual(rows[0]["validation_state"], "proxy_backtest_candidate")
+            evidence = json.loads(rows[0]["evidence_json"])
+            self.assertEqual(evidence["microstructure_gate_research"]["collection_status"], "proxy_backtest_candidate_ready")
+            self.assertEqual(evidence["microstructure_counterfactual"]["collection_status"], "awaiting_entry_shadow_rows")
+
     def test_build_and_persist_enriches_strategy_lab_rows_with_policy_sweep_quality_metrics(self) -> None:
         trade_date = "2026-06-16"
         with tempfile.TemporaryDirectory() as tmp:

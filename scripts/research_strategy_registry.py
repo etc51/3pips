@@ -193,6 +193,27 @@ def infer_strategy_lab_status(action_type: str, safe_mode: str, autopromote_read
     return "research_only"
 
 
+def infer_microstructure_validation_state(category: str, gate_summary: dict, counter_summary: dict, consensus: dict) -> str:
+    if category != "microstructure":
+        return "consensus_backed" if consensus else "strategy_lab_only"
+    candidate_count = maybe_int(counter_summary.get("candidate_count")) or 0
+    unique_entries = maybe_int(counter_summary.get("unique_entries")) or 0
+    counter_monitor = maybe_int(counter_summary.get("monitor_only")) or 0
+    gate_backtest = maybe_int(gate_summary.get("backtest_candidates")) or 0
+    gate_monitor = maybe_int(gate_summary.get("monitor_only")) or 0
+    if candidate_count > 0:
+        return "counterfactual_candidate"
+    if unique_entries > 0 and counter_monitor > 0:
+        return "counterfactual_monitor_only"
+    if unique_entries > 0:
+        return "counterfactual_collecting"
+    if gate_backtest > 0:
+        return "proxy_backtest_candidate"
+    if gate_monitor > 0:
+        return "proxy_monitor_only"
+    return "microstructure_unverified"
+
+
 def strategy_lab_rows_to_registry(
     *,
     project_root: Path,
@@ -213,12 +234,15 @@ def strategy_lab_rows_to_registry(
         for row in (manifest_payload.get("research_consensus_top") or [])
         if isinstance(row, dict) and str(row.get("scenario") or "")
     }
+    gate_summary = manifest_payload.get("microstructure_gate_research") if isinstance(manifest_payload.get("microstructure_gate_research"), dict) else {}
+    counter_summary = manifest_payload.get("microstructure_counterfactual") if isinstance(manifest_payload.get("microstructure_counterfactual"), dict) else {}
     overall = manifest_payload.get("overall") if isinstance(manifest_payload.get("overall"), dict) else {}
     out: list[dict] = []
     for index, row in enumerate(strategy_lab_rows, start=1):
         action_type = str(row.get("action_type") or "")
         safe_mode = str(row.get("safe_mode") or "")
         autopromote_ready = normalize_bool(row.get("autopromote_ready"))
+        category = str(row.get("category") or "")
         anchor = str(row.get("scenario_anchor") or "")
         optimizer = optimizer_by_scenario.get(anchor, {})
         consensus = consensus_by_scenario.get(anchor, {})
@@ -242,7 +266,7 @@ def strategy_lab_rows_to_registry(
                 "rank": maybe_int(row.get("rank")) or index,
                 "priority": maybe_int(row.get("priority")),
                 "candidate_label": str(row.get("candidate") or ""),
-                "category": str(row.get("category") or ""),
+                "category": category,
                 "scope": str(row.get("scope") or ""),
                 "action_type": action_type,
                 "safe_mode": safe_mode,
@@ -293,7 +317,7 @@ def strategy_lab_rows_to_registry(
                 "evidence": str(row.get("evidence") or ""),
                 "recommended_next_step": str(row.get("recommended_next_step") or ""),
                 "required_features": str(row.get("required_features") or ""),
-                "validation_state": "consensus_backed" if consensus else "strategy_lab_only",
+                "validation_state": infer_microstructure_validation_state(category, gate_summary, counter_summary, consensus),
                 "evidence_json": json_text(
                     {
                         "overall": overall,
@@ -301,6 +325,8 @@ def strategy_lab_rows_to_registry(
                         "optimizer": optimizer,
                         "all_sample": all_sample,
                         "latest_day": latest_day,
+                        "microstructure_gate_research": gate_summary if category == "microstructure" else {},
+                        "microstructure_counterfactual": counter_summary if category == "microstructure" else {},
                     }
                 ),
                 "execution_params_json": json_text(
