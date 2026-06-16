@@ -28,6 +28,29 @@ class _FakeDateTime:
 
 
 class GitAutoupdateWindowTest(unittest.TestCase):
+    def test_install_systemd_units_enables_service_and_timers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp) / "project"
+            deploy_dir = project_root / "deploy"
+            deploy_dir.mkdir(parents=True)
+            (deploy_dir / "3pips-paper-a26.service").write_text("[Unit]\nDescription=test\n", encoding="utf-8")
+            (deploy_dir / "3pips-watchdog.timer").write_text("[Timer]\nOnBootSec=1min\n", encoding="utf-8")
+            calls: list[list[str]] = []
+
+            def fake_run(cmd: list[str], cwd: Path):
+                calls.append(cmd)
+                return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+            with patch.object(gau, "run", side_effect=fake_run), patch.object(gau.shutil, "copy2") as copy_mock:
+                ok, notes = gau.install_systemd_units(project_root, deploy_dir)
+
+            self.assertTrue(ok)
+            self.assertGreaterEqual(copy_mock.call_count, 2)
+            self.assertTrue(any(cmd[:2] == ["systemctl", "daemon-reload"] for cmd in calls))
+            self.assertTrue(any(cmd[:3] == ["systemctl", "enable", "3pips-paper-a26.service"] for cmd in calls))
+            self.assertTrue(any(cmd[:3] == ["systemctl", "enable", "--now"] and "3pips-watchdog.timer" in cmd for cmd in calls))
+            self.assertTrue(any(note.startswith("enable_timers rc=0") for note in notes))
+
     def test_blocks_during_entry_window(self) -> None:
         _FakeDateTime.current = datetime(2026, 6, 15, 11, 0, tzinfo=gau.MSK)
         with patch.object(gau, "datetime", _FakeDateTime):

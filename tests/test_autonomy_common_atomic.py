@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import csv
 import json
+import os
+import stat
 import sys
 import tempfile
 import unittest
@@ -57,6 +59,16 @@ class AutonomyCommonAtomicWriteTest(unittest.TestCase):
             self.assertEqual(rows[1]["portfolio"], "neo")
             self.assertEqual(rows[1]["net_rub"], "250.0")
             self.assertEqual(list(path.parent.glob(f"{path.name}.tmp.*")), [])
+
+    @unittest.skipUnless(os.name == "posix", "POSIX permission bits are required")
+    def test_write_json_sets_shared_read_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "server_watchdog_state.json"
+
+            ac.write_json(path, {"status": "ok"})
+
+            mode = stat.S_IMODE(path.stat().st_mode)
+            self.assertEqual(mode, ac.DEFAULT_SHARED_FILE_MODE)
 
 
 if __name__ == "__main__":

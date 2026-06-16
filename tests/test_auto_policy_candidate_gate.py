@@ -148,6 +148,31 @@ class AutoPolicyCandidateGateTest(unittest.TestCase):
             {"CLASSIC_CORE/STRICT": "tv_ema_rsi_adx_trend"},
         )
 
+    def test_build_promoted_runtime_policy_state_keeps_promoted_candidates_across_days(self) -> None:
+        promoted_now = [
+            {
+                "candidate_id": "entry_no_new_after|entry_window_1015_1159|11:59",
+                "policy_key": "entry_no_new_after",
+                "value": "11:59",
+                "source_scenario": "entry_window_1015_1159",
+                "created_trade_date": "2026-06-15",
+                "resolved_trade_date": "2026-06-18",
+                "evaluation_days": 3,
+                "total_delta_rub": 1200.0,
+            }
+        ]
+        state = apc.build_promoted_runtime_policy_state({}, promoted_now, "2026-06-18")
+        self.assertEqual(state["summary"]["promoted_candidate_count"], 1)
+        self.assertEqual(state["active_base"]["entry_no_new_after"], "11:59")
+
+        later_state = apc.build_promoted_runtime_policy_state(state, [], "2026-06-19")
+        self.assertEqual(later_state["summary"]["promoted_candidate_count"], 1)
+        self.assertEqual(later_state["active_base"]["entry_no_new_after"], "11:59")
+        self.assertEqual(
+            later_state["promoted_candidates"][0]["promoted_trade_date"],
+            "2026-06-18",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

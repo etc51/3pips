@@ -12,6 +12,8 @@ from datetime import datetime
 from email.message import EmailMessage
 from pathlib import Path
 
+DEFAULT_SHARED_FILE_MODE = 0o644
+
 
 def now_str() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -21,7 +23,14 @@ def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
-def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8", newline: str | None = None) -> None:
+def atomic_write_text(
+    path: Path,
+    text: str,
+    *,
+    encoding: str = "utf-8",
+    newline: str | None = None,
+    mode: int = DEFAULT_SHARED_FILE_MODE,
+) -> None:
     ensure_dir(path.parent)
     fd, tmp_name = tempfile.mkstemp(prefix=f"{path.name}.tmp.", dir=path.parent)
     tmp_path = Path(tmp_name)
@@ -30,6 +39,8 @@ def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8", newline
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
+        if os.name == "posix":
+            os.chmod(tmp_path, mode)
         tmp_path.replace(path)
     except Exception:
         try:

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 import sys
 import tempfile
 import types
@@ -366,6 +368,19 @@ class EntryShadowModelsTest(unittest.TestCase):
             self.assertEqual(restored.shadow_entry_anchor_model, "candle_like")
             self.assertEqual(len(restored.entry_shadow_decisions), len(decisions))
             self.assertEqual(set(restored.shadow_positions), {"stream_stoplimit", "candle_like"})
+
+    @unittest.skipUnless(os.name == "posix", "POSIX permission bits are required")
+    def test_write_open_positions_sets_shared_read_mode(self) -> None:
+        state = self.make_state()
+        state.position = mfp.open_position("long", 110.0, 1, state.profile.stop_ticks, state.profile.trail_ticks, state.spec)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "classic_core_paper_open_positions.json"
+
+            mfp.write_open_positions(path, [state])
+
+            mode = stat.S_IMODE(path.stat().st_mode)
+            self.assertEqual(mode, mfp.DEFAULT_SHARED_FILE_MODE)
 
 
 if __name__ == "__main__":

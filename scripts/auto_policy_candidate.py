@@ -423,6 +423,65 @@ def apply_promoted_candidates(active: dict, promoted_candidates: list[dict]) -> 
     return payload
 
 
+def promoted_runtime_candidates(state: dict) -> list[dict]:
+    if not isinstance(state, dict):
+        return []
+    by_id: dict[str, dict] = {}
+    for item in state.get("promoted_candidates") or []:
+        if not isinstance(item, dict):
+            continue
+        candidate_id = str(item.get("candidate_id") or "")
+        if not candidate_id:
+            continue
+        by_id[candidate_id] = dict(item)
+    return [by_id[key] for key in sorted(by_id)]
+
+
+def summarize_promoted_runtime_policy_state(state: dict) -> dict[str, object]:
+    candidates = promoted_runtime_candidates(state)
+    policy_keys = sorted({str(item.get("policy_key") or "") for item in candidates if str(item.get("policy_key") or "")})
+    return {
+        "promoted_candidate_count": len(candidates),
+        "policy_keys": policy_keys,
+        "top_candidate": candidates[0] if candidates else {},
+    }
+
+
+def build_promoted_runtime_policy_state(existing_state: dict, promoted_now: list[dict], trade_date: str) -> dict:
+    by_id = {
+        str(item.get("candidate_id") or ""): dict(item)
+        for item in promoted_runtime_candidates(existing_state)
+        if str(item.get("candidate_id") or "")
+    }
+    for candidate in promoted_now:
+        if not isinstance(candidate, dict):
+            continue
+        candidate_id = str(candidate.get("candidate_id") or "")
+        if not candidate_id:
+            continue
+        payload = dict(by_id.get(candidate_id) or {})
+        payload.update(dict(candidate))
+        payload["candidate_id"] = candidate_id
+        payload["promoted_trade_date"] = str(
+            payload.get("promoted_trade_date")
+            or candidate.get("resolved_trade_date")
+            or candidate.get("created_trade_date")
+            or trade_date
+        )
+        payload["last_confirmed_trade_date"] = trade_date
+        by_id[candidate_id] = payload
+
+    candidates = [by_id[key] for key in sorted(by_id)]
+    state = {
+        "trade_date": trade_date,
+        "updated_at": now_str(),
+        "promoted_candidates": candidates[-50:],
+    }
+    state["active_base"] = apply_promoted_candidates({}, state["promoted_candidates"])
+    state["summary"] = summarize_promoted_runtime_policy_state(state)
+    return state
+
+
 def summarize_candidate_gate(state: dict) -> dict[str, object]:
     pending = list(state.get("pending") or [])
     promoted_now = list(state.get("promoted_now") or [])

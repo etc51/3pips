@@ -18,6 +18,161 @@ import daily_autonomy_runner as dar  # noqa: E402
 
 
 class DailyAutonomyRunnerPersistenceTest(unittest.TestCase):
+    def test_main_applies_persisted_promoted_runtime_policy(self) -> None:
+        trade_date = "2026-06-16"
+        all_rows = [
+            {
+                "trade_date": trade_date,
+                "secid": "GLZ6",
+                "portfolio_group": "GL_WATCH",
+                "contour": "AGGRESSIVE",
+                "group_key": "GL_WATCH/AGGRESSIVE",
+                "family": "GL",
+                "net_rub": 100.0,
+            }
+        ]
+        overall = {
+            "trades": 1,
+            "net_rub": 100.0,
+            "win_rate_pct": 100.0,
+            "expectancy_rub": 100.0,
+        }
+        auto_policy = {
+            "active": {"entry_no_new_after": None, "notes": []},
+            "active_base": {"entry_no_new_after": None, "notes": []},
+            "summary": {"active_rule_count": 0},
+            "proposed": {},
+        }
+        candidate_gate = {
+            "summary": {
+                "pending_count": 0,
+                "promoted_now_count": 0,
+                "rejected_now_count": 0,
+            },
+            "promoted_now": [],
+        }
+        promoted_runtime_state = {
+            "trade_date": "2026-06-15",
+            "updated_at": "2026-06-16 02:44:18",
+            "promoted_candidates": [
+                {
+                    "candidate_id": "entry_no_new_after|entry_window_1015_1159|11:59",
+                    "policy_key": "entry_no_new_after",
+                    "value": "11:59",
+                    "source_scenario": "entry_window_1015_1159",
+                    "created_trade_date": "2026-06-15",
+                    "resolved_trade_date": "2026-06-15",
+                    "promoted_trade_date": "2026-06-15",
+                    "evaluation_days": 3,
+                    "total_delta_rub": 1800.0,
+                }
+            ],
+        }
+
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp) / "project"
+            run_dir = project_root / "reports" / "paper_runs" / "v7_live_20260525"
+            runtime_dir = project_root / "reports" / "runtime"
+            latest_root = project_root / "reports" / "autonomy" / "latest"
+            run_dir.mkdir(parents=True)
+            runtime_dir.mkdir(parents=True)
+            latest_root.mkdir(parents=True)
+            (runtime_dir / "v7_paper_supervisor_20260525.log").write_text("ok\n", encoding="utf-8")
+            (runtime_dir / "server_watchdog.log").write_text("ok\n", encoding="utf-8")
+            (latest_root / "promoted_runtime_policy.json").write_text(
+                json.dumps(promoted_runtime_state, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+
+            state_path = runtime_dir / "daily_autonomy_state.json"
+            argv = [
+                "daily_autonomy_runner.py",
+                "--project-root",
+                str(project_root),
+                "--state-path",
+                str(state_path),
+                "--email-to",
+                "ops@example.com",
+            ]
+
+            def fake_write_analysis_outputs(analysis_dir: Path, **_: object) -> None:
+                analysis_dir.mkdir(parents=True, exist_ok=True)
+                (analysis_dir / "daily_summary.md").write_text("# Summary\n", encoding="utf-8")
+                (analysis_dir / "auto_policy.md").write_text("# Policy\n", encoding="utf-8")
+
+            def fake_write_research_outputs(research_dir: Path, **_: object) -> dict[str, int]:
+                research_dir.mkdir(parents=True, exist_ok=True)
+                (research_dir / "research_summary.md").write_text("# Research\n", encoding="utf-8")
+                return {"total": 0, "runtime_policy": 0, "shadow_backtest": 0, "research_then_runtime": 0, "autopromote_ready": 0}
+
+            def fake_copy_bundle_outputs(bundle_dir: Path, **_: object) -> None:
+                bundle_dir.mkdir(parents=True, exist_ok=True)
+                (bundle_dir / "daily_summary.md").write_text("# Summary\n", encoding="utf-8")
+                (bundle_dir / "auto_policy.md").write_text("# Policy\n", encoding="utf-8")
+
+            def fake_build_zip(path: Path, bundle_dir: Path) -> None:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"zip")
+
+            with ExitStack() as stack:
+                stack.enter_context(patch.object(dar, "load_primary_trades", return_value=all_rows))
+                stack.enter_context(patch.object(dar, "load_profiles", return_value={"GLZ6": {"ticker": "GLZ6", "family": "GL"}}))
+                stack.enter_context(patch.object(dar, "load_wide_spread_reviews", return_value=[]))
+                stack.enter_context(patch.object(dar, "annotate_trade_rows", side_effect=lambda rows, profiles: None))
+                stack.enter_context(patch.object(dar, "build_day_history", return_value=[{"trade_date": trade_date, "day_class": "good_day"}]))
+                stack.enter_context(patch.object(dar, "build_recurring_killers", return_value=[]))
+                stack.enter_context(patch.object(dar, "build_scenario_history", return_value=[{"scenario": "base"}]))
+                stack.enter_context(patch.object(dar, "summarize_scenario_history", return_value=[{"scenario": "base"}]))
+                stack.enter_context(patch.object(dar, "filter_trade_date", return_value=all_rows))
+                stack.enter_context(patch.object(dar, "metrics", return_value=overall))
+                stack.enter_context(patch.object(dar, "grouped_metrics", return_value=[]))
+                stack.enter_context(patch.object(dar, "metrics_map", return_value={}))
+                stack.enter_context(patch.object(dar, "build_microstructure_summary", return_value=[]))
+                stack.enter_context(patch.object(dar, "ranked_tail", return_value=[]))
+                stack.enter_context(patch.object(dar, "load_open_position_snapshot", return_value=[]))
+                stack.enter_context(patch.object(dar, "summarize_open_positions", return_value={}))
+                stack.enter_context(patch.object(dar, "load_roll_watch", return_value=[]))
+                stack.enter_context(patch.object(dar, "load_margin_timeline", return_value=[]))
+                stack.enter_context(patch.object(dar, "load_margin_snapshot_fallback", return_value=[]))
+                stack.enter_context(patch.object(dar, "summarize_margin_day", return_value=[]))
+                stack.enter_context(
+                    patch.object(dar, "load_runtime_trade_model", return_value={"margin_mode": "leveraged_paper", "fee_model": {"broker": "tbank"}})
+                )
+                stack.enter_context(patch.object(dar, "build_research_scenarios", side_effect=[[], []]))
+                stack.enter_context(patch.object(dar, "build_recommendations", return_value=["keep base"]))
+                stack.enter_context(patch.object(dar, "build_auto_policy", return_value=auto_policy))
+                stack.enter_context(patch.object(dar, "advance_candidate_gate", return_value=candidate_gate))
+                stack.enter_context(patch.object(dar, "merge_watchdog_overrides", side_effect=lambda policy, latest: policy))
+                stack.enter_context(patch.object(dar, "build_optimizer_candidates", return_value=[]))
+                stack.enter_context(patch.object(dar, "build_strategy_lab", return_value=[]))
+                stack.enter_context(patch.object(dar, "build_strategy_review", return_value={}, create=True))
+                stack.enter_context(patch.object(dar, "apply_strategy_review_candidates", side_effect=lambda policy, review: policy))
+                stack.enter_context(patch.object(dar, "build_restriction_rows", return_value=[]))
+                stack.enter_context(patch.object(dar, "build_summary_markdown", return_value="# Summary\n"))
+                stack.enter_context(patch.object(dar, "pick_best_consensus_scenario", return_value={}))
+                stack.enter_context(patch.object(dar, "write_analysis_outputs", side_effect=fake_write_analysis_outputs))
+                stack.enter_context(patch.object(dar, "write_research_outputs", side_effect=fake_write_research_outputs))
+                stack.enter_context(patch.object(dar, "copy_bundle_outputs", side_effect=fake_copy_bundle_outputs))
+                stack.enter_context(patch.object(dar, "build_manifest_payload", return_value={"trade_date": trade_date}))
+                stack.enter_context(patch.object(dar, "build_zip", side_effect=fake_build_zip))
+                stack.enter_context(patch.object(dar, "send_email", return_value=(True, "sent")))
+                stack.enter_context(patch.object(sys, "argv", argv))
+                rc = dar.main()
+
+            self.assertEqual(rc, 0)
+
+            latest_policy = json.loads((latest_root / "latest_auto_policy.json").read_text(encoding="utf-8"))
+            latest_promoted = json.loads((latest_root / "promoted_runtime_policy.json").read_text(encoding="utf-8"))
+            analysis_promoted = json.loads(
+                (project_root / "reports" / "autonomy" / "analysis" / trade_date / "promoted_runtime_policy.json").read_text(encoding="utf-8")
+            )
+
+            self.assertEqual(latest_policy["active"]["entry_no_new_after"], "11:59")
+            self.assertEqual(latest_policy["active_base"]["entry_no_new_after"], "11:59")
+            self.assertEqual(latest_policy["promoted_runtime"]["promoted_candidate_count"], 1)
+            self.assertEqual(latest_promoted["active_base"]["entry_no_new_after"], "11:59")
+            self.assertEqual(analysis_promoted["active_base"]["entry_no_new_after"], "11:59")
+
     def test_main_persists_status_and_latest_artifacts_with_strategy_review(self) -> None:
         trade_date = "2026-06-15"
         strategy_review_summary = f"reports/autonomy/research/{trade_date}/strategy_review_summary.md"

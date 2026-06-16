@@ -45,9 +45,17 @@ SPREAD_DOMINATES_RATIO = 1.00
 DEFAULT_MAX_FULL_STOP_RUB = 1_000.0
 AUTO_POLICY_RELOAD_SEC = 30.0
 EXTERNAL_OPEN_POSITIONS_RELOAD_SEC = 2.0
+DEFAULT_SHARED_FILE_MODE = 0o644
 
 
-def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8", newline: str | None = None) -> None:
+def atomic_write_text(
+    path: Path,
+    text: str,
+    *,
+    encoding: str = "utf-8",
+    newline: str | None = None,
+    mode: int = DEFAULT_SHARED_FILE_MODE,
+) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(prefix=f"{path.name}.tmp.", dir=path.parent)
     tmp_path = Path(tmp_name)
@@ -56,6 +64,8 @@ def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8", newline
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
+        if os.name == "posix":
+            os.chmod(tmp_path, mode)
         tmp_path.replace(path)
     except Exception:
         try:

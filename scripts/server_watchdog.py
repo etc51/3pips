@@ -33,6 +33,11 @@ def service_active(service_name: str) -> bool:
     return result.returncode == 0 and result.stdout.strip() == "active"
 
 
+def unit_enabled(unit_name: str) -> bool:
+    result = subprocess.run(["systemctl", "is-enabled", unit_name], capture_output=True, text=True)
+    return result.returncode == 0
+
+
 def restart_service(service_name: str) -> tuple[bool, str]:
     result = subprocess.run(["systemctl", "restart", service_name], capture_output=True, text=True)
     ok = result.returncode == 0
@@ -99,6 +104,57 @@ def check_run_health(run_dir: Path, health_stale_sec: int, svc_age_sec: float | 
                 issues.append(f"bad_open_positions[{path.name}] not_list")
         except Exception as exc:
             issues.append(f"bad_open_positions[{path.name}] {exc}")
+    return issues
+
+
+def check_timer_units(timer_names: list[str]) -> list[str]:
+    issues: list[str] = []
+    for name in timer_names:
+        if not name:
+            continue
+        if not unit_enabled(name):
+            issues.append(f"timer_disabled[{name}]")
+        if not service_active(name):
+            issues.append(f"timer_inactive[{name}]")
+    return issues
+
+
+def check_git_autoupdate_status(path: Path, max_age_sec: int) -> list[str]:
+    if not path.exists():
+        return [f"missing_git_autoupdate_status[{path.name}]"]
+    try:
+        age_sec = int(max(0.0, time.time() - path.stat().st_mtime))
+    except FileNotFoundError:
+        return [f"missing_git_autoupdate_status[{path.name}]"]
+    if age_sec > max_age_sec:
+        return [f"stale_git_autoupdate_status[{path.name}] age={age_sec}s"]
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        return [f"bad_git_autoupdate_status[{path.name}] {exc}"]
+    if not isinstance(payload, dict):
+        return [f"bad_git_autoupdate_status[{path.name}] not_dict"]
+
+    issues: list[str] = []
+    updated_at = parse_dt(str(payload.get("updated_at") or ""))
+    if updated_at is None:
+        issues.append(f"missing_git_autoupdate_timestamp[{path.name}]")
+    outcome = str(payload.get("outcome") or "")
+    reason = str(payload.get("reason") or "")
+    if outcome == "failed":
+        issues.append(f"git_autoupdate_failed[{reason or 'unknown'}]")
+    elif outcome == "skipped" and reason == "dirty_worktree":
+        issues.append("git_autoupdate_blocked[dirty_worktree]")
+    elif bool(payload.get("pending_restart_exists")) and age_sec > max_age_sec // 2:
+        issues.append(f"git_autoupdate_pending_restart_stale[{path.name}] age={age_sec}s")
+    elif bool(payload.get("rollout_lock_exists")) and age_sec > max_age_sec // 2:
+        issues.append(f"git_autoupdate_rollout_lock_stale[{path.name}] age={age_sec}s")
+    return issues
+
+
+def check_automation_health(timer_names: list[str], git_autoupdate_status_path: Path, git_autoupdate_max_age_sec: int) -> list[str]:
+    issues = check_timer_units(timer_names)
+    issues.extend(check_git_autoupdate_status(git_autoupdate_status_path, git_autoupdate_max_age_sec))
     return issues
 
 
@@ -213,14 +269,34 @@ def build_email_body(hostname: str, service_name: str, dashboard_url: str, issue
     return "\n".join(lines)
 
 
+def service_restart_may_help(issues: list[str]) -> bool:
+    runtime_prefixes = (
+        "service_inactive[",
+        "dashboard_down[",
+        "no_health_files",
+        "missing_health[",
+        "stale_health[",
+        "bad_health_json[",
+        "missing_health_timestamp[",
+        "bad_open_positions[",
+    )
+    return any(str(issue).startswith(runtime_prefixes) for issue in issues)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--project-root", default="/opt/3pips")
     parser.add_argument("--run-name", default="v7_live_20260525")
     parser.add_argument("--service-name", default="3pips-paper-a26.service")
     parser.add_argument("--daily-autonomy-service-name", default="3pips-daily-autonomy.service")
+    parser.add_argument("--watchdog-timer-name", default="3pips-watchdog.timer")
+    parser.add_argument("--intraday-autonomy-timer-name", default="3pips-intraday-autonomy.timer")
+    parser.add_argument("--daily-autonomy-timer-name", default="3pips-daily-autonomy.timer")
+    parser.add_argument("--git-autoupdate-timer-name", default="3pips-git-autoupdate.timer")
     parser.add_argument("--dashboard-url", default="http://127.0.0.1:8768/")
     parser.add_argument("--health-stale-sec", type=int, default=180)
+    parser.add_argument("--git-autoupdate-status-path", default="")
+    parser.add_argument("--git-autoupdate-max-age-sec", type=int, default=7200)
     parser.add_argument("--startup-wait-sec", type=int, default=25)
     parser.add_argument("--startup-grace-sec", type=int, default=180)
     parser.add_argument("--daily-autonomy-wait-sec", type=int, default=20)
@@ -238,6 +314,7 @@ def main() -> int:
     state_path = Path(args.state_path) if args.state_path else runtime_dir / "server_watchdog_state.json"
     log_path = Path(args.log_path) if args.log_path else runtime_dir / "server_watchdog.log"
     maintenance_lock_path = Path(args.maintenance_lock_path) if args.maintenance_lock_path else runtime_dir / "git_autoupdate_rollout_lock.json"
+    git_autoupdate_status_path = Path(args.git_autoupdate_status_path) if args.git_autoupdate_status_path else runtime_dir / "git_autoupdate_status.json"
     hostname = subprocess.run(["hostname"], capture_output=True, text=True).stdout.strip() or "unknown-host"
     state = load_state(state_path)
 
@@ -299,6 +376,18 @@ def main() -> int:
     if not ok and not (svc_age is not None and svc_age < args.startup_grace_sec):
         issues.append(f"dashboard_down[{dash_status}]")
     issues.extend(check_run_health(run_dir, args.health_stale_sec, svc_age_sec=svc_age, startup_grace_sec=args.startup_grace_sec))
+    issues.extend(
+        check_automation_health(
+            [
+                args.watchdog_timer_name,
+                args.intraday_autonomy_timer_name,
+                args.daily_autonomy_timer_name,
+                args.git_autoupdate_timer_name,
+            ],
+            git_autoupdate_status_path,
+            args.git_autoupdate_max_age_sec,
+        )
+    )
 
     if not issues:
         save_state(
@@ -337,7 +426,7 @@ def main() -> int:
         state = merge_state(state, dashboard_fail_count=0)
 
     log(log_path, f"incident_detected count={len(issues)} summary={' ; '.join(issues)}")
-    if not args.no_remediate:
+    if not args.no_remediate and service_restart_may_help(issues):
         restarted, summary = restart_service(args.service_name)
         log(log_path, f"remediate name=systemctl_restart {summary}")
         if restarted:
@@ -381,6 +470,8 @@ def main() -> int:
                 log(log_path, "incident_auto_recovered email_status=not_needed")
                 return 0
             issues = retry_issues
+    elif not args.no_remediate:
+        log(log_path, "remediate skipped reason=non_runtime_issue")
 
     fp = fingerprint(issues)
     email_needed = fp != state.get("fingerprint")

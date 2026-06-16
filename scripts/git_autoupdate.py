@@ -18,6 +18,24 @@ from autonomy_common import now_str, write_json
 MSK = ZoneInfo("Europe/Moscow")
 ENTRY_WINDOW_START = dt_time(10, 15)
 ENTRY_WINDOW_END = dt_time(17, 45)
+SYSTEMD_UNIT_NAMES = [
+    "3pips-paper-a26.service",
+    "3pips-watchdog.service",
+    "3pips-watchdog.timer",
+    "3pips-daily-autonomy.service",
+    "3pips-daily-autonomy.timer",
+    "3pips-intraday-autonomy.service",
+    "3pips-intraday-autonomy.timer",
+    "3pips-git-autoupdate.service",
+    "3pips-git-autoupdate.timer",
+]
+SYSTEMD_ENABLE_SERVICES = ["3pips-paper-a26.service"]
+SYSTEMD_ENABLE_TIMERS = [
+    "3pips-watchdog.timer",
+    "3pips-daily-autonomy.timer",
+    "3pips-intraday-autonomy.timer",
+    "3pips-git-autoupdate.timer",
+]
 
 
 def log(path: Path, message: str) -> None:
@@ -158,6 +176,41 @@ def restart_allowed_now(project_root: Path, run_name: str) -> tuple[bool, str]:
         detail_suffix = f" {' '.join(details[:6])}" if details else ""
         return False, f"open_positions={open_count}{detail_suffix}"
     return True, f"safe_window {now_msk.strftime('%H:%M')}"
+
+
+def install_systemd_units(project_root: Path, deploy_dir: Path) -> tuple[bool, list[str]]:
+    copied_units: set[str] = set()
+    notes: list[str] = []
+    for name in SYSTEMD_UNIT_NAMES:
+        src = deploy_dir / name
+        dst = Path("/etc/systemd/system") / name
+        if not src.exists():
+            continue
+        shutil.copy2(src, dst)
+        copied_units.add(name)
+    if not copied_units:
+        return True, ["systemd_sync skipped copied_units=0"]
+
+    daemon_reload = run(["systemctl", "daemon-reload"], project_root)
+    notes.append(f"daemon_reload rc={daemon_reload.returncode} copied_units={len(copied_units)}")
+    if daemon_reload.returncode != 0:
+        return False, notes
+
+    enable_services = [name for name in SYSTEMD_ENABLE_SERVICES if name in copied_units]
+    if enable_services:
+        result = run(["systemctl", "enable", *enable_services], project_root)
+        notes.append(f"enable_services rc={result.returncode} units={','.join(enable_services)}")
+        if result.returncode != 0:
+            return False, notes
+
+    enable_timers = [name for name in SYSTEMD_ENABLE_TIMERS if name in copied_units]
+    if enable_timers:
+        result = run(["systemctl", "enable", "--now", *enable_timers], project_root)
+        notes.append(f"enable_timers rc={result.returncode} units={','.join(enable_timers)}")
+        if result.returncode != 0:
+            return False, notes
+
+    return True, notes
 
 
 def main() -> int:
@@ -302,27 +355,18 @@ def main() -> int:
             needs_dependency_refresh = requirements_changed
 
             deploy_dir = project_root / "deploy"
-            unit_names = [
-                "3pips-paper-a26.service",
-                "3pips-watchdog.service",
-                "3pips-watchdog.timer",
-                "3pips-daily-autonomy.service",
-                "3pips-daily-autonomy.timer",
-                "3pips-intraday-autonomy.service",
-                "3pips-intraday-autonomy.timer",
-                "3pips-git-autoupdate.service",
-                "3pips-git-autoupdate.timer",
-            ]
-            units_installed = 0
-            for name in unit_names:
-                src = deploy_dir / name
-                dst = Path("/etc/systemd/system") / name
-                if src.exists():
-                    shutil.copy2(src, dst)
-                    units_installed += 1
-            if units_installed:
-                daemon_reload = run(["systemctl", "daemon-reload"], project_root)
-                log(log_path, f"daemon_reload rc={daemon_reload.returncode} units_installed={units_installed}")
+            units_ok, unit_notes = install_systemd_units(project_root, deploy_dir)
+            for note in unit_notes:
+                log(log_path, note)
+            if not units_ok:
+                emit_status(
+                    "failed",
+                    "systemd_unit_refresh_failed",
+                    old_head=previous_head,
+                    new_head=remote_sha,
+                    systemd_notes=unit_notes,
+                )
+                return 1
             need_restart = True
             update_reason = f"updated old={previous_head} new={remote_sha}"
         elif pending_payload:

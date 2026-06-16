@@ -45,7 +45,14 @@ from auto_policy_utils import (  # noqa: E402
     policy_group_blackout_windows,
 )
 from auto_policy_merge import merge_watchdog_overrides, summarize_active_policy  # noqa: E402
-from auto_policy_candidate import advance_candidate_gate, apply_promoted_candidates, summarize_candidate_gate  # noqa: E402
+from auto_policy_candidate import (  # noqa: E402
+    advance_candidate_gate,
+    apply_promoted_candidates,
+    build_promoted_runtime_policy_state,
+    promoted_runtime_candidates,
+    summarize_candidate_gate,
+    summarize_promoted_runtime_policy_state,
+)
 from daily_autonomy_outputs import (  # noqa: E402
     build_manifest_payload,
     copy_bundle_outputs,
@@ -3897,6 +3904,19 @@ def main() -> int:
         research_all=research_all,
         research_consensus=scenario_consensus,
     )
+    promoted_runtime_policy_path = manifest_root / "promoted_runtime_policy.json"
+    promoted_runtime_state = load_json(promoted_runtime_policy_path)
+    durable_promoted_candidates = promoted_runtime_candidates(promoted_runtime_state)
+    generated_active_base = auto_policy.get("active_base") if isinstance(auto_policy.get("active_base"), dict) else {}
+    if durable_promoted_candidates:
+        promoted_active = apply_promoted_candidates(generated_active_base, durable_promoted_candidates)
+        auto_policy["active_base"] = promoted_active
+        auto_policy["active"] = dict(promoted_active)
+        auto_policy["summary"] = {
+            **(auto_policy.get("summary") if isinstance(auto_policy.get("summary"), dict) else {}),
+            **summarize_active_policy(promoted_active),
+        }
+    auto_policy["promoted_runtime"] = summarize_promoted_runtime_policy_state(promoted_runtime_state)
     strategy_review_builder = globals().get("build_strategy_review")
     strategy_review = {}
     if callable(strategy_review_builder):
@@ -3925,15 +3945,17 @@ def main() -> int:
         strategy_review_history=strategy_review_history,
     )
     promoted_candidates = list(candidate_gate.get("promoted_now") or [])
-    if promoted_candidates:
-        active_base = auto_policy.get("active_base") if isinstance(auto_policy.get("active_base"), dict) else {}
-        promoted_active = apply_promoted_candidates(active_base, promoted_candidates)
+    promoted_runtime_state = build_promoted_runtime_policy_state(promoted_runtime_state, promoted_candidates, trade_date)
+    durable_promoted_candidates = promoted_runtime_candidates(promoted_runtime_state)
+    if durable_promoted_candidates:
+        promoted_active = apply_promoted_candidates(generated_active_base, durable_promoted_candidates)
         auto_policy["active_base"] = promoted_active
         auto_policy["active"] = dict(promoted_active)
         auto_policy["summary"] = {
             **(auto_policy.get("summary") if isinstance(auto_policy.get("summary"), dict) else {}),
             **summarize_active_policy(promoted_active),
         }
+    auto_policy["promoted_runtime"] = summarize_promoted_runtime_policy_state(promoted_runtime_state)
     auto_policy["candidate_gate"] = candidate_gate.get("summary") if isinstance(candidate_gate.get("summary"), dict) else {}
     auto_policy = merge_watchdog_overrides(auto_policy, load_json(manifest_root / "latest_auto_policy.json"))
     optimizer_candidates = build_optimizer_candidates(research_day, research_all, scenario_consensus)
@@ -4020,8 +4042,10 @@ def main() -> int:
         markdown_top=markdown_top,
     )
     write_json(analysis_dir / "candidate_auto_policy.json", candidate_gate)
+    write_json(analysis_dir / "promoted_runtime_policy.json", promoted_runtime_state)
     write_json(research_dir / "candidate_auto_policy.json", candidate_gate)
     write_json(candidate_state_path, candidate_gate)
+    write_json(promoted_runtime_policy_path, promoted_runtime_state)
 
     runtime_dir = project_root / "reports" / "runtime"
     shadow_rows = filter_trade_date(load_shadow_trades(run_dir), trade_date)
@@ -4035,6 +4059,7 @@ def main() -> int:
         research_dir=research_dir,
     )
     write_json(bundle_dir / "candidate_auto_policy.json", candidate_gate)
+    write_json(bundle_dir / "promoted_runtime_policy.json", promoted_runtime_state)
     manifest_payload = build_manifest_payload(
         trade_date=trade_date,
         overall=overall,
@@ -4064,6 +4089,7 @@ def main() -> int:
         if isinstance(strategy_review.get("top_models"), list):
             manifest_payload["entry_shadow_top"] = strategy_review.get("top_models")[:10]
     manifest_payload["candidate_gate"] = candidate_gate.get("summary") if isinstance(candidate_gate.get("summary"), dict) else {}
+    manifest_payload["promoted_runtime"] = summarize_promoted_runtime_policy_state(promoted_runtime_state)
     write_json(bundle_dir / "manifest.json", manifest_payload)
 
     nightly_cycle_status = build_nightly_cycle_status(

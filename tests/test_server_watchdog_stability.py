@@ -18,6 +18,34 @@ import watchdog_policy as wp  # noqa: E402
 
 
 class ServerWatchdogStabilityTest(unittest.TestCase):
+    def test_check_automation_health_flags_timer_and_dirty_autoupdate(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            status_path = Path(tmp) / "git_autoupdate_status.json"
+            status_path.write_text(
+                __import__("json").dumps(
+                    {
+                        "updated_at": "2026-06-16 04:13:27",
+                        "outcome": "skipped",
+                        "reason": "dirty_worktree",
+                        "pending_restart_exists": False,
+                        "rollout_lock_exists": False,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch.object(sw, "unit_enabled", side_effect=lambda name: name != "3pips-daily-autonomy.timer"), patch.object(
+                sw, "service_active", side_effect=lambda name: name != "3pips-daily-autonomy.timer"
+            ):
+                issues = sw.check_automation_health(
+                    ["3pips-watchdog.timer", "3pips-daily-autonomy.timer"],
+                    status_path,
+                    7200,
+                )
+
+        self.assertIn("timer_disabled[3pips-daily-autonomy.timer]", issues)
+        self.assertIn("timer_inactive[3pips-daily-autonomy.timer]", issues)
+        self.assertIn("git_autoupdate_blocked[dirty_worktree]", issues)
+
     def test_overrides_notes_stay_stable_when_only_open_pnl_moves(self) -> None:
         closed_rows = [
             {
@@ -170,6 +198,8 @@ class ServerWatchdogStabilityTest(unittest.TestCase):
                 ), patch.object(
                     sw, "check_run_health", return_value=[]
                 ), patch.object(
+                    sw, "check_automation_health", return_value=[]
+                ), patch.object(
                     sw, "send_email", return_value=(False, "disabled_missing_smtp")
                 ), patch.object(
                     sw.subprocess, "run", return_value=SimpleNamespace(stdout="test-host\n", returncode=0, stderr="")
@@ -190,6 +220,56 @@ class ServerWatchdogStabilityTest(unittest.TestCase):
             self.assertEqual(second.get("status"), "incident")
             self.assertEqual(second.get("dashboard_fail_count"), 2)
             self.assertIn("dashboard_down", second.get("last_summary", ""))
+
+    def test_main_skips_restart_for_automation_only_issue(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            project_root = Path(tmp) / "project"
+            runtime_dir = project_root / "reports" / "runtime"
+            run_dir = project_root / "reports" / "paper_runs" / "v7_live_20260525"
+            runtime_dir.mkdir(parents=True)
+            run_dir.mkdir(parents=True)
+            state_path = runtime_dir / "server_watchdog_state.json"
+            log_path = runtime_dir / "server_watchdog.log"
+            argv = [
+                "server_watchdog.py",
+                "--project-root",
+                str(project_root),
+                "--state-path",
+                str(state_path),
+                "--log-path",
+                str(log_path),
+            ]
+
+            with patch.object(sw, "load_active_rollout_lock", return_value=({}, 0.0)), patch.object(
+                sw, "refresh_intraday_killer_policy", return_value=(False, "trade_date=2026-06-15")
+            ), patch.object(
+                sw, "should_check_daily_autonomy", return_value=False
+            ), patch.object(
+                sw, "service_active", return_value=True
+            ), patch.object(
+                sw, "service_age_sec", return_value=999.0
+            ), patch.object(
+                sw, "dashboard_ok", return_value=(True, "http_200")
+            ), patch.object(
+                sw, "check_run_health", return_value=[]
+            ), patch.object(
+                sw, "check_automation_health", return_value=["timer_disabled[3pips-git-autoupdate.timer]"]
+            ), patch.object(
+                sw, "restart_service"
+            ) as restart_mock, patch.object(
+                sw, "send_email", return_value=(False, "disabled_missing_smtp")
+            ), patch.object(
+                sw.subprocess, "run", return_value=SimpleNamespace(stdout="test-host\n", returncode=0, stderr="")
+            ), patch.object(
+                sys, "argv", argv
+            ):
+                rc = sw.main()
+
+            self.assertEqual(rc, 1)
+            restart_mock.assert_not_called()
+            payload = __import__("json").loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload.get("status"), "incident")
+            self.assertIn("timer_disabled", payload.get("last_summary", ""))
 
 
 if __name__ == "__main__":
