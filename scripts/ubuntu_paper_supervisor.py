@@ -171,6 +171,7 @@ class Supervisor:
     def bot_args(self, name: str, secids: list[str]) -> list[str]:
         args = [
             "src/multi_futures_paper.py",
+            "--paper-only",
             "--secids",
             *secids,
             "--runtime-sec", "86400",

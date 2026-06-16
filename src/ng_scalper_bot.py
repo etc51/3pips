@@ -10,7 +10,7 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Iterable, Literal
 
 import requests
 
@@ -79,6 +79,10 @@ def round_to_step(value: float, step: float) -> float:
 
 def find_tbank_token() -> str:
     candidates: list[tuple[str, str]] = []
+    for name in ["TBANK_TOKEN_READONLY", "TBANK_TOKEN", "TINKOFF_TOKEN"]:
+        value = os.environ.get(name)
+        if value:
+            candidates.append((f"env:{name}", value.strip()))
     desktop = Path.home() / "Desktop"
     if desktop.exists():
         for path in sorted(desktop.glob("*.txt")):
@@ -88,10 +92,6 @@ def find_tbank_token() -> str:
                 continue
             for token in re.findall(r"(?i)(?:t\.[A-Za-z0-9_-]{20,}|[A-Za-z0-9_-]{40,})", text):
                 candidates.append((f"file:{path.name}", token.strip()))
-    for name in ["TBANK_TOKEN", "TBANK_TOKEN_READONLY", "TINKOFF_TOKEN"]:
-        value = os.environ.get(name)
-        if value:
-            candidates.append((f"env:{name}", value.strip()))
 
     seen: set[str] = set()
     last_error = "token_not_found"
@@ -651,8 +651,15 @@ def run(args: argparse.Namespace) -> None:
     print(f"{now_str()} done attempts={attempts} closed_net={closed_net:.2f} log={log_path}")
 
 
-def parse_args() -> argparse.Namespace:
+def require_paper_only(paper_only: bool, script_name: str) -> None:
+    if paper_only:
+        return
+    raise SystemExit(f"{script_name} is paper-only. Pass --paper-only to confirm paper execution.")
+
+
+def parse_args(argv: Iterable[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Paper scalper for MOEX NG futures with fixed trailing stop.")
+    parser.add_argument("--paper-only", action="store_true", required=True)
     parser.add_argument("--source", choices=["moex-iss", "tbank-stream"], default="moex-iss")
     parser.add_argument("--secid", default="NGK6")
     parser.add_argument("--direction", choices=["long", "short", "auto", "impulse"], default="auto")
@@ -676,7 +683,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--commission-side-rub", type=float, default=None)
     parser.add_argument("--max-runtime-sec", type=float, default=0.0)
     parser.add_argument("--log", default=str(REPORTS / "ng_scalper_paper_trades.csv"))
-    return parser.parse_args()
+    args = parser.parse_args(list(argv) if argv is not None else None)
+    require_paper_only(bool(args.paper_only), "ng_scalper_bot.py")
+    return args
 
 
 if __name__ == "__main__":

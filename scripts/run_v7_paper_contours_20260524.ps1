@@ -43,6 +43,7 @@ function Start-Portfolio {
     $stderr = Join-Path $script:RunDir "${Name}_multi_paper.err.log"
     $args = @(
         "src\multi_futures_paper.py",
+        "--paper-only",
         "--secids"
     ) + $Secids + @(
         "--runtime-sec", "86400",

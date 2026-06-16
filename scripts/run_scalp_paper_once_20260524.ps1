@@ -87,6 +87,7 @@ try {
     $stderr = Join-Path $RunDir "multi_paper_live_v2.err.log"
     $strongArgs = @(
         "src\multi_futures_paper.py",
+        "--paper-only",
         "--secids", "LKM6", "PTU6",
         "--runtime-sec", "32100",
         "--report-sec", "600",
@@ -108,6 +109,7 @@ try {
     $weakStderr = Join-Path $RunDir "weak_multi_paper_live_v2.err.log"
     $weakArgs = @(
         "src\multi_futures_paper.py",
+        "--paper-only",
         "--secids", "S1M6", "GDM6",
         "--runtime-sec", "32100",
         "--report-sec", "600",
@@ -129,6 +131,7 @@ try {
     $rejectedStderr = Join-Path $RunDir "rejected_multi_paper_live_v2.err.log"
     $rejectedArgs = @(
         "src\multi_futures_paper.py",
+        "--paper-only",
         "--secids", "CEM6", "FSM6", "S1U6",
         "--runtime-sec", "32100",
         "--report-sec", "600",
@@ -150,6 +153,7 @@ try {
     $neoStderr = Join-Path $RunDir "neo_multi_paper_live_v2.err.log"
     $neoArgs = @(
         "src\multi_futures_paper.py",
+        "--paper-only",
         "--secids", "AMZNperpA",
         "--runtime-sec", "32100",
         "--report-sec", "600",

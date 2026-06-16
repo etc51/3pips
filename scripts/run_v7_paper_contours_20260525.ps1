@@ -61,6 +61,7 @@ function Start-Portfolio {
     if (-not (Test-Path -LiteralPath $stderr)) { New-Item -ItemType File -Path $stderr -Force | Out-Null }
     $args = @(
         "src\multi_futures_paper.py",
+        "--paper-only",
         "--secids"
     ) + $Secids + @(
         "--runtime-sec", "86400",

@@ -16,7 +16,7 @@ from pandas.errors import ParserError
 import statsmodels.api as sm
 
 from leadlag_ng_moex import MONTH_CODES, REPORTS, ROOT, ensure_dirs, secid_for_month
-from ng_scalper_bot import find_tbank_token, quotation_to_float, tbank_find_future
+from ng_scalper_bot import find_tbank_token, quotation_to_float, require_paper_only, tbank_find_future
 
 
 SNAPSHOTS_PATH = REPORTS / "live_orderbook_snapshots.csv"
@@ -1268,7 +1268,7 @@ def parse_args(argv: Iterable[str] | None = None) -> Config:
     parser.add_argument("--max-target-spread-ticks", type=float, default=4.0)
     parser.add_argument("--max-plus1-spread-ticks", type=float, default=6.0)
     parser.add_argument("--min-touch-size", type=float, default=1.0)
-    parser.add_argument("--paper-only", action="store_true", default=True)
+    parser.add_argument("--paper-only", action="store_true", required=True)
     parser.add_argument("--reset-paper-day", action="store_true")
     parser.add_argument("--force-reset-open-positions", action="store_true")
     parser.add_argument("--run-id", default="")
@@ -1278,6 +1278,7 @@ def parse_args(argv: Iterable[str] | None = None) -> Config:
 
 def main(argv: Iterable[str] | None = None) -> int:
     cfg = parse_args(argv)
+    require_paper_only(cfg.paper_only, "leadlag_ng_paper_orderbook_monitor.py")
     ensure_dirs()
     reset_paper_day(cfg)
     if cfg.once:

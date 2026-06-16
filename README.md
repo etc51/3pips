@@ -125,13 +125,13 @@ python src/screener.py --date 2026-05-21 --family NGM
 Первый безопасный слой для проверки ручной идеи с коротким стопом и трейлингом:
 
 ```powershell
-python src/ng_scalper_bot.py --secid NGK6 --direction auto --qty 30 --stop-ticks 3 --trail-ticks 3 --max-attempts 5 --commission-side-rub 157.71
+python src/ng_scalper_bot.py --paper-only --secid NGK6 --direction auto --qty 30 --stop-ticks 3 --trail-ticks 3 --max-attempts 5 --commission-side-rub 157.71
 ```
 
 Вариант через живой stream T-Банк SDK:
 
 ```powershell
-python src/ng_scalper_bot.py --source tbank-stream --secid NGK6 --direction auto --qty 30 --stop-ticks 3 --trail-ticks 3 --max-attempts 5 --commission-side-rub 157.71
+python src/ng_scalper_bot.py --paper-only --source tbank-stream --secid NGK6 --direction auto --qty 30 --stop-ticks 3 --trail-ticks 3 --max-attempts 5 --commission-side-rub 157.71
 ```
 
 Что делает:
@@ -147,8 +147,8 @@ python src/ng_scalper_bot.py --source tbank-stream --secid NGK6 --direction auto
 Для ручной проверки направления:
 
 ```powershell
-python src/ng_scalper_bot.py --secid NGK6 --direction long --qty 30 --stop-ticks 3 --trail-ticks 3 --max-attempts 5 --commission-side-rub 157.71
-python src/ng_scalper_bot.py --secid NGK6 --direction short --qty 30 --stop-ticks 3 --trail-ticks 3 --max-attempts 5 --commission-side-rub 157.71
+python src/ng_scalper_bot.py --paper-only --secid NGK6 --direction long --qty 30 --stop-ticks 3 --trail-ticks 3 --max-attempts 5 --commission-side-rub 157.71
+python src/ng_scalper_bot.py --paper-only --secid NGK6 --direction short --qty 30 --stop-ticks 3 --trail-ticks 3 --max-attempts 5 --commission-side-rub 157.71
 ```
 
 Это paper-режим без реальных заявок. Боевой T-Банк executor надо подключать отдельным шагом после сверки бумажного журнала с ручной логикой.

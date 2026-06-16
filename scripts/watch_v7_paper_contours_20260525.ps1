@@ -167,6 +167,7 @@ function New-BotArgs {
     )
     $args = @(
         "src\multi_futures_paper.py",
+        "--paper-only",
         "--secids"
     ) + $Secids + @(
         "--runtime-sec", "86400",

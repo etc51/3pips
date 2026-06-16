@@ -26,6 +26,7 @@ from ng_scalper_bot import (
     open_position,
     pnl_rub,
     quotation_to_float,
+    require_paper_only,
     round_to_step,
     tbank_find_future,
     update_stop,
@@ -2690,8 +2691,9 @@ def entry_shadow_log_path(args: argparse.Namespace) -> Path:
     return trade_path.with_name(f"{trade_log_group(trade_path)}_entry_shadow_models.csv")
 
 
-def main() -> None:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
+    parser.add_argument("--paper-only", action="store_true", required=True)
     parser.add_argument("--secids", nargs="+", default=["NGK6", "NGM6", "BMM6", "VBM6", "GZM6", "S1M6"])
     parser.add_argument("--runtime-sec", type=int, default=3600)
     parser.add_argument("--report-sec", type=int, default=600)
@@ -2726,7 +2728,13 @@ def main() -> None:
     parser.add_argument("--disable-auto-roll", action="store_true")
     parser.add_argument("--auto-policy-path", default=str(REPORTS / "autonomy" / "latest" / "latest_auto_policy.json"))
     parser.add_argument("--auto-policy-reload-sec", type=float, default=AUTO_POLICY_RELOAD_SEC)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    require_paper_only(bool(args.paper_only), "multi_futures_paper.py")
+    return args
+
+
+def main() -> None:
+    args = parse_args()
 
     from t_tech.invest import Client, InstrumentIdType
 
